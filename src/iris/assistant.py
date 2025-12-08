@@ -232,12 +232,18 @@ class VoiceAssistant:
         try:
             while True:
                 try:
-                    # 1. Listen for voice input
+                    # 1. Listen for voice input with level visualization
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = True
                     self.status_manager.update_status_bar(self.speech_pipeline)
 
-                    audio_path = self.recorder.listen()
+                    def on_audio_level(level: float):
+                        """Update audio level display."""
+                        self.display_manager.update_audio_level_display(
+                            level, self.speech_pipeline
+                        )
+
+                    audio_path = self.recorder.listen(on_level=on_audio_level)
 
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False

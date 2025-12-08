@@ -103,6 +103,60 @@ class StatusManager:
         if self.status_bar_live and self.status_bar_active:
             self.status_bar_live.update(self.make_status_bar(speech_pipeline))
 
+    def make_status_bar_with_level(self, level: float, speech_pipeline=None) -> Panel:
+        """
+        Create the bottom status bar with audio level indicator.
+
+        Args:
+            level: Audio level from 0.0 to 1.0
+            speech_pipeline: Optional SpeechPipeline to check for speech activity
+
+        Returns:
+            Panel with status indicators and level meter
+        """
+        # Create slim level meter (thin bar characters)
+        bar_width = 12
+        filled = int(level * bar_width)
+
+        # Color based on level
+        if level < 0.3:
+            bar_color = "red"
+        elif level < 0.7:
+            bar_color = "green"
+        else:
+            bar_color = "yellow"
+
+        # Use thin bar characters for slim appearance
+        level_text = Text()
+        level_text.append("─" * filled, style=bar_color)
+        level_text.append("─" * (bar_width - filled), style="dim")
+
+        # Build status parts: spinner + level bar
+        status_parts = [self.spinner_listening, level_text]
+
+        # Check speech pipeline activities
+        if speech_pipeline:
+            if (
+                not speech_pipeline.text_queue.empty()
+                or speech_pipeline.is_generating_flag.is_set()
+                or not speech_pipeline.audio_queue.empty()
+                or speech_pipeline.is_speaking_flag.is_set()
+            ):
+                status_parts.append(self.spinner_speaking)
+
+        # Create table to show items side by side
+        table = Table.grid(padding=(0, 2))
+        for part in status_parts:
+            table.add_column()
+        table.add_row(*status_parts)
+
+        return Panel(
+            Align.center(table),
+            border_style="dim",
+            style="on #1a1a1a",
+            padding=(0, 2),
+        )
+
     def start(self, speech_pipeline=None):
         """
         Start the status bar display.
@@ -140,6 +194,23 @@ class DisplayManager:
         """
         self.console = console
         self.status_manager = status_manager
+
+    def update_audio_level_display(self, level: float, speech_pipeline=None):
+        """
+        Update status bar to show audio input level visualization.
+
+        Args:
+            level: Audio level from 0.0 to 1.0
+            speech_pipeline: Optional SpeechPipeline to check for speech activity
+        """
+        # Update the status bar with the level indicator
+        if (
+            self.status_manager.status_bar_live
+            and self.status_manager.status_bar_active
+        ):
+            self.status_manager.status_bar_live.update(
+                self.status_manager.make_status_bar_with_level(level, speech_pipeline)
+            )
 
     def show_user_message(self, text: str):
         """
