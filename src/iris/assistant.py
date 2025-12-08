@@ -25,6 +25,7 @@ class VoiceAssistant:
         whisper_model: str = "small",
         whisper_device: str = "auto",
         llm_model: str = "qwen3:1.7b",
+        deep_model: str = "qwen3:14b",
         sample_rate: int = 16000,
         silence_threshold: float = 0.02,
         silence_duration: float = 2.5,
@@ -37,7 +38,8 @@ class VoiceAssistant:
         Args:
             whisper_model: Whisper model size (tiny, base, small, medium, large)
             whisper_device: Device for Whisper (cpu, cuda, or auto)
-            llm_model: Ollama model name
+            llm_model: Ollama model name for shallow (fast) responses
+            deep_model: Ollama model name for deep (complex) questions
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
             silence_duration: Duration of silence to stop recording
@@ -51,7 +53,7 @@ class VoiceAssistant:
         self.recorder = AudioRecorder(sample_rate, silence_threshold, silence_duration)
         self.player = AudioPlayer()
         self.transcriber = WhisperTranscriber(whisper_model, whisper_device)
-        self.conversation = ConversationManager(llm_model)
+        self.conversation = ConversationManager(llm_model, deep_model)
 
         # Initialize TTS
         self.tts_generator = KokoroGenerator(tts_voice, tts_speed)
@@ -64,6 +66,38 @@ class VoiceAssistant:
         print("Voice Assistant initialized!")
         print()
 
+    def handle_think_different(self, prompt: str) -> str | None:
+        """
+        Handle "think differently" trigger - re-answer the previous query with deep model.
+
+        Args:
+            prompt: User's latest message
+
+        Returns:
+            The response from deep model, or None if not triggered
+        """
+        if not self.conversation.is_think_different_trigger(prompt):
+            return None
+
+        # Get the previous user query to re-answer
+        previous_query = self.conversation.get_last_user_query()
+        if not previous_query:
+            # No previous query to re-answer
+            return None
+
+        # Remove the last exchange so we can re-answer
+        self.conversation.remove_last_exchange()
+
+        # Acknowledge and switch to deep model
+        self.console.print("[dim]Thinking differently...[/dim]")
+        ack_text = "Let me think about that differently."
+        self.speech_pipeline.queue_speech(ack_text)
+        self.speech_pipeline.wait_for_speech()
+
+        # Switch to deep model and re-answer the previous query
+        self.conversation.use_deep_model()
+        return previous_query  # Return the query to re-answer
+
     def chat(self, prompt: str) -> str:
         """
         Send prompt to LLM, stream response, and speak it.
@@ -75,6 +109,12 @@ class VoiceAssistant:
             LLM response text
         """
         try:
+            # Check for "think differently" trigger
+            reattempt_query = self.handle_think_different(prompt)
+            if reattempt_query:
+                # Re-answer the previous query with deep model
+                prompt = reattempt_query
+
             # Set thinking status
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = True

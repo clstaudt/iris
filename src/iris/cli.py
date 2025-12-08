@@ -29,7 +29,14 @@ def main():
         help="Whisper model size (default: small)",
     )
     parser.add_argument(
-        "--llm-model", default="qwen3:1.7b", help="Ollama model name (default: qwen3:1.7b)"
+        "--llm-model",
+        default="qwen3:1.7b",
+        help="Ollama model for shallow/fast responses (default: qwen3:1.7b)",
+    )
+    parser.add_argument(
+        "--deep-model",
+        default="qwen3:14b",
+        help="Ollama model for deep/complex questions (default: qwen3:14b)",
     )
     parser.add_argument(
         "--device",
@@ -46,6 +53,7 @@ def main():
             whisper_model=args.whisper_model,
             whisper_device=args.device,
             llm_model=args.llm_model,
+            deep_model=args.deep_model,
         )
 
         assistant.run_loop()

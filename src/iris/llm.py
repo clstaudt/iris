@@ -14,14 +14,22 @@ warnings.filterwarnings("ignore")
 class ConversationManager:
     """Manages LLM conversations with context and summarization."""
 
-    def __init__(self, model: str = "qwen3:1.7b"):
+    def __init__(
+        self,
+        model: str = "qwen3:1.7b",
+        deep_model: str = "qwen3:14b",
+    ):
         """
         Initialize conversation manager.
 
         Args:
-            model: Ollama model name
+            model: Ollama model name for shallow (fast) responses
+            deep_model: Ollama model name for deep (complex) questions
         """
         self.model = model
+        self.shallow_model = model
+        self.deep_model = deep_model
+        self.active_model = model  # Currently active model
         self.conversation_history = []
         self.max_context_tokens = self._get_model_context_length()
 
@@ -35,7 +43,54 @@ class ConversationManager:
             print("Make sure Ollama is running: brew services start ollama")
             raise
 
+        print(f"Shallow model: {model}")
+        print(f"Deep model: {deep_model}")
         print(f"Model context length: {self.max_context_tokens:,} tokens")
+
+    def is_think_different_trigger(self, prompt: str) -> bool:
+        """
+        Check if the user said "think differently" to trigger deep thinking.
+
+        Args:
+            prompt: User's latest message
+
+        Returns:
+            True if user wants to trigger deep thinking mode
+        """
+        return "think differently" in prompt.lower()
+
+    def get_last_user_query(self) -> str | None:
+        """
+        Get the last user query from conversation history.
+
+        Returns:
+            The last user message, or None if not found
+        """
+        for msg in reversed(self.conversation_history):
+            if msg["role"] == "user":
+                return msg["content"]
+        return None
+
+    def remove_last_exchange(self):
+        """Remove the last user-assistant exchange from history."""
+        # Remove last assistant message
+        for i in range(len(self.conversation_history) - 1, -1, -1):
+            if self.conversation_history[i]["role"] == "assistant":
+                self.conversation_history.pop(i)
+                break
+        # Remove last user message
+        for i in range(len(self.conversation_history) - 1, -1, -1):
+            if self.conversation_history[i]["role"] == "user":
+                self.conversation_history.pop(i)
+                break
+
+    def use_deep_model(self):
+        """Temporarily switch to the deep model for complex questions."""
+        self.active_model = self.deep_model
+
+    def use_shallow_model(self):
+        """Switch back to the shallow model for fast responses."""
+        self.active_model = self.shallow_model
 
     def _get_model_context_length(self) -> int:
         """
@@ -260,8 +315,8 @@ class ConversationManager:
         )
         messages.append({"role": "user", "content": f"{prompt}\n\n{rules_reminder}"})
 
-        # Stream the response
-        stream = ollama.chat(model=self.model, messages=messages, stream=True)
+        # Stream the response using the currently active model
+        stream = ollama.chat(model=self.active_model, messages=messages, stream=True)
 
         full_response = []
         for chunk in stream:
@@ -275,4 +330,7 @@ class ConversationManager:
 
         self.conversation_history.append({"role": "user", "content": prompt})
         self.conversation_history.append({"role": "assistant", "content": answer_clean})
+
+        # Switch back to shallow model after response
+        self.use_shallow_model()
 
