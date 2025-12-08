@@ -19,8 +19,6 @@
     <br />
     <a href="#usage">Usage</a>
     ·
-    <a href="#configuration">Configuration</a>
-    ·
     <a href="#troubleshooting">Troubleshooting</a>
   </p>
 
@@ -45,7 +43,6 @@
       </ul>
     </li>
     <li><a href="#usage">Usage</a></li>
-    <li><a href="#configuration">Configuration</a></li>
     <li><a href="#troubleshooting">Troubleshooting</a></li>
     <li><a href="#acknowledgments">Acknowledgments</a></li>
     <li><a href="#license">License</a></li>
@@ -94,13 +91,7 @@ The assistant combines three powerful technologies into a seamless conversationa
    ollama pull qwen3:8b
    ```
 
-3. **Kokoro TTS Models** — Download the required model files:
-
-   ```bash
-   mkdir -p ~/.iris/models
-   wget -O ~/.iris/models/kokoro-v1.0.onnx https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx
-   wget -O ~/.iris/models/voices-v1.0.bin https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin
-   ```
+On first run, Iris will prompt you to download the required TTS models (~360 MB).
 
 ### Installation
 
@@ -156,35 +147,14 @@ iris --device cpu
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
-<!-- CONFIGURATION -->
-
-## Configuration
-
-### Model Locations
-
-Iris searches for Kokoro TTS models in the following order:
-
-1. `$IRIS_MODELS_DIR` (if set)
-2. `~/.iris/models/`
-3. `~/.local/share/iris/models/`
-4. `./models/` (in current directory)
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `IRIS_MODELS_DIR` | Custom location for Kokoro TTS models |
-
-<p align="right">(<a href="#top">back to top</a>)</p>
-
 <!-- TROUBLESHOOTING -->
 
 ## Troubleshooting
 
 <details>
-<summary><b>"Could not find kokoro models"</b></summary>
+<summary><b>TTS model download failed</b></summary>
 
-Download the models as described in the [Prerequisites](#prerequisites) section, or see [models/README.md](models/README.md) for detailed instructions.
+If automatic download fails, you can manually download the models from [kokoro-tts releases](https://github.com/nazdridoy/kokoro-tts/releases) and place them in `~/.iris/models/`.
 </details>
 
 <details>
