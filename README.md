@@ -1,91 +1,133 @@
-# Iris Voice Assistant
+<div id="top"></div>
 
-A voice-controlled AI assistant that listens, understands, thinks, and speaks. Iris combines speech-to-text (Whisper), large language models (Ollama), and text-to-speech (Kokoro) into a seamless conversational interface.
+<!-- PROJECT LOGO -->
 
-## Features
+<br />
 
-- 🎤 **Voice Input**: Real-time microphone recording with automatic silence detection
-- 🧠 **Speech Recognition**: Powered by OpenAI's Whisper (supports GPU acceleration)
-- 💬 **Intelligent Conversation**: Uses Ollama for natural language understanding
-- 🗣️ **Natural Speech**: High-quality text-to-speech with Kokoro TTS
-- ⚡ **Parallel Processing**: Simultaneous speech generation and playback for fast response
-- 📊 **Rich UI**: Beautiful status indicators and conversation display
-- 🔄 **Context Management**: Automatic conversation summarization to stay within token limits
+<div align="center">
 
-## Architecture
+  <a href="#">
+    <img width="80%" src="img/iris-title.png" alt="iris - a local AI voice assistant">
+  </a>
 
-Iris is built with a modular architecture:
+  <p align="center">
+    A fully local voice assistant powered by Whisper, Ollama, and Kokoro TTS
+    <br />
+    <br />
+    <a href="#getting-started"><strong>Get Started »</strong></a>
+    <br />
+    <br />
+    <a href="#usage">Usage</a>
+    ·
+    <a href="#configuration">Configuration</a>
+    ·
+    <a href="#troubleshooting">Troubleshooting</a>
+  </p>
 
-- `audio.py` - Audio recording and playback
-- `transcription.py` - Whisper-based speech-to-text
-- `llm.py` - Conversation management with Ollama
-- `tts.py` - Text-to-speech pipeline with Kokoro
-- `ui.py` - Rich terminal UI components
-- `assistant.py` - Main coordinator orchestrating all components
-- `cli.py` - Command-line interface entry point
+</div>
 
-## Prerequisites
+<!-- TABLE OF CONTENTS -->
+
+<details>
+  <summary>Table of Contents</summary>
+  <ol>
+    <li>
+      <a href="#about-the-project">About The Project</a>
+      <ul>
+        <li><a href="#key-features">Key Features</a></li>
+      </ul>
+    </li>
+    <li>
+      <a href="#getting-started">Getting Started</a>
+      <ul>
+        <li><a href="#prerequisites">Prerequisites</a></li>
+        <li><a href="#installation">Installation</a></li>
+      </ul>
+    </li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="#configuration">Configuration</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li><a href="#acknowledgments">Acknowledgments</a></li>
+    <li><a href="#license">License</a></li>
+  </ol>
+</details>
+
+<!-- ABOUT THE PROJECT -->
+
+## About The Project
+
+Iris is a voice-controlled AI assistant that runs entirely on your local machine. It listens to your voice, transcribes your speech, thinks through a response using a local LLM, and speaks back to you—all without sending data to external servers.
+
+The assistant combines three powerful technologies into a seamless conversational interface:
+- **Speech-to-Text**: OpenAI's Whisper via faster-whisper with GPU acceleration
+- **Language Model**: Any Ollama-compatible model for intelligent responses
+- **Text-to-Speech**: Kokoro TTS for natural-sounding voice output
+
+<p align="right">(<a href="#top">back to top</a>)</p>
+
+### Key Features
+
+- 🎤 **Voice Input** — Real-time microphone recording with automatic silence detection
+- 🧠 **Local LLM** — Powered by Ollama, keeping all conversations private
+- 🗣️ **Natural Speech** — High-quality text-to-speech with Kokoro TTS
+- ⚡ **Fast Response** — Starts speaking while still thinking for natural conversation flow
+- 📊 **Rich Terminal UI** — Beautiful status indicators and conversation display
+- 🔄 **Conversation Memory** — Remembers context across your conversation
+- 🔒 **Fully Offline** — No internet required after initial setup
+
+<p align="right">(<a href="#top">back to top</a>)</p>
+
+<!-- GETTING STARTED -->
+
+## Getting Started
+
+### Prerequisites
 
 1. **Python 3.11+**
-2. **Ollama** - For LLM inference
+
+2. **Ollama** — For local LLM inference
+
    ```bash
+   # macOS
    brew install ollama
    brew services start ollama
    ollama pull qwen3:8b
    ```
-3. **Kokoro TTS** - For text-to-speech
+
+3. **Kokoro TTS Models** — Download the required model files:
+
    ```bash
-   pip install kokoro
+   mkdir -p ~/.iris/models
+   wget -O ~/.iris/models/kokoro-v1.0.onnx https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx
+   wget -O ~/.iris/models/voices-v1.0.bin https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin
    ```
-4. **Kokoro Models** - See [models/README.md](models/README.md) for download instructions
 
-## Installation
+### Installation
 
-### Using uv (recommended)
+| Package Manager | Command |
+|-----------------|---------|
+| **uv** (recommended) | `uv sync && uv run iris` |
+| **pip** | `pip install -e . && iris` |
 
-```bash
-# Clone or navigate to the iris directory
-cd /Users/cls/Documents/Work/RnD/iris
+<p align="right">(<a href="#top">back to top</a>)</p>
 
-# Install dependencies
-uv sync
-
-# Run iris
-uv run iris
-```
-
-### Using pip
-
-```bash
-# Install in development mode
-pip install -e .
-
-# Run iris
-iris
-```
+<!-- USAGE -->
 
 ## Usage
 
-### Basic Usage
-
-Simply run iris to start the voice assistant:
+Start the voice assistant:
 
 ```bash
 iris
 ```
 
-The assistant will:
-1. Listen for your voice input
-2. Transcribe your speech to text
-3. Send it to the LLM for processing
-4. Stream the response while simultaneously generating speech
-5. Speak the response aloud
+The assistant will listen for your voice, transcribe what you say, generate a response, and speak it back to you.
 
 Press `Ctrl+C` to exit.
 
 ### Command-line Options
 
-```bash
+```
 iris --help
 
 Options:
@@ -99,20 +141,22 @@ Options:
 
 ### Examples
 
-Use a larger Whisper model for better accuracy:
 ```bash
+# Better transcription accuracy
 iris --whisper-model medium
-```
 
-Use a different LLM:
-```bash
+# Different LLM
 iris --llm-model llama3:8b
-```
 
-Force CPU for Whisper:
-```bash
+# Force CPU for Whisper
 iris --device cpu
 ```
+
+<p align="right">(<a href="#top">back to top</a>)</p>
+
+<p align="right">(<a href="#top">back to top</a>)</p>
+
+<!-- CONFIGURATION -->
 
 ## Configuration
 
@@ -125,104 +169,66 @@ Iris searches for Kokoro TTS models in the following order:
 3. `~/.local/share/iris/models/`
 4. `./models/` (in current directory)
 
-See [models/README.md](models/README.md) for detailed setup instructions.
-
 ### Environment Variables
 
-- `IRIS_MODELS_DIR` - Custom location for Kokoro TTS models
+| Variable | Description |
+|----------|-------------|
+| `IRIS_MODELS_DIR` | Custom location for Kokoro TTS models |
 
-## How It Works
+<p align="right">(<a href="#top">back to top</a>)</p>
 
-### Conversation Flow
-
-1. **Listening**: Waits for speech, then records until silence is detected
-2. **Understanding**: Transcribes audio using Whisper
-3. **Thinking**: Streams response from LLM
-4. **Speaking**: Generates and plays speech in parallel with streaming
-
-### Parallel Speech Pipeline
-
-Iris uses a sophisticated pipeline for responsive speech:
-
-```
-Text chunks → [Generation Queue] → TTS Worker → [Audio Queue] → Playback Worker
-```
-
-This allows the assistant to start speaking while still generating the rest of the response.
-
-### Context Management
-
-The assistant automatically manages conversation context:
-- Tracks token usage for all messages
-- Summarizes old messages when approaching context limit
-- Keeps recent conversation intact for coherent responses
-
-## Development
-
-### Project Structure
-
-```
-iris/
-├── src/iris/
-│   ├── __init__.py
-│   ├── cli.py          # Entry point
-│   ├── assistant.py    # Main coordinator
-│   ├── audio.py        # Recording + playback
-│   ├── transcription.py # Whisper STT
-│   ├── llm.py          # Ollama conversation
-│   ├── tts.py          # Kokoro TTS pipeline
-│   └── ui.py           # Terminal UI
-├── models/             # TTS model files
-├── tests/              # Test suite
-├── pyproject.toml      # Project configuration
-└── README.md
-```
-
-### Running Tests
-
-```bash
-uv run pytest
-```
+<!-- TROUBLESHOOTING -->
 
 ## Troubleshooting
 
-### "kokoro-tts CLI not found"
+<details>
+<summary><b>"Could not find kokoro models"</b></summary>
 
-Install kokoro:
-```bash
-pip install kokoro
-```
+Download the models as described in the [Prerequisites](#prerequisites) section, or see [models/README.md](models/README.md) for detailed instructions.
+</details>
 
-### "Could not find kokoro models"
-
-Download the models as described in [models/README.md](models/README.md).
-
-### "Ollama connection failed"
+<details>
+<summary><b>"Ollama connection failed"</b></summary>
 
 Make sure Ollama is running:
 ```bash
 brew services start ollama
 ```
+</details>
 
-### Poor transcription accuracy
+<details>
+<summary><b>Poor transcription accuracy</b></summary>
 
 Try a larger Whisper model:
 ```bash
 iris --whisper-model medium
 ```
+</details>
 
-### Audio issues on macOS
+<details>
+<summary><b>Audio issues on macOS</b></summary>
 
-Grant microphone permissions to your terminal in System Preferences → Security & Privacy → Microphone.
+Grant microphone permissions to your terminal in **System Preferences → Security & Privacy → Microphone**.
+</details>
 
-## Credits
+<p align="right">(<a href="#top">back to top</a>)</p>
 
-- **Whisper**: OpenAI's speech recognition model
-- **Ollama**: Local LLM inference
-- **Kokoro**: High-quality TTS engine
-- **Rich**: Terminal UI framework
+<!-- ACKNOWLEDGMENTS -->
+
+## Acknowledgments
+
+- [Whisper](https://github.com/openai/whisper) — OpenAI's speech recognition model
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2-based Whisper implementation
+- [Ollama](https://ollama.ai/) — Local LLM inference
+- [Kokoro TTS](https://github.com/nazdridoy/kokoro-tts) — High-quality text-to-speech engine
+- [Rich](https://github.com/Textualize/rich) — Terminal UI framework
+
+<p align="right">(<a href="#top">back to top</a>)</p>
+
+<!-- LICENSE -->
 
 ## License
 
 This project is provided as-is for personal and educational use.
 
+<p align="right">(<a href="#top">back to top</a>)</p>
