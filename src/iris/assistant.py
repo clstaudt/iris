@@ -22,9 +22,9 @@ class VoiceAssistant:
 
     def __init__(
         self,
-        whisper_model: str = "base",
+        whisper_model: str = "small",
         whisper_device: str = "auto",
-        llm_model: str = "qwen3:8b",
+        llm_model: str = "qwen3:1.7b",
         sample_rate: int = 16000,
         silence_threshold: float = 0.02,
         silence_duration: float = 2.5,

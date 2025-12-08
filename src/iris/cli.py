@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Iris Voice Assistant CLI - Listen, transcribe, chat with LLM, and speak response.
-Uses: faster-whisper (GPU), Ollama (qwen3:8b), and kokoro-tts
+Uses: faster-whisper (GPU), Ollama (qwen3:1.7b), and kokoro-tts
 """
 
 import argparse
@@ -24,12 +24,12 @@ def main():
     )
     parser.add_argument(
         "--whisper-model",
-        default="base",
+        default="small",
         choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
-        help="Whisper model size (default: base)",
+        help="Whisper model size (default: small)",
     )
     parser.add_argument(
-        "--llm-model", default="qwen3:8b", help="Ollama model name (default: qwen3:8b)"
+        "--llm-model", default="qwen3:1.7b", help="Ollama model name (default: qwen3:1.7b)"
     )
     parser.add_argument(
         "--device",

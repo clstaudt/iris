@@ -13,7 +13,7 @@ warnings.filterwarnings("ignore")
 class WhisperTranscriber:
     """Transcribes audio to text using Whisper model."""
 
-    def __init__(self, model: str = "base", device: str = "auto"):
+    def __init__(self, model: str = "small", device: str = "auto"):
         """
         Initialize Whisper transcriber.
 

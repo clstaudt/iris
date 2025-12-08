@@ -88,7 +88,7 @@ The assistant combines three powerful technologies into a seamless conversationa
    # macOS
    brew install ollama
    brew services start ollama
-   ollama pull qwen3:8b
+   ollama pull qwen3:1.7b
    ```
 
 On first run, Iris will prompt you to download the required TTS models (~360 MB).
@@ -123,9 +123,9 @@ iris --help
 
 Options:
   --whisper-model {tiny,base,small,medium,large-v2,large-v3}
-                        Whisper model size (default: base)
+                        Whisper model size (default: small)
   --llm-model LLM_MODEL
-                        Ollama model name (default: qwen3:8b)
+                        Ollama model name (default: qwen3:1.7b)
   --device {auto,cpu,cuda}
                         Device for Whisper (default: auto)
 ```

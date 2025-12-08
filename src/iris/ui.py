@@ -14,6 +14,25 @@ from rich.text import Text
 warnings.filterwarnings("ignore")
 
 
+class DynamicStatusBar:
+    """A renderable that re-evaluates status on each render."""
+
+    def __init__(self, status_manager, speech_pipeline=None):
+        """
+        Initialize dynamic status bar.
+
+        Args:
+            status_manager: StatusManager instance
+            speech_pipeline: Optional SpeechPipeline to check for speech activity
+        """
+        self.status_manager = status_manager
+        self.speech_pipeline = speech_pipeline
+
+    def __rich_console__(self, console, options):
+        """Yield fresh status bar on each render."""
+        yield self.status_manager.make_status_bar(self.speech_pipeline)
+
+
 class StatusManager:
     """Manages status bar with activity indicators."""
 
@@ -165,8 +184,9 @@ class StatusManager:
             speech_pipeline: Optional SpeechPipeline to check for speech activity
         """
         if not self.status_bar_active:
+            # Use DynamicStatusBar so speech state is re-evaluated on each refresh
             self.status_bar_live = Live(
-                self.make_status_bar(speech_pipeline),
+                DynamicStatusBar(self, speech_pipeline),
                 console=self.console,
                 refresh_per_second=10,
                 auto_refresh=True,

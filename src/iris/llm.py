@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore")
 class ConversationManager:
     """Manages LLM conversations with context and summarization."""
 
-    def __init__(self, model: str = "qwen3:8b"):
+    def __init__(self, model: str = "qwen3:1.7b"):
         """
         Initialize conversation manager.
 
@@ -186,14 +186,15 @@ class ConversationManager:
         Returns:
             Managed list of messages
         """
-        if not self.conversation_history:
-            return []
-
         system_prompt = {
             "role": "system",
-            "content": "You are a voice assistant. Your responses are spoken aloud "
+            "content": "You are Iris, a voice assistant. You respond to the name Iris "
+            "and identify as Iris when asked. Your responses are spoken aloud "
             "through text-to-speech.",
         }
+
+        if not self.conversation_history:
+            return [system_prompt]
 
         # Estimate current token usage
         messages = [system_prompt] + self.conversation_history
