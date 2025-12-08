@@ -84,23 +84,8 @@ class VoiceAssistant:
             full_response = []
             text_buffer = ""  # Buffer for speech chunks
             speech_chunks_sent = 0
-            text_received = threading.Event()
-
-            # Start a timer to say "just a moment" if thinking takes too long
-            def thinking_timeout():
-                import time
-
-                time.sleep(15)
-                if not text_received.is_set():
-                    # Still thinking after 15 seconds, speak a holding message
-                    self.speech_pipeline.queue_speech("Just a moment")
-
-            timeout_thread = threading.Thread(target=thinking_timeout, daemon=True)
-            timeout_thread.start()
 
             try:
-                first_chunk = True
-
                 for chunk_text in self.conversation.chat_stream(prompt):
                     full_response.append(chunk_text)
                     text_buffer += chunk_text
@@ -110,9 +95,6 @@ class VoiceAssistant:
 
                     # Update the display to show streaming message
                     if current_text.strip():
-                        if first_chunk:
-                            first_chunk = False
-                            text_received.set()
 
                         self.display_manager.update_streaming_display(
                             current_text, self.speech_pipeline
@@ -161,9 +143,6 @@ class VoiceAssistant:
                         if clean_text.strip():
                             self.speech_pipeline.queue_speech(clean_text)
                             speech_chunks_sent += 1
-
-                # Mark LLM as done
-                text_received.set()
 
                 # Clear thinking status now that LLM is done
                 with self.status_manager.status_lock:

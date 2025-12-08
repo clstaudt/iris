@@ -235,7 +235,7 @@ class KokoroGenerator:
                 input=text,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=120,
             )
 
             if result.returncode != 0:
