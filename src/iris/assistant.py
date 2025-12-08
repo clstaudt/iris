@@ -1,0 +1,283 @@
+"""Voice assistant coordinator that orchestrates all components."""
+
+import sys
+import threading
+import warnings
+from pathlib import Path
+
+from rich.console import Console
+from rich.panel import Panel
+
+from iris.audio import AudioPlayer, AudioRecorder
+from iris.llm import ConversationManager
+from iris.transcription import WhisperTranscriber
+from iris.tts import KokoroGenerator, SpeechPipeline
+from iris.ui import DisplayManager, StatusManager
+
+warnings.filterwarnings("ignore")
+
+
+class VoiceAssistant:
+    """Voice assistant with speech-to-text, LLM, and text-to-speech."""
+
+    def __init__(
+        self,
+        whisper_model: str = "base",
+        whisper_device: str = "auto",
+        llm_model: str = "qwen3:8b",
+        sample_rate: int = 16000,
+        silence_threshold: float = 0.02,
+        silence_duration: float = 2.5,
+        tts_voice: str = "af_bella",
+        tts_speed: float = 1.25,
+    ):
+        """
+        Initialize the voice assistant.
+
+        Args:
+            whisper_model: Whisper model size (tiny, base, small, medium, large)
+            whisper_device: Device for Whisper (cpu, cuda, or auto)
+            llm_model: Ollama model name
+            sample_rate: Audio sample rate for recording
+            silence_threshold: RMS threshold for silence detection
+            silence_duration: Duration of silence to stop recording
+            tts_voice: Voice for TTS
+            tts_speed: Speed for TTS
+        """
+        # Initialize console
+        self.console = Console()
+
+        # Initialize components
+        self.recorder = AudioRecorder(sample_rate, silence_threshold, silence_duration)
+        self.player = AudioPlayer()
+        self.transcriber = WhisperTranscriber(whisper_model, whisper_device)
+        self.conversation = ConversationManager(llm_model)
+
+        # Initialize TTS
+        self.tts_generator = KokoroGenerator(tts_voice, tts_speed)
+        self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
+
+        # Initialize UI
+        self.status_manager = StatusManager(self.console)
+        self.display_manager = DisplayManager(self.console, self.status_manager)
+
+        print("Voice Assistant initialized!")
+        print()
+
+    def chat(self, prompt: str) -> str:
+        """
+        Send prompt to LLM, stream response, and speak it.
+
+        Args:
+            prompt: User prompt text
+
+        Returns:
+            LLM response text
+        """
+        try:
+            # Set thinking status
+            with self.status_manager.status_lock:
+                self.status_manager.status_thinking = True
+            self.status_manager.update_status_bar(self.speech_pipeline)
+
+            # Stream the response and display it live
+            full_response = []
+            text_buffer = ""  # Buffer for speech chunks
+            speech_chunks_sent = 0
+            text_received = threading.Event()
+
+            # Start a timer to say "just a moment" if thinking takes too long
+            def thinking_timeout():
+                import time
+
+                time.sleep(15)
+                if not text_received.is_set():
+                    # Still thinking after 15 seconds, speak a holding message
+                    self.speech_pipeline.queue_speech("Just a moment")
+
+            timeout_thread = threading.Thread(target=thinking_timeout, daemon=True)
+            timeout_thread.start()
+
+            try:
+                first_chunk = True
+
+                for chunk_text in self.conversation.chat_stream(prompt):
+                    full_response.append(chunk_text)
+                    text_buffer += chunk_text
+
+                    # Build current response text
+                    current_text = "".join(full_response)
+
+                    # Update the display to show streaming message
+                    if current_text.strip():
+                        if first_chunk:
+                            first_chunk = False
+                            text_received.set()
+
+                        self.display_manager.update_streaming_display(
+                            current_text, self.speech_pipeline
+                        )
+
+                    # Check if we should speak accumulated text
+                    should_speak = False
+                    text_to_speak = ""
+
+                    # Determine threshold based on whether this is the first chunk
+                    if speech_chunks_sent == 0:
+                        # First chunk: start speaking sooner (150 chars)
+                        min_length = 150
+                        search_length = 250
+                        min_sentence_pos = 80
+                    else:
+                        # Subsequent chunks: use larger chunks (400 chars)
+                        min_length = 400
+                        search_length = 500
+                        min_sentence_pos = 200
+
+                    # First check for paragraph break
+                    if "\n\n" in text_buffer:
+                        parts = text_buffer.split("\n\n", 1)
+                        text_to_speak = parts[0].strip()
+                        text_buffer = parts[1] if len(parts) > 1 else ""
+                        should_speak = True
+
+                    # Otherwise check if we have enough text with sentence ending
+                    elif len(text_buffer) > min_length:
+                        search_text = text_buffer[:search_length]
+                        last_period = max(
+                            search_text.rfind(". "),
+                            search_text.rfind("! "),
+                            search_text.rfind("? "),
+                        )
+
+                        if last_period > min_sentence_pos:
+                            text_to_speak = text_buffer[: last_period + 1].strip()
+                            text_buffer = text_buffer[last_period + 2 :]
+                            should_speak = True
+
+                    # Speak the chunk (queue it for sequential playback)
+                    if should_speak and text_to_speak:
+                        clean_text = self.conversation.clean_markdown(text_to_speak)
+                        if clean_text.strip():
+                            self.speech_pipeline.queue_speech(clean_text)
+                            speech_chunks_sent += 1
+
+                # Mark LLM as done
+                text_received.set()
+
+                # Clear thinking status now that LLM is done
+                with self.status_manager.status_lock:
+                    self.status_manager.status_thinking = False
+
+                # Collect final answer
+                answer = "".join(full_response)
+
+                # Final update: show ONLY the message (without status bar)
+                self.display_manager.finalize_message(answer, self.speech_pipeline)
+
+            finally:
+                # Clear thinking status if still set
+                with self.status_manager.status_lock:
+                    self.status_manager.status_thinking = False
+
+                # Make sure status bar is running
+                if not self.status_manager.status_bar_active:
+                    self.status_manager.start(self.speech_pipeline)
+
+            # Speak any remaining text that wasn't spoken yet
+            if text_buffer.strip():
+                clean_text = self.conversation.clean_markdown(text_buffer)
+                if clean_text.strip():
+                    self.speech_pipeline.queue_speech(clean_text)
+
+            # Wait for all speech to complete
+            self.speech_pipeline.wait_for_speech()
+
+            return answer
+
+        except Exception as e:
+            # Clear all statuses on error
+            with self.status_manager.status_lock:
+                self.status_manager.status_thinking = False
+
+            # Make sure status bar is running
+            if not self.status_manager.status_bar_active:
+                self.status_manager.start(self.speech_pipeline)
+
+            error_msg = f"Error communicating with Ollama: {e}"
+            self.console.print(f"[red]Error:[/red] {error_msg}")
+            import traceback
+
+            traceback.print_exc()
+            return error_msg
+
+    def run_loop(self):
+        """Run the main voice assistant loop."""
+        self.console.clear()
+        self.console.print(
+            Panel.fit(
+                "[bold cyan]Voice Assistant[/bold cyan]\n"
+                f"[dim]Model: {self.conversation.model}[/dim]\n"
+                "[dim]Press Ctrl+C to exit[/dim]",
+                border_style="bright_blue",
+                padding=(1, 2),
+            )
+        )
+        self.console.print()
+        self.console.print()
+
+        # Initialize status bar at the bottom
+        self.status_manager.start(self.speech_pipeline)
+
+        try:
+            while True:
+                try:
+                    # 1. Listen for voice input
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_listening = True
+                    self.status_manager.update_status_bar(self.speech_pipeline)
+
+                    audio_path = self.recorder.listen()
+
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_listening = False
+                    self.status_manager.update_status_bar(self.speech_pipeline)
+
+                    if not audio_path:
+                        continue
+
+                    # 2. Transcribe with Whisper
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_understanding = True
+                    self.status_manager.update_status_bar(self.speech_pipeline)
+
+                    text = self.transcriber.transcribe(audio_path)
+
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_understanding = False
+                    self.status_manager.update_status_bar(self.speech_pipeline)
+
+                    if not text:
+                        continue
+
+                    # Display user message
+                    self.display_manager.show_user_message(text)
+
+                    # 3. Send to LLM (streams response and speaks it)
+                    self.chat(text)
+
+                    # Cleanup
+                    Path(audio_path).unlink(missing_ok=True)
+
+                except KeyboardInterrupt:
+                    self.status_manager.stop()
+                    self.console.print("\n[bold cyan]Goodbye![/bold cyan]")
+                    break
+                except Exception as e:
+                    self.console.print(f"[red]Error:[/red] Error in loop: {e}")
+                    import traceback
+
+                    traceback.print_exc()
+        finally:
+            self.status_manager.stop()
+
