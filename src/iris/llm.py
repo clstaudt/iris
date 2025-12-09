@@ -1,7 +1,6 @@
 """LLM conversation management using Ollama."""
 
 import re
-import threading
 import warnings
 
 import markdown
@@ -107,10 +106,7 @@ class ConversationManager:
         Returns:
             Estimated token count
         """
-        total = 0
-        for msg in messages:
-            total += self.estimate_tokens(msg.get("content", ""))
-        return total
+        return sum(self.estimate_tokens(msg.get("content", "")) for msg in messages)
 
     def clean_markdown(self, text: str) -> str:
         """

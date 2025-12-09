@@ -366,6 +366,16 @@ class SpeechPipeline:
         self.generation_worker_thread.start()
         self.playback_worker_thread.start()
 
+    @property
+    def is_active(self) -> bool:
+        """Check if pipeline has pending work or is currently processing."""
+        return (
+            not self.text_queue.empty()
+            or self.is_generating_flag.is_set()
+            or not self.audio_queue.empty()
+            or self.is_speaking_flag.is_set()
+        )
+
     def queue_speech(self, text: str):
         """
         Add text to speech pipeline (non-blocking).

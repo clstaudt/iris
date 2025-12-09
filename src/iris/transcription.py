@@ -63,10 +63,7 @@ class WhisperTranscriber:
                 language="en",  # Change to None for auto-detection
             )
 
-            # Collect all segments
-            text = " ".join([segment.text for segment in segments]).strip()
-
-            return text
+            return " ".join(segment.text for segment in segments).strip()
 
     def transcribe_streaming(
         self,

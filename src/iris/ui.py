@@ -86,14 +86,8 @@ class StatusManager:
                 status_parts.append(self.spinner_thinking)
 
         # Check speech pipeline activities
-        if speech_pipeline:
-            if (
-                not speech_pipeline.text_queue.empty()
-                or speech_pipeline.is_generating_flag.is_set()
-                or not speech_pipeline.audio_queue.empty()
-                or speech_pipeline.is_speaking_flag.is_set()
-            ):
-                status_parts.append(self.spinner_speaking)
+        if speech_pipeline and speech_pipeline.is_active:
+            status_parts.append(self.spinner_speaking)
 
         if not status_parts:
             status_text = Text("Ready", style="dim")
@@ -154,14 +148,8 @@ class StatusManager:
         status_parts = [self.spinner_listening, level_text]
 
         # Check speech pipeline activities
-        if speech_pipeline:
-            if (
-                not speech_pipeline.text_queue.empty()
-                or speech_pipeline.is_generating_flag.is_set()
-                or not speech_pipeline.audio_queue.empty()
-                or speech_pipeline.is_speaking_flag.is_set()
-            ):
-                status_parts.append(self.spinner_speaking)
+        if speech_pipeline and speech_pipeline.is_active:
+            status_parts.append(self.spinner_speaking)
 
         # Create table to show items side by side
         table = Table.grid(padding=(0, 2))
