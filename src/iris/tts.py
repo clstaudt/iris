@@ -390,3 +390,22 @@ class SpeechPipeline:
         self.text_queue.join()  # Wait for generation
         self.audio_queue.join()  # Wait for playback
 
+    def stop(self):
+        """Stop the speech pipeline immediately."""
+        # Stop any currently playing audio
+        self.player.stop()
+        
+        # Clear queues
+        while not self.text_queue.empty():
+            try:
+                self.text_queue.get_nowait()
+                self.text_queue.task_done()
+            except Exception:
+                pass
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+                self.audio_queue.task_done()
+            except Exception:
+                pass
+

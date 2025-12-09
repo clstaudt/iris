@@ -216,6 +216,10 @@ class AudioRecorder:
 class AudioPlayer:
     """Plays audio files with normalization and fade effects."""
 
+    def stop(self):
+        """Stop any currently playing audio."""
+        sd.stop()
+
     def play(self, audio_file: str):
         """
         Play pre-generated audio file.

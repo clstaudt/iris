@@ -262,6 +262,7 @@ class VoiceAssistant:
                     Path(audio_path).unlink(missing_ok=True)
 
                 except KeyboardInterrupt:
+                    self.speech_pipeline.stop()
                     self.status_manager.stop()
                     self.console.print("\n[bold cyan]Goodbye![/bold cyan]")
                     break
@@ -271,5 +272,6 @@ class VoiceAssistant:
 
                     traceback.print_exc()
         finally:
+            self.speech_pipeline.stop()
             self.status_manager.stop()
 
