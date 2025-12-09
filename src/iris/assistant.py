@@ -5,8 +5,10 @@ import threading
 import warnings
 from pathlib import Path
 
-from rich.console import Console
+from rich.align import Align
+from rich.console import Console, Group
 from rich.panel import Panel
+from rich.text import Text
 
 from iris.audio import AudioPlayer, AudioRecorder
 from iris.llm import ConversationManager
@@ -193,16 +195,21 @@ class VoiceAssistant:
     def run_loop(self):
         """Run the main voice assistant loop."""
         self.console.clear()
-        self.console.print(
-            Panel.fit(
-                "[bold cyan]Voice Assistant[/bold cyan]\n"
-                f"[dim]Model: {self.conversation.model}[/dim]\n"
-                "[dim]Press Ctrl+C to exit[/dim]",
-                border_style="bright_blue",
-                padding=(1, 2),
-            )
+
+        # App name display
+        name_text = Text("\niris\n", style="bold bright_white", justify="center")
+        info = Text()
+        info.append(f"◈ {self.conversation.model}", style="dim")
+        info.append("  •  ", style="dim")
+        info.append("Ctrl+C to exit", style="dim cyan")
+
+        display = Group(
+            Align.center(name_text),
+            Align.center(info),
+            Align.center(Text("")),
         )
-        self.console.print()
+
+        self.console.print(display)
         self.console.print()
 
         # Initialize status bar at the bottom
