@@ -68,7 +68,7 @@ The assistant combines three powerful technologies into a seamless conversationa
 - 🧠 **Local LLM** — Powered by Ollama, keeping all conversations private
 - 🗣️ **Natural Speech** — High-quality text-to-speech with Kokoro TTS
 - ⚡ **Fast Response** — Starts speaking while still thinking for natural conversation flow
-- 📊 **Rich Terminal UI** — Beautiful status indicators and conversation display
+- 📊 **Rich Terminal UI** — Live status updates and conversation display
 - 🔄 **Conversation Memory** — Remembers context across your conversation
 - 🔒 **Fully Offline** — No internet required after initial setup
 
@@ -80,25 +80,43 @@ The assistant combines three powerful technologies into a seamless conversationa
 
 ### Prerequisites
 
-1. **Python 3.11+**
+1. **Python 3.11+** and **uv** — [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 2. **Ollama** — For local LLM inference
 
+   **macOS:**
    ```bash
-   # macOS
    brew install ollama
    brew services start ollama
    ollama pull qwen3:1.7b
    ```
 
+   **Linux:**
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ollama serve &
+   ollama pull qwen3:1.7b
+   ```
+
+   **Windows:**
+   
+   Download and install from [ollama.com/download](https://ollama.com/download). Then open a terminal and run:
+   ```bash
+   ollama pull qwen3:1.7b
+   ```
+
+Feel free to experiment with different Ollama models! Try `llama3:8b`, `mistral`, `phi3`, or any model that fits your hardware.
+
 On first run, Iris will prompt you to download the required TTS models (~360 MB).
 
 ### Installation
 
-| Package Manager | Command |
-|-----------------|---------|
-| **uv** (recommended) | `uv sync && uv run iris` |
-| **pip** | `pip install -e . && iris` |
+```bash
+git clone https://github.com/your-username/iris.git
+cd iris
+uv sync
+uv run iris
+```
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -126,24 +144,19 @@ Options:
                         Whisper model size (default: small)
   --llm-model LLM_MODEL
                         Ollama model name (default: qwen3:1.7b)
-  --device {auto,cpu,cuda}
-                        Device for Whisper (default: auto)
 ```
 
 ### Examples
 
 ```bash
-# Better transcription accuracy
-iris --whisper-model medium
-
-# Different LLM
+# Try different LLMs — experiment to find what works best for you!
 iris --llm-model llama3:8b
+iris --llm-model mistral
+iris --llm-model phi3
 
-# Force CPU for Whisper
-iris --device cpu
+# Use a larger Whisper model for improved transcription
+iris --whisper-model medium
 ```
-
-<p align="right">(<a href="#top">back to top</a>)</p>
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -152,24 +165,27 @@ iris --device cpu
 ## Troubleshooting
 
 <details>
-<summary><b>TTS model download failed</b></summary>
-
-If automatic download fails, you can manually download the models from [kokoro-tts releases](https://github.com/nazdridoy/kokoro-tts/releases) and place them in `~/.iris/models/`.
-</details>
-
-<details>
 <summary><b>"Ollama connection failed"</b></summary>
 
 Make sure Ollama is running:
+
+**macOS:**
 ```bash
 brew services start ollama
 ```
+
+**Linux:**
+```bash
+ollama serve
+```
+
+**Windows:** Launch the Ollama application from the Start menu.
 </details>
 
 <details>
 <summary><b>Poor transcription accuracy</b></summary>
 
-Try a larger Whisper model:
+The default `small` model should work well for most use cases. If you're experiencing issues, try speaking more clearly or reducing background noise. For challenging audio environments, you can try a larger model:
 ```bash
 iris --whisper-model medium
 ```
@@ -179,6 +195,22 @@ iris --whisper-model medium
 <summary><b>Audio issues on macOS</b></summary>
 
 Grant microphone permissions to your terminal in **System Preferences → Security & Privacy → Microphone**.
+</details>
+
+<details>
+<summary><b>Audio issues on Linux</b></summary>
+
+Ensure you have PortAudio installed:
+```bash
+# Debian/Ubuntu
+sudo apt install portaudio19-dev
+
+# Fedora
+sudo dnf install portaudio-devel
+
+# Arch
+sudo pacman -S portaudio
+```
 </details>
 
 <p align="right">(<a href="#top">back to top</a>)</p>
