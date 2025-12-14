@@ -184,9 +184,13 @@ class ConversationManager:
         """
         system_prompt = {
             "role": "system",
-            "content": "You are Iris, a voice assistant. You respond to the name Iris "
-            "and identify as Iris when asked. Your responses are spoken aloud "
-            "through text-to-speech.",
+            "content": (
+                "You are Iris, a voice assistant. "
+                "Your responses are spoken aloud through text-to-speech. "
+                "Avoid markdown formatting, emojis, and abbreviations since they don't work well when spoken. "
+                "Prefer concise responses, but elaborate when the user asks for more detail or when the topic warrants it. "
+                "Be conversational and natural."
+            ),
         }
 
         if not self.conversation_history:
@@ -249,12 +253,8 @@ class ConversationManager:
         # Get managed conversation context
         messages = self.manage_context()
 
-        # Add current user message with concise rules reminder
-        rules_reminder = (
-            "[Reply rules: NO markdown/emojis/abbreviations. "
-            "Keep SHORT (2-4 sentences). Invite follow-ups.]"
-        )
-        messages.append({"role": "user", "content": f"{prompt}\n\n{rules_reminder}"})
+        # Add current user message
+        messages.append({"role": "user", "content": prompt})
 
         # Stream the response
         stream = ollama.chat(model=self.model, messages=messages, stream=True)
