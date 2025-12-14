@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "faster-whisper>=1.0.0",
+    "kokoro-tts>=0.5.0",
     "ollama>=0.1.0",
     "sounddevice>=0.4.6",
     "soundfile>=0.12.1",
@@ -19,9 +20,18 @@ dependencies = [
 [project.scripts]
 iris = "iris.cli:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["integration: tests requiring external services (ollama, kokoro, whisper)"]
+addopts = "-m 'not integration'"
 
 [tool.ruff]
 line-length = 100

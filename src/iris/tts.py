@@ -2,6 +2,7 @@
 
 import os
 import queue
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -32,10 +33,38 @@ class KokoroGenerator:
         """
         self.voice = voice
         self.speed = speed
-        self.kokoro_cmd = str(Path.home() / ".local" / "bin" / "kokoro-tts")
+        self.kokoro_cmd = self._find_kokoro_cmd()
         
         # Find model files - check multiple locations
         self.model_path, self.voices_path = self._locate_models()
+
+    def _find_kokoro_cmd(self) -> str:
+        """
+        Find kokoro-tts command.
+        
+        Returns:
+            Path to kokoro-tts executable
+            
+        Raises:
+            FileNotFoundError: If kokoro-tts is not found
+        """
+        # Check PATH first
+        if cmd := shutil.which("kokoro-tts"):
+            return cmd
+        
+        # Check common locations
+        candidates = [
+            Path.home() / ".local" / "bin" / "kokoro-tts",  # Unix pip --user
+            Path.home() / ".cargo" / "bin" / "kokoro-tts",  # Rust install
+        ]
+        
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        
+        raise FileNotFoundError(
+            "kokoro-tts not found. Install with: pip install kokoro-tts"
+        )
 
     def _locate_models(self) -> tuple[Path, Path]:
         """
@@ -178,7 +207,7 @@ class KokoroGenerator:
             description: Description for progress display
         """
         # Get file size from headers
-        with urllib.request.urlopen(url) as response:
+        with urllib.request.urlopen(url, timeout=30) as response:
             total_size = int(response.headers.get("Content-Length", 0))
             
             with Progress(
@@ -301,6 +330,7 @@ class SpeechPipeline:
         # Flags for status tracking
         self.is_speaking_flag = threading.Event()
         self.is_generating_flag = threading.Event()
+        self._status_lock = threading.Lock()
         
         # Worker threads
         self.generation_worker_thread = None
@@ -369,12 +399,13 @@ class SpeechPipeline:
     @property
     def is_active(self) -> bool:
         """Check if pipeline has pending work or is currently processing."""
-        return (
-            not self.text_queue.empty()
-            or self.is_generating_flag.is_set()
-            or not self.audio_queue.empty()
-            or self.is_speaking_flag.is_set()
-        )
+        with self._status_lock:
+            return (
+                not self.text_queue.empty()
+                or self.is_generating_flag.is_set()
+                or not self.audio_queue.empty()
+                or self.is_speaking_flag.is_set()
+            )
 
     def queue_speech(self, text: str):
         """

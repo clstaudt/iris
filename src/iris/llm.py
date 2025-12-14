@@ -168,7 +168,7 @@ class ConversationManager:
                     },
                 ],
             )
-            return summary_response["message"]["content"]
+            return summary_response.get("message", {}).get("content", "Previous conversation context.")
         except Exception as e:
             print(f"Warning: Could not summarize: {e}")
             # Fallback: just take first message of each type
