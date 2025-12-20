@@ -13,28 +13,33 @@ warnings.filterwarnings("ignore")
 class ConversationManager:
     """Manages LLM conversations with context and summarization."""
 
-    def __init__(self, model: str = "qwen3:1.7b"):
+    def __init__(self, model: str = "qwen3:1.7b", quiet: bool = True):
         """
         Initialize conversation manager.
 
         Args:
             model: Ollama model name
+            quiet: If True, suppress verbose output (setup wizard handles this)
         """
         self.model = model
         self.conversation_history = []
+        self.quiet = quiet
         self.max_context_tokens = self._get_model_context_length()
 
         # Test Ollama connection
-        print(f"Testing Ollama connection with model '{model}'...")
+        if not quiet:
+            print(f"Testing Ollama connection with model '{model}'...")
         try:
             ollama.list()
-            print("Ollama connected")
+            if not quiet:
+                print("Ollama connected")
         except Exception as e:
             print(f"Ollama connection failed: {e}")
             print("Make sure Ollama is running: brew services start ollama")
             raise
 
-        print(f"Model context length: {self.max_context_tokens:,} tokens")
+        if not quiet:
+            print(f"Model context length: {self.max_context_tokens:,} tokens")
 
     def _get_model_context_length(self) -> int:
         """
@@ -64,23 +69,26 @@ class ConversationManager:
             if context_length:
                 # Use 80% of context to leave room for safety
                 usable_context = int(context_length * 0.8)
-                print(
-                    f"Detected model context: {context_length:,} tokens "
-                    f"(using {usable_context:,})"
-                )
+                if not self.quiet:
+                    print(
+                        f"Detected model context: {context_length:,} tokens "
+                        f"(using {usable_context:,})"
+                    )
                 return usable_context
             else:
                 # Fallback: use a conservative default
-                print(
-                    "Could not detect model context length, using default: 25,600 tokens"
-                )
+                if not self.quiet:
+                    print(
+                        "Could not detect model context length, using default: 25,600 tokens"
+                    )
                 return 25600
 
         except Exception as e:
-            print(
-                f"Warning: Could not query model info ({e}), "
-                f"using default context: 25,600 tokens"
-            )
+            if not self.quiet:
+                print(
+                    f"Warning: Could not query model info ({e}), "
+                    f"using default context: 25,600 tokens"
+                )
             return 25600
 
     def estimate_tokens(self, text: str) -> int:

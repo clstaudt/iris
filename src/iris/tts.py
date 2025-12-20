@@ -23,16 +23,18 @@ KOKORO_VOICES_URL = "https://github.com/nazdridoy/kokoro-tts/releases/download/v
 class KokoroGenerator:
     """Generates speech audio using kokoro-tts."""
 
-    def __init__(self, voice: str = "af_bella", speed: float = 1.25):
+    def __init__(self, voice: str = "af_bella", speed: float = 1.25, quiet: bool = True):
         """
         Initialize kokoro TTS generator.
 
         Args:
             voice: Voice to use for generation
             speed: Speech speed multiplier
+            quiet: If True, skip interactive prompts (setup wizard handles downloads)
         """
         self.voice = voice
         self.speed = speed
+        self.quiet = quiet
         self.kokoro_cmd = self._find_kokoro_cmd()
         
         # Find model files - check multiple locations
@@ -76,7 +78,7 @@ class KokoroGenerator:
         3. ~/.local/share/iris/models/
         4. ./models/ (relative to current directory)
         
-        If models are not found, prompts the user to download them.
+        If models are not found and not in quiet mode, prompts the user to download them.
         
         Returns:
             Tuple of (model_path, voices_path)
@@ -107,16 +109,17 @@ class KokoroGenerator:
             if model_path.exists() and voices_path.exists():
                 return model_path, voices_path
         
-        # Models not found - prompt user to download
+        # Models not found - prompt user to download (unless in quiet mode)
         default_dir = search_paths[0]  # ~/.iris/models
         
-        if self._prompt_download(default_dir, model_file, voices_file):
+        if not self.quiet and self._prompt_download(default_dir, model_file, voices_file):
             return default_dir / model_file, default_dir / voices_file
         
-        # User declined download
+        # Models not found
         raise FileNotFoundError(
             f"Could not find kokoro models ({model_file}, {voices_file}).\n"
-            f"Please download them and place in one of:\n"
+            f"Please run 'iris' without --skip-setup to download models,\n"
+            f"or download them manually and place in one of:\n"
             + "\n".join(f"  - {p}" for p in search_paths)
             + f"\nOr set IRIS_MODELS_DIR environment variable."
         )

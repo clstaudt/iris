@@ -10,8 +10,6 @@ import warnings
 
 from rich.console import Console
 
-from iris.assistant import VoiceAssistant
-
 warnings.filterwarnings("ignore")
 
 console = Console()
@@ -29,7 +27,9 @@ def main():
         help="Whisper model size (default: small)",
     )
     parser.add_argument(
-        "--llm-model", default="qwen3:1.7b", help="Ollama model name (default: qwen3:1.7b)"
+        "--llm-model",
+        default="qwen3:1.7b",
+        help="Ollama model name (default: qwen3:1.7b)",
     )
     parser.add_argument(
         "--device",
@@ -37,10 +37,28 @@ def main():
         choices=["auto", "cpu", "cuda"],
         help="Device for Whisper (default: auto)",
     )
+    parser.add_argument(
+        "--skip-setup",
+        action="store_true",
+        help="Skip the setup wizard (assume all dependencies are ready)",
+    )
 
     args = parser.parse_args()
 
     try:
+        # Run setup wizard to check dependencies and download models
+        if not args.skip_setup:
+            from iris.setup import run_setup
+
+            if not run_setup(
+                whisper_model=args.whisper_model,
+                llm_model=args.llm_model,
+            ):
+                sys.exit(1)
+
+        # Import assistant after setup to avoid loading models before they're ready
+        from iris.assistant import VoiceAssistant
+
         # Create and run assistant
         assistant = VoiceAssistant(
             whisper_model=args.whisper_model,

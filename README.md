@@ -107,8 +107,6 @@ The assistant combines three powerful technologies into a seamless conversationa
 
 Feel free to experiment with different Ollama models! Try `llama3:8b`, `mistral`, `phi3`, or any model that fits your hardware.
 
-On first run, Iris will prompt you to download the required TTS models (~360 MB).
-
 ### Installation
 
 ```bash
@@ -117,6 +115,38 @@ cd iris
 uv sync
 uv run iris
 ```
+
+### First Run Setup
+
+On first run, Iris includes a **setup wizard** that checks all dependencies and offers to download any missing models:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Iris Setup                                                      │
+│                                                                 │
+│ Checking dependencies and downloading required models...        │
+└─────────────────────────────────────────────────────────────────┘
+
+✓  Ollama                    running
+↓  LLM (qwen3:1.7b)          needs download
+↓  Whisper (small)           needs download
+✓  kokoro-tts CLI            installed
+↓  Kokoro TTS models         needs download
+
+The following components need to be downloaded:
+  • Ollama model (qwen3:1.7b)
+  • Whisper model (small)
+  • Kokoro TTS models (~360 MB)
+
+Download locations:
+  • Ollama models: ~/.ollama/models/
+  • Whisper model: ~/.cache/huggingface/hub/
+  • Kokoro models: ~/.iris/models/
+
+Download now? [Y/n]:
+```
+
+The wizard will show progress bars during downloads and tell you exactly where files are being stored.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -144,6 +174,9 @@ Options:
                         Whisper model size (default: small)
   --llm-model LLM_MODEL
                         Ollama model name (default: qwen3:1.7b)
+  --device {auto,cpu,cuda}
+                        Device for Whisper (default: auto)
+  --skip-setup          Skip the setup wizard
 ```
 
 ### Examples

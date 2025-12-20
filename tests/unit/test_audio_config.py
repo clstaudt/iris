@@ -19,3 +19,6 @@ class TestAudioRecorderConfig:
         assert recorder.sample_rate == 44100
         assert recorder.silence_threshold == 0.05
         assert recorder.silence_duration == 3.0
+
+
+

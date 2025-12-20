@@ -28,3 +28,6 @@ class TestKokoroGenerator:
         audio_path = generator.generate("Test")
         assert audio_path is not None
         Path(audio_path).unlink(missing_ok=True)
+
+
+

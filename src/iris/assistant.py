@@ -32,6 +32,7 @@ class VoiceAssistant:
         silence_duration: float = 2.5,
         tts_voice: str = "af_bella",
         tts_speed: float = 1.25,
+        quiet: bool = True,
     ):
         """
         Initialize the voice assistant.
@@ -45,26 +46,27 @@ class VoiceAssistant:
             silence_duration: Duration of silence to stop recording
             tts_voice: Voice for TTS
             tts_speed: Speed for TTS
+            quiet: If True, suppress verbose output during initialization
         """
         # Initialize console
         self.console = Console()
 
+        if not quiet:
+            self.console.print("[dim]Initializing components...[/dim]")
+
         # Initialize components
         self.recorder = AudioRecorder(sample_rate, silence_threshold, silence_duration)
         self.player = AudioPlayer()
-        self.transcriber = WhisperTranscriber(whisper_model, whisper_device)
-        self.conversation = ConversationManager(llm_model)
+        self.transcriber = WhisperTranscriber(whisper_model, whisper_device, quiet=quiet)
+        self.conversation = ConversationManager(llm_model, quiet=quiet)
 
         # Initialize TTS
-        self.tts_generator = KokoroGenerator(tts_voice, tts_speed)
+        self.tts_generator = KokoroGenerator(tts_voice, tts_speed, quiet=quiet)
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
 
         # Initialize UI
         self.status_manager = StatusManager(self.console)
         self.display_manager = DisplayManager(self.console, self.status_manager)
-
-        print("Voice Assistant initialized!")
-        print()
 
     def chat(self, prompt: str) -> str:
         """
