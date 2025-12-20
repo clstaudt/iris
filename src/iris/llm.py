@@ -211,17 +211,27 @@ class ConversationManager:
             
             if 'look' in tool_names:
                 tool_instructions += (
-                    "- 'look' function: This is your ONLY way to see. You do NOT have persistent vision.\n"
-                    "  * Call 'look' whenever the user asks you to see, look, or describe something visual\n"
-                    "  * Call 'look' EVERY TIME they say 'look again' or 'look now' - you must capture a new image each time\n"
-                    "  * The words 'look', 'see', 'watch', 'view' mean you should call the look function\n"
-                    "  * You cannot see anything without calling this function\n"
+                    "- 'look' function: Your CAMERA. You CANNOT see through the camera without calling this.\n"
+                    "  * YOU MUST call 'look' for ANY question about physical objects, gestures, or camera view\n"
+                    "  * NEVER describe what the camera sees without calling this function first\n"
+                    "  * Call it EVERY TIME they say 'look again' - always capture fresh\n"
+                )
+            
+            if 'capture_screen' in tool_names:
+                tool_instructions += (
+                    "- 'capture_screen' function: Your ONLY way to see the COMPUTER SCREEN.\n"
+                    "  * YOU MUST call this function for ANY question about the screen, windows, or applications\n"
+                    "  * NEVER describe what's on screen without calling this function first\n"
+                    "  * If asked about 'screen', 'monitor', 'display', 'window', 'application' - USE THIS TOOL\n"
+                    "  * Do NOT guess or make up what's on screen - you CANNOT see it without this function\n"
                 )
             
             if 'search' in tool_names:
                 tool_instructions += (
                     "- 'search' function: Use this to find current information, news, or facts you don't know.\n"
                 )
+            
+            tool_instructions += "\nIMPORTANT: You MUST use these functions when appropriate. NEVER make up or guess what you see."
             
             system_content += tool_instructions
         
@@ -341,12 +351,21 @@ class ConversationManager:
                         if self.tools.status_manager:
                             with self.tools.status_manager.status_lock:
                                 self.tools.status_manager.status_looking = True
+                    elif tool_name == 'capture_screen':
+                        uses_vision = True  # Screen capture also needs vision model
                     
                     # Execute the tool
                     result = self.tools.execute(tool_name, **tool_args)
                     
                     # Format tool response for LLM
                     tool_msg = {'role': 'tool', 'content': ''}
+                    
+                    # Check if tool execution failed
+                    if not result.get('success'):
+                        # Tool failed - tell LLM about the error
+                        tool_msg['content'] = f"Error: {result.get('message', 'Tool execution failed')}"
+                        messages.append(tool_msg)
+                        continue
                     
                     # If tool returned an image, include it
                     if result.get('image'):

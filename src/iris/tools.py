@@ -21,6 +21,13 @@ except ImportError:
     HAS_CAMERA = False
 
 try:
+    import mss
+    import mss.tools
+    HAS_SCREEN = True
+except ImportError:
+    HAS_SCREEN = False
+
+try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
@@ -93,6 +100,32 @@ class Tools:
                                 }
                             },
                             'required': ['query']
+                        }
+                    }
+                }
+            }
+            return True
+        return False
+    
+    def enable_screen_capture(self):
+        """
+        Enable screen capture tool.
+        
+        Returns:
+            True if enabled successfully, False if dependencies missing
+        """
+        if HAS_SCREEN:
+            self._enabled_tools['capture_screen'] = {
+                'function': self._capture_screen,
+                'schema': {
+                    'type': 'function',
+                    'function': {
+                        'name': 'capture_screen',
+                        'description': 'Capture and see what is currently displayed on the user\'s computer screen/monitor/display. ALWAYS use this when asked about: screen, display, monitor, windows, applications, what\'s open, operating system, or anything visible on the digital screen.',
+                        'parameters': {
+                            'type': 'object',
+                            'properties': {},
+                            'required': []
                         }
                     }
                 }
@@ -223,6 +256,79 @@ class Tools:
                 'success': False,
                 'result': 'Search failed',
                 'message': f'Error: {e}'
+            }
+    
+    def _capture_screen(self, **kwargs) -> dict:
+        """
+        Capture a screenshot of the user's screen.
+        
+        Args:
+            **kwargs: Ignored - accepts any arguments LLM might pass
+        
+        Returns:
+            Dict with 'success', 'image', and 'message' keys
+        """
+        import time
+        
+        if self.console:
+            self.console.print("[dim yellow]📸 Capturing screen...[/dim yellow]")
+        
+        try:
+            # Capture the primary monitor
+            with mss.mss() as sct:
+                # Get the primary monitor
+                monitor = sct.monitors[1]
+                
+                # Capture screenshot
+                screenshot = sct.grab(monitor)
+                
+                # Check if screenshot is valid (not empty/black from permission denial)
+                if screenshot.size[0] == 0 or screenshot.size[1] == 0:
+                    return {
+                        'success': False,
+                        'message': 'Screen capture failed - screen recording permission may be required. Grant permission in System Settings > Privacy & Security > Screen Recording.'
+                    }
+                
+                # Convert to PIL Image
+                image = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+                
+                # Check if image is completely black (permission denied on macOS)
+                import numpy as np
+                img_array = np.array(image)
+                if img_array.max() == 0:  # Completely black
+                    return {
+                        'success': False,
+                        'message': 'Screen capture returned black image - please grant screen recording permission in System Settings > Privacy & Security > Screen Recording, then restart the application.'
+                    }
+                
+                # Resize to reasonable size (vision models don't need full resolution)
+                max_dimension = 1920
+                if image.width > max_dimension or image.height > max_dimension:
+                    ratio = min(max_dimension / image.width, max_dimension / image.height)
+                    new_size = (int(image.width * ratio), int(image.height * ratio))
+                    image = image.resize(new_size, Image.Resampling.LANCZOS)
+                
+                # Encode as JPEG in memory
+                buffer = BytesIO()
+                image.save(buffer, format="JPEG", quality=85)
+                image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                
+                if self.console:
+                    self.console.print("[dim green]✓ Screen captured successfully[/dim green]")
+                
+                return {
+                    'success': True,
+                    'image': image_base64,
+                    'message': 'Screen captured'
+                }
+                
+        except Exception as e:
+            error_msg = f'Error capturing screen: {e}. You may need to grant screen recording permission in System Settings.'
+            if self.console:
+                self.console.print(f"[red]{error_msg}[/red]")
+            return {
+                'success': False,
+                'message': error_msg
             }
     
     def get_schemas(self) -> list[dict]:

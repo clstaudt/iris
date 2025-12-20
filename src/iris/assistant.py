@@ -38,6 +38,7 @@ class VoiceAssistant:
         persona: Optional[Persona] = None,
         enable_vision: bool = False,
         vision_model: str = "qwen3-vl:8b",
+        enable_screen_capture: bool = False,
         enable_web_search: bool = False,
     ):
         """
@@ -56,6 +57,7 @@ class VoiceAssistant:
             persona: Persona to use for the assistant
             enable_vision: Enable camera/vision tool
             vision_model: Vision model to use when vision is needed (default: qwen3-vl:8b)
+            enable_screen_capture: Enable screen capture tool
             enable_web_search: Enable web search tool
         """
         # Initialize console
@@ -88,7 +90,7 @@ class VoiceAssistant:
         
         # Setup tools (after status_manager is created)
         self.tools = None
-        if enable_vision or enable_web_search:
+        if enable_vision or enable_screen_capture or enable_web_search:
             from iris.tools import Tools
             
             self.tools = Tools(
@@ -103,6 +105,14 @@ class VoiceAssistant:
                 else:
                     self.console.print("[yellow]⚠ Vision dependencies not installed (opencv-python, pillow)[/yellow]")
             
+            if enable_screen_capture:
+                if self.tools.enable_screen_capture():
+                    if not quiet:
+                        self.console.print("[dim]✓ Screen capture enabled[/dim]")
+                        self.console.print(f"[dim]  Available tools: {list(self.tools._enabled_tools.keys())}[/dim]")
+                else:
+                    self.console.print("[yellow]⚠ Screen capture dependencies not installed (mss)[/yellow]")
+            
             if enable_web_search:
                 if self.tools.enable_web_search():
                     if not quiet:
@@ -111,12 +121,12 @@ class VoiceAssistant:
                     self.console.print("[yellow]⚠ Web search dependencies not installed (requests)[/yellow]")
         
         # Initialize conversation manager with tools
-        # If vision is enabled, pass the vision model for automatic switching
+        # If vision OR screen capture is enabled, pass the vision model for automatic switching
         self.conversation = ConversationManager(
             llm_model, 
             persona=self.persona, 
             tools=self.tools,
-            vision_model=vision_model if enable_vision else None,
+            vision_model=vision_model if (enable_vision or enable_screen_capture) else None,
             quiet=quiet
         )
 

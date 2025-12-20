@@ -61,6 +61,11 @@ def main():
         help="Vision model to use when looking (default: qwen3-vl:8b)",
     )
     parser.add_argument(
+        "--enable-screen-capture",
+        action="store_true",
+        help="Enable screen capture tool to see your computer screen",
+    )
+    parser.add_argument(
         "--enable-web-search",
         action="store_true",
         help="Enable web search tool for current information",
@@ -93,6 +98,7 @@ def main():
             persona=persona,
             enable_vision=args.enable_vision,
             vision_model=args.vision_model,
+            enable_screen_capture=args.enable_screen_capture,
             enable_web_search=args.enable_web_search,
         )
 
