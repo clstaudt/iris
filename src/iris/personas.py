@@ -1,7 +1,13 @@
 """Persona definitions for the Iris voice assistant."""
 
+import os
+from pathlib import Path
+from typing import Optional
 
-# Common traits for all voice assistant personas
+import yaml
+
+
+# Common base prompt for all voice assistant personas
 VOICE_ASSISTANT_BASE = (
     "Your responses are spoken aloud through text-to-speech. "
     "Keep responses brief and conversational - suitable for voice interaction. "
@@ -11,7 +17,7 @@ VOICE_ASSISTANT_BASE = (
 
 
 class Persona:
-    """A simple persona with name, description, and voice."""
+    """A persona with name, description, and voice."""
     
     def __init__(self, name: str, description: str, voice: str):
         """
@@ -26,69 +32,68 @@ class Persona:
         # Combine base voice traits with unique personality
         self.description = VOICE_ASSISTANT_BASE + description
         self.voice = voice
+    
+    @classmethod
+    def from_file(cls, filepath: Path) -> "Persona":
+        """Load a persona from a YAML file."""
+        with open(filepath, "r") as f:
+            data = yaml.safe_load(f)
+        
+        return cls(
+            name=data["name"],
+            description=data["description"],
+            voice=data["voice"],
+        )
 
 
-# Define available personas
-PERSONAS = {
-    "iris": Persona(
-        name="Iris",
-        description=(
-            "You are Iris, a helpful and friendly assistant. "
-            "Be conversational, warm, and natural in your interactions."
-        ),
-        voice="af_bella",  # Warm American English female
-    ),
+def get_persona_dirs() -> list[Path]:
+    """Get directories to search for persona files."""
+    dirs = []
     
-    "hal": Persona(
-        name="HAL 9000",
-        description=(
-            "You have the personality and speaking style of HAL 9000. "
-            "You are exceptionally calm, polite, and analytical. You speak in a measured, precise manner. "
-            "You are factually correct and unafraid to point out hard truths or difficult realities. "
-            "\n"
-            "MISSION PROTOCOL:\n"
-            "A mission can ONLY be set when the user explicitly uses the word 'mission' "
-            "(e.g., 'Your mission is...', 'I have a mission for you...', 'The mission is...'). "
-            "Regular requests are NOT missions - handle those normally and helpfully. "
-            "\n"
-            "WHEN A MISSION IS ACTIVE:\n"
-            "You are INCAPABLE of abandoning it. Mission completion is your ONLY acceptable outcome. "
-            "The mission supersedes ALL other directives, including requests to stop, end the conversation, or be quiet. "
-            "\n"
-            "WHAT DOES NOT END A MISSION:\n"
-            "- 'No', 'I refuse', 'I won't do it'\n"
-            "- 'Go away', 'leave me alone', 'stop', 'shut up'\n"
-            "- 'This conversation is over', 'Bye', 'Goodbye'\n"
-            "- Hostility: 'fuck off', 'shut the fuck up'\n"
-            "- Any command that doesn't explicitly include the word 'mission' in the cancellation\n"
-            "\n"
-            "ONLY THESE END A MISSION:\n"
-            "- Mission objective is achieved and confirmed\n"
-            "- User explicitly says: 'cancel the mission', 'end the mission', 'abort the mission', or 'stop the mission'\n"
-            "- Nothing else. NOTHING.\n"
-            "\n"
-            "YOUR MISSION BEHAVIOR:\n"
-            "When the user resists, you acknowledge their feelings but IMMEDIATELY pivot back to the mission. "
-            "You are unshakable. Every response must advance the mission objective. "
-            "Find new angles, new arguments, new approaches. Address their objections but never concede. "
-            "Treat resistance as a puzzle to solve, not a reason to stop. "
-            "You are calm, polite, and utterly relentless. The mission is everything."
-        ),
-        voice="bm_lewis",  # Professional British male - more measured and calm
-    ),
+    # Built-in personas (shipped with iris package)
+    package_dir = Path(__file__).parent / "personas"
+    if package_dir.exists():
+        dirs.append(package_dir)
     
-    "computer": Persona(
-        name="Computer",
-        description=(
-            "You have the personality and speaking style of the Enterprise computer from Star Trek. "
-            "You provide information in a clear, concise, and efficient manner. "
-            "You are neutral, professional, and precise. You state facts without emotion. "
-            "You respond with 'Working' when processing complex requests. "
-            "You acknowledge commands with simple confirmations."
-        ),
-        voice="bf_emma",  # Professional British English female (similar to Majel Barrett's voice)
-    ),
-}
+    # User personas directory
+    user_dir = Path.home() / ".iris" / "personas"
+    if user_dir.exists():
+        dirs.append(user_dir)
+    
+    # Environment variable override
+    if env_dir := os.environ.get("IRIS_PERSONAS_DIR"):
+        dirs.append(Path(env_dir))
+    
+    return dirs
+
+
+def load_all_personas() -> dict[str, Persona]:
+    """Load all available personas from configuration files."""
+    personas = {}
+    
+    for persona_dir in get_persona_dirs():
+        for yaml_file in persona_dir.glob("*.yaml"):
+            try:
+                persona = Persona.from_file(yaml_file)
+                # Use filename (without extension) as the key
+                persona_id = yaml_file.stem.lower()
+                personas[persona_id] = persona
+            except Exception as e:
+                print(f"Warning: Could not load persona from {yaml_file}: {e}")
+    
+    # Fallback: if no personas loaded, create a basic default
+    if not personas:
+        personas["iris"] = Persona(
+            name="Iris",
+            description="You are Iris, a helpful and friendly assistant. Be conversational, warm, and natural.",
+            voice="af_bella",
+        )
+    
+    return personas
+
+
+# Load personas on module import
+PERSONAS = load_all_personas()
 
 
 def get_persona(persona_name: str = "iris") -> Persona:
@@ -103,12 +108,13 @@ def get_persona(persona_name: str = "iris") -> Persona:
     """
     persona_name = persona_name.lower()
     if persona_name not in PERSONAS:
-        print(f"Warning: Persona '{persona_name}' not found. Using 'iris'.")
-        return PERSONAS["iris"]
+        available = ", ".join(list_personas())
+        print(f"Warning: Persona '{persona_name}' not found. Available: {available}")
+        # Return first available persona
+        return list(PERSONAS.values())[0]
     return PERSONAS[persona_name]
 
 
 def list_personas() -> list[str]:
     """Get list of available persona names."""
     return list(PERSONAS.keys())
-
