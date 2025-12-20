@@ -10,6 +10,8 @@ import warnings
 
 from rich.console import Console
 
+from iris.personas import list_personas, get_persona
+
 warnings.filterwarnings("ignore")
 
 console = Console()
@@ -42,6 +44,12 @@ def main():
         action="store_true",
         help="Skip the setup wizard (assume all dependencies are ready)",
     )
+    parser.add_argument(
+        "--persona",
+        default="iris",
+        choices=list_personas(),
+        help="Persona/character for the assistant (default: iris)",
+    )
 
     args = parser.parse_args()
 
@@ -56,6 +64,9 @@ def main():
             ):
                 sys.exit(1)
 
+        # Get the selected persona
+        persona = get_persona(args.persona)
+
         # Import assistant after setup to avoid loading models before they're ready
         from iris.assistant import VoiceAssistant
 
@@ -64,6 +75,7 @@ def main():
             whisper_model=args.whisper_model,
             whisper_device=args.device,
             llm_model=args.llm_model,
+            persona=persona,
         )
 
         assistant.run_loop()

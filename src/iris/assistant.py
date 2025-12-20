@@ -4,6 +4,7 @@ import sys
 import threading
 import warnings
 from pathlib import Path
+from typing import Optional
 
 from rich.align import Align
 from rich.console import Console, Group
@@ -12,6 +13,7 @@ from rich.text import Text
 
 from iris.audio import AudioPlayer, AudioRecorder
 from iris.llm import ConversationManager
+from iris.personas import Persona, get_persona
 from iris.transcription import WhisperTranscriber
 from iris.tts import KokoroGenerator, SpeechPipeline
 from iris.ui import DisplayManager, StatusManager
@@ -33,6 +35,7 @@ class VoiceAssistant:
         tts_voice: str = "af_bella",
         tts_speed: float = 1.25,
         quiet: bool = True,
+        persona: Optional[Persona] = None,
     ):
         """
         Initialize the voice assistant.
@@ -44,12 +47,18 @@ class VoiceAssistant:
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
             silence_duration: Duration of silence to stop recording
-            tts_voice: Voice for TTS
+            tts_voice: Voice for TTS (overridden by persona.voice if persona is provided)
             tts_speed: Speed for TTS
             quiet: If True, suppress verbose output during initialization
+            persona: Persona to use for the assistant
         """
         # Initialize console
         self.console = Console()
+        
+        # Store persona and use its voice
+        self.persona = persona if persona else get_persona("iris")
+        if persona:
+            tts_voice = persona.voice
 
         if not quiet:
             self.console.print("[dim]Initializing components...[/dim]")
@@ -58,7 +67,7 @@ class VoiceAssistant:
         self.recorder = AudioRecorder(sample_rate, silence_threshold, silence_duration)
         self.player = AudioPlayer()
         self.transcriber = WhisperTranscriber(whisper_model, whisper_device, quiet=quiet)
-        self.conversation = ConversationManager(llm_model, quiet=quiet)
+        self.conversation = ConversationManager(llm_model, persona=self.persona, quiet=quiet)
 
         # Initialize TTS
         self.tts_generator = KokoroGenerator(tts_voice, tts_speed, quiet=quiet)
@@ -189,8 +198,8 @@ class VoiceAssistant:
         """Run the main voice assistant loop."""
         self.console.clear()
 
-        # App name display
-        name_text = Text("\niris\n", style="bold bright_white", justify="center")
+        # App name display with persona
+        name_text = Text(f"\niris - {self.persona.name}\n", style="bold bright_white", justify="center")
         info = Text()
         info.append(f"◈ {self.conversation.model}", style="dim")
         info.append("  •  ", style="dim")

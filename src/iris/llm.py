@@ -2,10 +2,13 @@
 
 import re
 import warnings
+from typing import Optional
 
 import markdown
 import ollama
 from bs4 import BeautifulSoup
+
+from iris.personas import Persona, get_persona
 
 warnings.filterwarnings("ignore")
 
@@ -13,17 +16,19 @@ warnings.filterwarnings("ignore")
 class ConversationManager:
     """Manages LLM conversations with context and summarization."""
 
-    def __init__(self, model: str = "qwen3:1.7b", quiet: bool = True):
+    def __init__(self, model: str = "qwen3:1.7b", persona: Optional[Persona] = None, quiet: bool = True):
         """
         Initialize conversation manager.
 
         Args:
             model: Ollama model name
+            persona: Persona to use (defaults to iris)
             quiet: If True, suppress verbose output (setup wizard handles this)
         """
         self.model = model
         self.conversation_history = []
         self.quiet = quiet
+        self.persona = persona if persona else get_persona("iris")
         self.max_context_tokens = self._get_model_context_length()
 
         # Test Ollama connection
@@ -192,13 +197,7 @@ class ConversationManager:
         """
         system_prompt = {
             "role": "system",
-            "content": (
-                "You are Iris, a voice assistant. "
-                "Your responses are spoken aloud through text-to-speech. "
-                "Avoid markdown formatting, emojis, and abbreviations since they don't work well when spoken. "
-                "Prefer concise responses, but elaborate when the user asks for more detail or when the topic warrants it. "
-                "Be conversational and natural."
-            ),
+            "content": self.persona.description,
         }
 
         if not self.conversation_history:
