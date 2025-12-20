@@ -16,19 +16,23 @@ warnings.filterwarnings("ignore")
 class ConversationManager:
     """Manages LLM conversations with context and summarization."""
 
-    def __init__(self, model: str = "qwen3:1.7b", persona: Optional[Persona] = None, quiet: bool = True):
+    def __init__(self, model: str = "qwen3:1.7b", persona: Optional[Persona] = None, tools=None, vision_model: Optional[str] = None, quiet: bool = True):
         """
         Initialize conversation manager.
 
         Args:
-            model: Ollama model name
+            model: Ollama model name (primary/text model)
             persona: Persona to use (defaults to iris)
+            tools: Optional Tools instance for function calling
+            vision_model: Optional vision model to switch to when using vision tools
             quiet: If True, suppress verbose output (setup wizard handles this)
         """
         self.model = model
+        self.vision_model = vision_model
         self.conversation_history = []
         self.quiet = quiet
         self.persona = persona if persona else get_persona("iris")
+        self.tools = tools
         self.max_context_tokens = self._get_model_context_length()
 
         # Test Ollama connection
@@ -195,9 +199,35 @@ class ConversationManager:
         Returns:
             Managed list of messages
         """
+        # Build system prompt with persona description
+        system_content = self.persona.description
+        
+        # Add tool awareness if tools are available
+        if self.tools and self.tools.has_tools():
+            tool_names = list(self.tools._enabled_tools.keys())
+            
+            # Add general tool instruction
+            tool_instructions = "\n\nIMPORTANT - You have access to tools that you must use appropriately:\n"
+            
+            if 'look' in tool_names:
+                tool_instructions += (
+                    "- 'look' function: This is your ONLY way to see. You do NOT have persistent vision.\n"
+                    "  * Call 'look' whenever the user asks you to see, look, or describe something visual\n"
+                    "  * Call 'look' EVERY TIME they say 'look again' or 'look now' - you must capture a new image each time\n"
+                    "  * The words 'look', 'see', 'watch', 'view' mean you should call the look function\n"
+                    "  * You cannot see anything without calling this function\n"
+                )
+            
+            if 'search' in tool_names:
+                tool_instructions += (
+                    "- 'search' function: Use this to find current information, news, or facts you don't know.\n"
+                )
+            
+            system_content += tool_instructions
+        
         system_prompt = {
             "role": "system",
-            "content": self.persona.description,
+            "content": system_content,
         }
 
         if not self.conversation_history:
@@ -249,7 +279,8 @@ class ConversationManager:
 
     def chat_stream(self, prompt: str):
         """
-        Send prompt to LLM and stream response.
+        Send prompt to LLM and stream response with tool support.
+        Automatically switches to vision model when vision tools are used.
 
         Args:
             prompt: User prompt text
@@ -263,7 +294,104 @@ class ConversationManager:
         # Add current user message
         messages.append({"role": "user", "content": prompt})
 
-        # Stream the response
+        # If tools available, let LLM decide if it needs them
+        if self.tools and self.tools.has_tools():
+            # Use streaming even for tool check - only buffer if we see tool calls
+            stream = ollama.chat(
+                model=self.model,
+                messages=messages,
+                tools=self.tools.get_schemas(),
+                stream=True
+            )
+            
+            # Collect response and check for tool calls
+            full_response = []
+            tool_calls = None
+            
+            for chunk in stream:
+                message_chunk = chunk.get('message', {})
+                
+                # Collect content
+                if 'content' in message_chunk:
+                    full_response.append(message_chunk['content'])
+                
+                # Check for tool calls - they might appear in any chunk, not just the last
+                if message_chunk.get('tool_calls'):
+                    tool_calls = message_chunk['tool_calls']
+            
+            # If LLM wants to use tools, execute them and get new response
+            if tool_calls:
+                # Build message with tool call
+                messages.append({
+                    'role': 'assistant',
+                    'content': ''.join(full_response),
+                    'tool_calls': tool_calls
+                })
+                
+                # Check if any tool is a vision tool (look/camera)
+                uses_vision = False
+                for tool_call in tool_calls:
+                    tool_name = tool_call['function']['name']
+                    tool_args = tool_call['function'].get('arguments', {})
+                    
+                    # Check if this is a vision tool and set status BEFORE executing
+                    if tool_name == 'look':
+                        uses_vision = True
+                        # Set looking status immediately when we know LLM wants to look
+                        if self.tools.status_manager:
+                            with self.tools.status_manager.status_lock:
+                                self.tools.status_manager.status_looking = True
+                    
+                    # Execute the tool
+                    result = self.tools.execute(tool_name, **tool_args)
+                    
+                    # Format tool response for LLM
+                    tool_msg = {'role': 'tool', 'content': ''}
+                    
+                    # If tool returned an image, include it
+                    if result.get('image'):
+                        tool_msg['images'] = [result['image']]
+                        tool_msg['content'] = result.get('message', 'Image captured')
+                    elif result.get('result'):
+                        tool_msg['content'] = str(result['result'])
+                    else:
+                        tool_msg['content'] = result.get('message', 'Tool executed')
+                    
+                    messages.append(tool_msg)
+                
+                # Choose model: use vision model if vision was used, otherwise primary model
+                response_model = self.vision_model if (uses_vision and self.vision_model) else self.model
+                
+                # Now get final response with tool results (streaming)
+                stream = ollama.chat(
+                    model=response_model,
+                    messages=messages,
+                    stream=True
+                )
+                
+                full_response = []
+                for chunk in stream:
+                    chunk_text = chunk['message']['content']
+                    full_response.append(chunk_text)
+                    yield chunk_text
+                
+                # Store in history
+                answer = "".join(full_response)
+                self.conversation_history.append({"role": "user", "content": prompt})
+                self.conversation_history.append({"role": "assistant", "content": answer})
+                return
+            else:
+                # No tools needed - yield the response we already collected
+                answer = "".join(full_response)
+                for chunk_text in full_response:
+                    if chunk_text:
+                        yield chunk_text
+                
+                self.conversation_history.append({"role": "user", "content": prompt})
+                self.conversation_history.append({"role": "assistant", "content": answer})
+                return
+        
+        # No tools - standard streaming
         stream = ollama.chat(model=self.model, messages=messages, stream=True)
 
         full_response = []

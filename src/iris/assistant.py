@@ -36,6 +36,9 @@ class VoiceAssistant:
         tts_speed: float = 1.25,
         quiet: bool = True,
         persona: Optional[Persona] = None,
+        enable_vision: bool = False,
+        vision_model: str = "qwen3-vl:8b",
+        enable_web_search: bool = False,
     ):
         """
         Initialize the voice assistant.
@@ -43,7 +46,7 @@ class VoiceAssistant:
         Args:
             whisper_model: Whisper model size (tiny, base, small, medium, large)
             whisper_device: Device for Whisper (cpu, cuda, or auto)
-            llm_model: Ollama model name
+            llm_model: Ollama model name (primary model, should be fast)
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
             silence_duration: Duration of silence to stop recording
@@ -51,6 +54,9 @@ class VoiceAssistant:
             tts_speed: Speed for TTS
             quiet: If True, suppress verbose output during initialization
             persona: Persona to use for the assistant
+            enable_vision: Enable camera/vision tool
+            vision_model: Vision model to use when vision is needed (default: qwen3-vl:8b)
+            enable_web_search: Enable web search tool
         """
         # Initialize console
         self.console = Console()
@@ -71,8 +77,7 @@ class VoiceAssistant:
         self.player = AudioPlayer(audio_filter=audio_filter)
         
         self.transcriber = WhisperTranscriber(whisper_model, whisper_device, quiet=quiet)
-        self.conversation = ConversationManager(llm_model, persona=self.persona, quiet=quiet)
-
+        
         # Initialize TTS with persona's voice and speed
         self.tts_generator = KokoroGenerator(tts_voice, self.persona.speed, quiet=quiet)
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
@@ -80,6 +85,40 @@ class VoiceAssistant:
         # Initialize UI
         self.status_manager = StatusManager(self.console)
         self.display_manager = DisplayManager(self.console, self.status_manager)
+        
+        # Setup tools (after status_manager is created)
+        self.tools = None
+        if enable_vision or enable_web_search:
+            from iris.tools import Tools
+            
+            self.tools = Tools(
+                console=self.console,
+                status_manager=self.status_manager
+            )
+            
+            if enable_vision:
+                if self.tools.enable_camera():
+                    if not quiet:
+                        self.console.print("[dim]✓ Vision enabled[/dim]")
+                else:
+                    self.console.print("[yellow]⚠ Vision dependencies not installed (opencv-python, pillow)[/yellow]")
+            
+            if enable_web_search:
+                if self.tools.enable_web_search():
+                    if not quiet:
+                        self.console.print("[dim]✓ Web search enabled[/dim]")
+                else:
+                    self.console.print("[yellow]⚠ Web search dependencies not installed (requests)[/yellow]")
+        
+        # Initialize conversation manager with tools
+        # If vision is enabled, pass the vision model for automatic switching
+        self.conversation = ConversationManager(
+            llm_model, 
+            persona=self.persona, 
+            tools=self.tools,
+            vision_model=vision_model if enable_vision else None,
+            quiet=quiet
+        )
 
     def chat(self, prompt: str) -> str:
         """
@@ -282,4 +321,6 @@ class VoiceAssistant:
         finally:
             self.speech_pipeline.stop()
             self.status_manager.stop()
+            if self.tools:
+                self.tools.cleanup()
 

@@ -70,7 +70,9 @@ The assistant combines three powerful technologies into a seamless conversationa
 - ⚡ **Fast Response** — Starts speaking while still thinking for natural conversation flow
 - 📊 **Rich Terminal UI** — Live status updates and conversation display
 - 🔄 **Conversation Memory** — Remembers context across your conversation
-- 🔒 **Fully Offline** — No internet required after initial setup
+- 👁️ **Vision Support** — Can see through your webcam with vision-capable models
+- 🔍 **Web Search** — Can search for current information when needed
+- 🔒 **Fully Offline** — No internet required after initial setup (except for web search)
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -176,6 +178,10 @@ Options:
                         Ollama model name (default: qwen3:1.7b)
   --device {auto,cpu,cuda}
                         Device for Whisper (default: auto)
+  --persona {iris,hal,computer}
+                        Persona/character for the assistant (default: iris)
+  --enable-vision       Enable camera/vision tool (requires vision model)
+  --enable-web-search   Enable web search tool for current information
   --skip-setup          Skip the setup wizard
 ```
 
@@ -189,7 +195,65 @@ iris --llm-model phi3
 
 # Use a larger Whisper model for improved transcription
 iris --whisper-model medium
+
+# Enable vision with a vision-capable model
+ollama pull llama3.2-vision
+iris --llm-model llama3.2-vision --enable-vision
+
+# Enable web search for current information
+iris --enable-web-search
+
+# Use a different persona
+iris --persona hal
 ```
+
+### Vision Capabilities
+
+Iris supports **intelligent vision switching** - it uses a fast text model for normal conversations and automatically switches to a vision model only when it needs to see something.
+
+```bash
+# First, ensure you have both models
+ollama pull qwen2.5:1.5b        # Fast text model
+ollama pull qwen3-vl:8b         # Vision model (default)
+
+# Start iris with vision enabled
+iris --enable-vision
+```
+
+**How it works:**
+- Uses the fast primary model (`qwen2.5:1.5b`) for normal conversations
+- When you ask it to look at something, it automatically:
+  1. Captures an image with your webcam
+  2. Switches to the vision model (`qwen3-vl:8b`) 
+  3. Processes the image and responds
+  4. Switches back to the fast model for the next conversation
+
+**Example conversations:**
+
+```
+You: "Tell me a joke"
+→ Uses fast text model (qwen2.5:1.5b)
+
+You: "What am I holding?"
+→ Captures image → Switches to vision model (qwen3-vl:8b) → Responds
+
+You: "That's funny, tell me another joke"  
+→ Back to fast text model (qwen2.5:1.5b)
+```
+
+**Custom vision model:**
+
+```bash
+# Use a different vision model
+ollama pull llama3.2-vision:11b
+iris --enable-vision --vision-model llama3.2-vision:11b
+
+# Or use a smaller one
+ollama pull qwen3-vl:2b
+iris --enable-vision --vision-model qwen3-vl:2b
+```
+
+You'll see a "Looking" indicator appear in the status bar when the camera captures an image.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 

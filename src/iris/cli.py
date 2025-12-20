@@ -31,7 +31,7 @@ def main():
     parser.add_argument(
         "--llm-model",
         default="qwen3:1.7b",
-        help="Ollama model name (default: qwen3:1.7b)",
+        help="Ollama model name (default: qwen3:1.7b, must support function calling for tools)",
     )
     parser.add_argument(
         "--device",
@@ -49,6 +49,21 @@ def main():
         default="iris",
         choices=list_personas(),
         help="Persona/character for the assistant (default: iris)",
+    )
+    parser.add_argument(
+        "--enable-vision",
+        action="store_true",
+        help="Enable camera/vision tool (automatically switches to vision model when needed)",
+    )
+    parser.add_argument(
+        "--vision-model",
+        default="qwen3-vl:8b",
+        help="Vision model to use when looking (default: qwen3-vl:8b)",
+    )
+    parser.add_argument(
+        "--enable-web-search",
+        action="store_true",
+        help="Enable web search tool for current information",
     )
 
     args = parser.parse_args()
@@ -76,6 +91,9 @@ def main():
             whisper_device=args.device,
             llm_model=args.llm_model,
             persona=persona,
+            enable_vision=args.enable_vision,
+            vision_model=args.vision_model,
+            enable_web_search=args.enable_web_search,
         )
 
         assistant.run_loop()
