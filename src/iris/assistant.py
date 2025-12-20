@@ -11,7 +11,7 @@ from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
 
-from iris.audio import AudioPlayer, AudioRecorder
+from iris.audio import AudioPlayer, AudioRecorder, get_filter
 from iris.llm import ConversationManager
 from iris.personas import Persona, get_persona
 from iris.transcription import WhisperTranscriber
@@ -30,8 +30,8 @@ class VoiceAssistant:
         whisper_device: str = "auto",
         llm_model: str = "qwen3:1.7b",
         sample_rate: int = 16000,
-        silence_threshold: float = 0.02,
-        silence_duration: float = 2.5,
+        silence_threshold: float = 0.015,
+        silence_duration: float = 3.5,
         tts_voice: str = "af_bella",
         tts_speed: float = 1.25,
         quiet: bool = True,
@@ -65,12 +65,16 @@ class VoiceAssistant:
 
         # Initialize components
         self.recorder = AudioRecorder(sample_rate, silence_threshold, silence_duration)
-        self.player = AudioPlayer()
+        
+        # Initialize audio player with filter from persona
+        audio_filter = get_filter(self.persona.audio_filter) if self.persona.audio_filter else None
+        self.player = AudioPlayer(audio_filter=audio_filter)
+        
         self.transcriber = WhisperTranscriber(whisper_model, whisper_device, quiet=quiet)
         self.conversation = ConversationManager(llm_model, persona=self.persona, quiet=quiet)
 
-        # Initialize TTS
-        self.tts_generator = KokoroGenerator(tts_voice, tts_speed, quiet=quiet)
+        # Initialize TTS with persona's voice and speed
+        self.tts_generator = KokoroGenerator(tts_voice, self.persona.speed, quiet=quiet)
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
 
         # Initialize UI
@@ -199,9 +203,11 @@ class VoiceAssistant:
         self.console.clear()
 
         # App name display with persona
-        name_text = Text(f"\niris - {self.persona.name}\n", style="bold bright_white", justify="center")
+        name_text = Text("\niris\n", style="bold bright_white", justify="center")
         info = Text()
-        info.append(f"◈ {self.conversation.model}", style="dim")
+        info.append(f"◈ {self.persona.name}", style="dim magenta")
+        info.append("  •  ", style="dim")
+        info.append(f"{self.conversation.model}", style="dim")
         info.append("  •  ", style="dim")
         info.append("Ctrl+C to exit", style="dim cyan")
 

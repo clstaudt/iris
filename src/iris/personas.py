@@ -17,9 +17,16 @@ VOICE_ASSISTANT_BASE = (
 
 
 class Persona:
-    """A persona with name, description, and voice."""
+    """A persona with name, description, voice, and optional audio filter."""
     
-    def __init__(self, name: str, description: str, voice: str):
+    def __init__(
+        self, 
+        name: str, 
+        description: str, 
+        voice: str, 
+        audio_filter: Optional[str] = None,
+        speed: float = 1.25,
+    ):
         """
         Initialize a persona.
         
@@ -27,11 +34,15 @@ class Persona:
             name: Display name of the persona
             description: Unique personality traits (base voice traits are added automatically)
             voice: Kokoro TTS voice to use (e.g., 'af_bella', 'am_adam', 'bf_emma')
+            audio_filter: Optional audio filter name ('phone', 'radio', 'intercom', 'robotic')
+            speed: Speech speed multiplier (default: 1.25)
         """
         self.name = name
         # Combine base voice traits with unique personality
         self.description = VOICE_ASSISTANT_BASE + description
         self.voice = voice
+        self.audio_filter = audio_filter
+        self.speed = speed
     
     @classmethod
     def from_file(cls, filepath: Path) -> "Persona":
@@ -43,6 +54,8 @@ class Persona:
             name=data["name"],
             description=data["description"],
             voice=data["voice"],
+            audio_filter=data.get("audio_filter"),  # Optional field
+            speed=data.get("speed", 1.25),  # Default to 1.25
         )
 
 

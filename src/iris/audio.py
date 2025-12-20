@@ -1,16 +1,160 @@
-"""Audio recording and playback for voice assistant."""
+"""Audio recording, playback, and filters for voice assistant."""
 
 import tempfile
 import threading
 import warnings
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
+import scipy.signal as signal
 import sounddevice as sd
 import soundfile as sf
 
 warnings.filterwarnings("ignore")
+
+
+# ============================================================================
+# Audio Filters
+# ============================================================================
+
+
+class AudioFilter(ABC):
+    """Base class for audio filters."""
+    
+    @abstractmethod
+    def apply(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """
+        Apply the filter to audio data.
+        
+        Args:
+            audio: Audio data as numpy array
+            sample_rate: Sample rate of the audio
+            
+        Returns:
+            Filtered audio data
+        """
+        pass
+
+
+class PhoneFilter(AudioFilter):
+    """
+    Simulates telephone/phone audio quality.
+    Bandpass 300-3400 Hz (typical phone bandwidth) with slight distortion.
+    """
+    
+    def apply(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Apply phone filter effect."""
+        # Bandpass filter: 300-3400 Hz (standard telephone bandwidth)
+        sos = signal.butter(4, [300, 3400], btype='band', fs=sample_rate, output='sos')
+        audio = signal.sosfilt(sos, audio)
+        
+        # Add slight clipping for characteristic phone distortion
+        audio = np.clip(audio, -0.8, 0.8)
+        
+        # Add very subtle noise for realism
+        noise = np.random.normal(0, 0.001, len(audio))
+        audio = audio + noise
+        
+        return audio
+
+
+class RadioFilter(AudioFilter):
+    """
+    Simulates radio/walkie-talkie audio quality.
+    Bandpass 300-5000 Hz with compression and light static.
+    """
+    
+    def apply(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Apply radio filter effect."""
+        # Bandpass filter: 300-5000 Hz (radio bandwidth)
+        sos = signal.butter(4, [300, 5000], btype='band', fs=sample_rate, output='sos')
+        audio = signal.sosfilt(sos, audio)
+        
+        # Apply compression using tanh (soft clipping)
+        audio = np.tanh(audio * 2.0) * 0.5
+        
+        # Add light static noise
+        noise = np.random.normal(0, 0.004, len(audio))
+        audio = audio + noise
+        
+        return audio
+
+
+class IntercomFilter(AudioFilter):
+    """
+    Simulates intercom/PA system audio quality.
+    Bandpass 400-4000 Hz with moderate compression.
+    Good for spaceship computer or announcement system effects.
+    """
+    
+    def apply(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Apply intercom filter effect."""
+        # Bandpass filter: 400-4000 Hz (intercom bandwidth)
+        sos = signal.butter(3, [400, 4000], btype='band', fs=sample_rate, output='sos')
+        audio = signal.sosfilt(sos, audio)
+        
+        # Apply moderate compression
+        audio = np.tanh(audio * 1.5) * 0.6
+        
+        # Very subtle background hum (like electrical interference)
+        t = np.arange(len(audio)) / sample_rate
+        hum = np.sin(2 * np.pi * 60 * t) * 0.001  # 60 Hz hum
+        audio = audio + hum
+        
+        return audio
+
+
+class RoboticFilter(AudioFilter):
+    """
+    Simulates robotic/synthetic voice.
+    Slight pitch modulation and metallic resonance.
+    """
+    
+    def apply(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Apply robotic filter effect."""
+        # High-pass filter to emphasize higher frequencies
+        sos = signal.butter(2, 200, btype='high', fs=sample_rate, output='sos')
+        audio = signal.sosfilt(sos, audio)
+        
+        # Add subtle ring modulation for metallic quality
+        t = np.arange(len(audio)) / sample_rate
+        modulation = 1 + 0.1 * np.sin(2 * np.pi * 100 * t)
+        audio = audio * modulation
+        
+        # Slight compression
+        audio = np.tanh(audio * 1.8) * 0.55
+        
+        return audio
+
+
+# Registry of available filters
+AUDIO_FILTERS = {
+    "phone": PhoneFilter(),
+    "radio": RadioFilter(),
+    "intercom": IntercomFilter(),
+    "robotic": RoboticFilter(),
+}
+
+
+def get_filter(filter_name: str) -> AudioFilter | None:
+    """
+    Get an audio filter by name.
+    
+    Args:
+        filter_name: Name of the filter ('phone', 'radio', 'intercom', 'robotic', etc.)
+        
+    Returns:
+        AudioFilter instance, or None if filter not found
+    """
+    return AUDIO_FILTERS.get(filter_name.lower())
+
+
+# ============================================================================
+# Audio Recording and Playback
+# ============================================================================
 
 
 class AudioRecorder:
@@ -215,6 +359,15 @@ class AudioRecorder:
 
 class AudioPlayer:
     """Plays audio files with normalization and fade effects."""
+    
+    def __init__(self, audio_filter: Optional[AudioFilter] = None):
+        """
+        Initialize audio player.
+        
+        Args:
+            audio_filter: Optional AudioFilter instance to apply to audio
+        """
+        self.audio_filter = audio_filter
 
     def stop(self):
         """Stop any currently playing audio."""
@@ -222,7 +375,7 @@ class AudioPlayer:
 
     def play(self, audio_file: str):
         """
-        Play pre-generated audio file.
+        Play pre-generated audio file with optional filter.
 
         Args:
             audio_file: Path to WAV file to play
@@ -230,6 +383,10 @@ class AudioPlayer:
         try:
             # Load and play the audio
             audio, sample_rate = sf.read(audio_file, dtype="float32")
+
+            # Apply audio filter if specified
+            if self.audio_filter:
+                audio = self.audio_filter.apply(audio, sample_rate)
 
             # Normalize audio to prevent clipping and reduce artifacts
             # Scale to 90% of max to avoid clipping
@@ -263,4 +420,3 @@ class AudioPlayer:
             import traceback
 
             traceback.print_exc()
-
