@@ -87,7 +87,6 @@ class VoiceAssistant:
             # Stream the response and display it live
             full_response = []
             text_buffer = ""  # Buffer for speech chunks
-            speech_chunks_sent = 0
 
             try:
                 for chunk_text in self.conversation.chat_stream(prompt):
@@ -108,17 +107,10 @@ class VoiceAssistant:
                     should_speak = False
                     text_to_speak = ""
 
-                    # Determine threshold based on whether this is the first chunk
-                    if speech_chunks_sent == 0:
-                        # First chunk: start speaking sooner (150 chars)
-                        min_length = 150
-                        search_length = 250
-                        min_sentence_pos = 80
-                    else:
-                        # Subsequent chunks: use larger chunks (400 chars)
-                        min_length = 400
-                        search_length = 500
-                        min_sentence_pos = 200
+                    # Use consistent chunk sizes for smooth speech flow
+                    min_length = 180
+                    search_length = 280
+                    min_sentence_pos = 90
 
                     # First check for paragraph break
                     if "\n\n" in text_buffer:
@@ -146,7 +138,6 @@ class VoiceAssistant:
                         clean_text = self.conversation.clean_markdown(text_to_speak)
                         if clean_text.strip():
                             self.speech_pipeline.queue_speech(clean_text)
-                            speech_chunks_sent += 1
 
                 # Clear thinking status now that LLM is done
                 with self.status_manager.status_lock:
