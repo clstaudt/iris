@@ -287,19 +287,50 @@ class ConversationManager:
 
         return managed_messages
 
-    def chat_stream(self, prompt: str):
+    def chat_stream(self, prompt: str, detected_language: str = 'en', response_language: str = 'en'):
         """
-        Send prompt to LLM and stream response with tool support.
+        Send prompt to LLM and stream response with language awareness and tool support.
         Automatically switches to vision model when vision tools are used.
 
         Args:
             prompt: User prompt text
+            detected_language: Language detected by Whisper (e.g., 'en', 'fr', 'ja')
+            response_language: Language to respond in (may differ if detected is unsupported)
 
         Yields:
             Chunks of response text
         """
         # Get managed conversation context
         messages = self.manage_context()
+        
+        # Add language instruction based on response language
+        language_map = {
+            'en': 'English',
+            'fr': 'French', 
+            'it': 'Italian',
+            'ja': 'Japanese',
+            'zh': 'Chinese (Mandarin)'
+        }
+        
+        if detected_language != response_language:
+            # User spoke unsupported language, but we're responding in a supported one
+            response_lang_name = language_map.get(response_language, response_language)
+            language_instruction = {
+                "role": "system",
+                "content": (
+                    f"The user spoke in '{detected_language}' which is not supported by your voice system. "
+                    f"Continue the conversation in {response_lang_name}."
+                )
+            }
+            messages.append(language_instruction)
+        else:
+            # User spoke a supported language - respond in same language
+            lang_name = language_map.get(response_language, response_language)
+            language_instruction = {
+                "role": "system",
+                "content": f"The user is speaking in {lang_name}. Respond in {lang_name}."
+            }
+            messages.append(language_instruction)
 
         # Add current user message
         messages.append({"role": "user", "content": prompt})

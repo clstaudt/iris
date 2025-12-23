@@ -19,6 +19,55 @@ warnings.filterwarnings("ignore")
 KOKORO_MODEL_URL = "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx"
 KOKORO_VOICES_URL = "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin"
 
+# Language to Kokoro voice mapping
+# Maps Whisper language codes to (kokoro_lang_code, available_voices)
+LANGUAGE_VOICE_MAP = {
+    'en': {
+        'code': 'en-us',
+        'voices': ['af_bella', 'af_sarah', 'af_sky', 'am_adam', 'am_michael'],
+        'default': 'af_bella'
+    },
+    'fr': {
+        'code': 'fr-fr',
+        'voices': ['ff_siwis'],
+        'default': 'ff_siwis'
+    },
+    'it': {
+        'code': 'it',
+        'voices': ['if_sara', 'im_nicola'],
+        'default': 'if_sara'
+    },
+    'ja': {
+        'code': 'ja',
+        'voices': ['jf_alpha', 'jf_nezumi', 'jf_tebukuro', 'jm_kumo'],
+        'default': 'jf_alpha'
+    },
+    'zh': {  # Whisper returns 'zh' for Chinese
+        'code': 'cmn',  # Kokoro uses 'cmn' for Mandarin (Common Mandarin)
+        # Only female voices available in Kokoro v1.0
+        'voices': ['zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi'],
+        'default': 'zf_xiaoni'  # Female voice by default
+    },
+}
+
+
+def get_language_info(whisper_lang: str) -> dict | None:
+    """
+    Get Kokoro language info from Whisper language code.
+    
+    Args:
+        whisper_lang: Whisper language code (e.g., 'en', 'fr', 'ja', 'zh')
+        
+    Returns:
+        Dict with 'code', 'voices', 'default' keys, or None if not supported
+    """
+    return LANGUAGE_VOICE_MAP.get(whisper_lang)
+
+
+def is_language_supported(whisper_lang: str) -> bool:
+    """Check if a language is supported by Kokoro TTS."""
+    return whisper_lang in LANGUAGE_VOICE_MAP
+
 
 class KokoroGenerator:
     """Generates speech audio using kokoro-tts."""
@@ -230,16 +279,28 @@ class KokoroGenerator:
                         f.write(chunk)
                         progress.update(task, advance=len(chunk))
 
-    def generate(self, text: str) -> str | None:
+    def generate(self, text: str, language: str = 'en', voice: str | None = None) -> str | None:
         """
         Generate audio file from text using kokoro-tts CLI.
 
         Args:
             text: Text to convert to speech
+            language: Whisper language code (e.g., 'en', 'fr', 'ja')
+            voice: Optional specific voice to use (defaults to language default)
 
         Returns:
             Path to generated WAV file, or None if generation failed
         """
+        # Get language info
+        lang_info = get_language_info(language)
+        if not lang_info:
+            # Fallback to English if language not supported
+            lang_info = LANGUAGE_VOICE_MAP['en']
+        
+        # Select voice: use provided voice, or language default, or instance default
+        selected_voice = voice or lang_info['default']
+        kokoro_lang = lang_info['code']
+        
         temp_audio = None
         try:
             # Create temporary file for output
@@ -252,11 +313,11 @@ class KokoroGenerator:
                     "/dev/stdin",
                     temp_audio.name,
                     "--voice",
-                    self.voice,
+                    selected_voice,
                     "--speed",
                     str(self.speed),
                     "--lang",
-                    "en-us",
+                    kokoro_lang,  # Use detected language
                     "--format",
                     "wav",
                     "--model",
@@ -267,12 +328,14 @@ class KokoroGenerator:
                 input=text,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
                 timeout=120,
             )
 
             if result.returncode != 0:
                 raise RuntimeError(
                     f"kokoro-tts CLI failed (exit {result.returncode}): "
+                    f"lang={kokoro_lang}, voice={selected_voice}, "
                     f"stdout={result.stdout}, stderr={result.stderr}"
                 )
 
@@ -326,6 +389,9 @@ class SpeechPipeline:
         self.generator = generator
         self.player = player
         
+        # Current language context (set by conversation)
+        self.current_language = 'en'
+        
         # Queues for pipeline
         self.text_queue = queue.Queue()
         self.audio_queue = queue.Queue()
@@ -350,16 +416,19 @@ class SpeechPipeline:
         def generation_worker():
             """Generate TTS audio files from text queue."""
             while True:
-                text = self.text_queue.get()
-                if text is None:  # Shutdown signal
+                item = self.text_queue.get()
+                if item is None:  # Shutdown signal
                     self.audio_queue.put(None)
                     break
+
+                # Unpack text and language
+                text, language = item
 
                 # Set flag to indicate TTS generation in progress
                 self.is_generating_flag.set()
 
-                # Generate audio file
-                audio_file = self.generator.generate(text)
+                # Generate audio file with language
+                audio_file = self.generator.generate(text, language=language)
 
                 # Clear flag when done generating
                 self.is_generating_flag.clear()
@@ -367,6 +436,10 @@ class SpeechPipeline:
                 # Put generated audio in playback queue
                 if audio_file:
                     self.audio_queue.put(audio_file)
+                else:
+                    # Generation failed - log warning
+                    print(f"\nWarning: TTS generation failed for text ({language}): {text[:50]}...")
+                
                 self.text_queue.task_done()
 
         def playback_worker():
@@ -416,8 +489,11 @@ class SpeechPipeline:
 
         Args:
             text: Text to speak
+        
+        Note:
+            Uses self.current_language for the language code.
         """
-        self.text_queue.put(text)
+        self.text_queue.put((text, self.current_language))
 
     def wait_for_speech(self):
         """Wait for all speech generation and playback to finish."""

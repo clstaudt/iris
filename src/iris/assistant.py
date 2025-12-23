@@ -63,6 +63,9 @@ class VoiceAssistant:
         # Initialize console
         self.console = Console()
         
+        # Track current conversation language (for continuity)
+        self.conversation_language = 'en'
+        
         # Store persona and use its voice
         self.persona = persona if persona else get_persona("iris")
         if persona:
@@ -130,12 +133,14 @@ class VoiceAssistant:
             quiet=quiet
         )
 
-    def chat(self, prompt: str) -> str:
+    def chat(self, prompt: str, detected_language: str = 'en', response_language: str = 'en') -> str:
         """
-        Send prompt to LLM, stream response, and speak it.
+        Send prompt to LLM, stream response, and speak it in the appropriate language.
 
         Args:
             prompt: User prompt text
+            detected_language: Language detected by Whisper (e.g., 'en', 'fr', 'ja')
+            response_language: Language to respond in (may differ if detected is unsupported)
 
         Returns:
             LLM response text
@@ -151,7 +156,7 @@ class VoiceAssistant:
             text_buffer = ""  # Buffer for speech chunks
 
             try:
-                for chunk_text in self.conversation.chat_stream(prompt):
+                for chunk_text in self.conversation.chat_stream(prompt, detected_language, response_language):
                     full_response.append(chunk_text)
                     text_buffer += chunk_text
 
@@ -295,12 +300,12 @@ class VoiceAssistant:
                     if not audio_path:
                         continue
 
-                    # 2. Transcribe with Whisper
+                    # 2. Transcribe with Whisper (now returns language)
                     with self.status_manager.status_lock:
                         self.status_manager.status_understanding = True
                     self.status_manager.update_status_bar(self.speech_pipeline)
 
-                    text = self.transcriber.transcribe(audio_path)
+                    text, detected_language = self.transcriber.transcribe(audio_path)
 
                     with self.status_manager.status_lock:
                         self.status_manager.status_understanding = False
@@ -309,11 +314,34 @@ class VoiceAssistant:
                     if not text:
                         continue
 
-                    # Display user message
+                    # Determine response language based on detected language and support
+                    from iris.tts import get_language_info, is_language_supported
+                    
+                    if is_language_supported(detected_language):
+                        # Supported language - switch to it
+                        self.conversation_language = detected_language
+                        response_language = detected_language
+                        language_switch = True
+                    else:
+                        # Unsupported language - stay in current conversation language
+                        response_language = self.conversation_language
+                        language_switch = False
+                    
+                    # Always sync TTS with response language
+                    self.speech_pipeline.current_language = response_language
+
+                    # Display user message with detected language indicator
+                    if detected_language != 'en':
+                        lang_info = get_language_info(detected_language)
+                        if lang_info:
+                            self.console.print(f"[dim]({detected_language})[/dim]", end=" ")
+                        else:
+                            self.console.print(f"[dim]({detected_language} → {response_language})[/dim]", end=" ")
+                    
                     self.display_manager.show_user_message(text)
 
-                    # 3. Send to LLM (streams response and speaks it)
-                    self.chat(text)
+                    # 3. Send to LLM with language context (streams response and speaks it)
+                    self.chat(text, detected_language, response_language)
 
                     # Cleanup
                     Path(audio_path).unlink(missing_ok=True)
