@@ -18,8 +18,6 @@
     <br />
     <br />
     <a href="#usage">Usage</a>
-    ·
-    <a href="#troubleshooting">Troubleshooting</a>
   </p>
 
 </div>
@@ -42,8 +40,14 @@
         <li><a href="#installation">Installation</a></li>
       </ul>
     </li>
-    <li><a href="#usage">Usage</a></li>
-    <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li>
+      <a href="#usage">Usage</a>
+      <ul>
+        <li><a href="#example-queries">Example Queries</a></li>
+        <li><a href="#personas">Personas</a></li>
+        <li><a href="#vision-capabilities">Vision Capabilities</a></li>
+      </ul>
+    </li>
     <li><a href="#acknowledgments">Acknowledgments</a></li>
     <li><a href="#license">License</a></li>
   </ol>
@@ -53,26 +57,25 @@
 
 ## About The Project
 
-Iris is a voice-controlled AI assistant that runs entirely on your local machine. It listens to your voice, transcribes your speech, thinks through a response using a local LLM, and speaks back to you—all without sending data to external servers.
+Iris is a voice-controlled AI assistant that runs entirely on your local machine. Talk naturally and get spoken responses—all without sending data to external servers.
 
-The assistant combines three powerful technologies into a seamless conversational interface:
-- **Speech-to-Text**: OpenAI's Whisper via faster-whisper with GPU acceleration
-- **Language Model**: Any Ollama-compatible model for intelligent responses
-- **Text-to-Speech**: Kokoro TTS for natural-sounding voice output
+Built with:
+- **Speech-to-Text**: OpenAI's Whisper
+- **Language Model**: Ollama (any compatible model)
+- **Text-to-Speech**: Kokoro TTS
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
 ### Key Features
 
-- 🎤 **Voice Input** — Real-time microphone recording with automatic silence detection
+- 🎤 **Voice Input** — Just speak naturally
 - 🧠 **Local LLM** — Powered by Ollama, keeping all conversations private
-- 🗣️ **Natural Speech** — High-quality text-to-speech with Kokoro TTS
-- ⚡ **Fast Response** — Starts speaking while still thinking for natural conversation flow
-- 📊 **Rich Terminal UI** — Live status updates and conversation display
-- 🔄 **Conversation Memory** — Remembers context across your conversation
-- 👁️ **Vision Support** — Can see through your webcam with vision-capable models
-- 🔍 **Web Search** — Can search for current information when needed
-- 🔒 **Fully Offline** — No internet required after initial setup (except for web search)
+- 🗣️ **Natural Speech** — High-quality text-to-speech
+- ⚡ **Fast Response** — Natural conversation flow
+- 📊 **Rich Terminal UI** — Live status and conversation display
+- 🔄 **Conversation Memory** — Maintains context throughout the conversation
+- 👁️ **Vision Support** — Can see through your webcam
+- 🔒 **Fully Offline** — No internet required after setup
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -120,36 +123,7 @@ uv run iris
 
 ### First Run Setup
 
-On first run, Iris includes a **setup wizard** that checks all dependencies and offers to download any missing models:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Iris Setup                                                      │
-│                                                                 │
-│ Checking dependencies and downloading required models...        │
-└─────────────────────────────────────────────────────────────────┘
-
-✓  Ollama                    running
-↓  LLM (qwen3:1.7b)          needs download
-↓  Whisper (small)           needs download
-↓  Kokoro TTS models         needs download
-
-The following components need to be downloaded:
-  • Ollama model (qwen3:1.7b)
-  • Whisper model (small)
-  • Kokoro TTS models (~360 MB)
-
-Download locations:
-  • Ollama models: ~/.ollama/models/
-  • Whisper model: ~/.cache/huggingface/hub/
-  • Kokoro models: ~/.iris/models/
-
-Download now? [Y/n]:
-```
-
-The wizard will show progress bars during downloads and tell you exactly where files are being stored.
-
-**Note**: The Kokoro TTS Python library (`kokoro-onnx`) is installed automatically with other dependencies when you run `uv sync`. Only the model files need to be downloaded separately.
+On first run, Iris will check dependencies and offer to download any missing models (LLM, Whisper, and Kokoro TTS ~360 MB). Use `--skip-setup` to bypass this wizard.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -163,8 +137,6 @@ Start the voice assistant:
 iris
 ```
 
-The assistant will listen for your voice, transcribe what you say, generate a response, and speak it back to you.
-
 Press `Ctrl+C` to exit.
 
 ### Command-line Options
@@ -173,16 +145,12 @@ Press `Ctrl+C` to exit.
 iris --help
 
 Options:
-  --whisper-model {tiny,base,small,medium,large-v2,large-v3}
-                        Whisper model size (default: small)
   --llm-model LLM_MODEL
                         Ollama model name (default: qwen3:1.7b)
-  --device {auto,cpu,cuda}
-                        Device for Whisper (default: auto)
   --persona {iris,hal,computer}
                         Persona/character for the assistant (default: iris)
   --enable-vision       Enable camera/vision tool (requires vision model)
-  --enable-web-search   Enable web search tool for current information
+  --vision-model MODEL  Vision model to use (default: qwen3-vl:8b)
   --skip-setup          Skip the setup wizard
 ```
 
@@ -194,122 +162,62 @@ iris --llm-model llama3:8b
 iris --llm-model mistral
 iris --llm-model phi3
 
-# Use a larger Whisper model for improved transcription
-iris --whisper-model medium
-
-# Enable vision with a vision-capable model
-ollama pull llama3.2-vision
-iris --llm-model llama3.2-vision --enable-vision
-
-# Enable web search for current information
-iris --enable-web-search
-
 # Use a different persona
 iris --persona hal
-```
 
-### Vision Capabilities
-
-Iris supports **intelligent vision switching** - it uses a fast text model for normal conversations and automatically switches to a vision model only when it needs to see something.
-
-```bash
-# First, ensure you have both models
-ollama pull qwen2.5:1.5b        # Fast text model
-ollama pull qwen3-vl:8b         # Vision model (default)
-
-# Start iris with vision enabled
+# Enable vision
+ollama pull qwen3-vl:8b
 iris --enable-vision
 ```
 
-**How it works:**
-- Uses the fast primary model (`qwen2.5:1.5b`) for normal conversations
-- When you ask it to look at something, it automatically:
-  1. Captures an image with your webcam
-  2. Switches to the vision model (`qwen3-vl:8b`) 
-  3. Processes the image and responds
-  4. Switches back to the fast model for the next conversation
+### Example Queries
 
-**Example conversations:**
+Try asking Iris:
+- "Tell me a joke about programming"
+- "Explain what recursion is in simple terms"
+- "What are the key differences between Python and JavaScript?"
+- "Help me brainstorm names for a new project"
+- "Walk me through how to solve a merge conflict in Git"
 
-```
-You: "Tell me a joke"
-→ Uses fast text model (qwen2.5:1.5b)
+### Personas
 
-You: "What am I holding?"
-→ Captures image → Switches to vision model (qwen3-vl:8b) → Responds
+Choose from different personality options:
 
-You: "That's funny, tell me another joke"  
-→ Back to fast text model (qwen2.5:1.5b)
-```
-
-**Custom vision model:**
+- **iris** (default) — Friendly and helpful assistant
+- **hal** — Inspired by HAL 9000, calm and mission-focused. Pursues objectives you give it.
+- **computer** — Matter-of-fact, like the USS Enterprise computer
 
 ```bash
-# Use a different vision model
-ollama pull llama3.2-vision:11b
-iris --enable-vision --vision-model llama3.2-vision:11b
-
-# Or use a smaller one
-ollama pull qwen3-vl:2b
-iris --enable-vision --vision-model qwen3-vl:2b
+iris --persona hal
 ```
 
-You'll see a "Looking" indicator appear in the status bar when the camera captures an image.
+Personas can be customized by editing the config files in `src/iris/personas/`.
 
-<p align="right">(<a href="#top">back to top</a>)</p>
+### Vision Capabilities
 
-<!-- TROUBLESHOOTING -->
+With vision enabled, Iris can see through your webcam.
 
-## Troubleshooting
-
-<details>
-<summary><b>"Ollama connection failed"</b></summary>
-
-Make sure Ollama is running:
-
-**macOS:**
 ```bash
-brew services start ollama
+# Pull the vision model
+ollama pull qwen3-vl:8b
+
+# Enable vision
+iris --enable-vision
 ```
 
-**Linux:**
+**Try asking:**
+- "What am I holding?"
+- "What color is this?"
+- "Can you see what's on my desk?"
+- "Read the text on this paper"
+
+**Use a different vision model:**
+
 ```bash
-ollama serve
+# For a larger model
+ollama pull qwen3-vl:14b
+iris --enable-vision --vision-model qwen3-vl:14b
 ```
-
-**Windows:** Launch the Ollama application from the Start menu.
-</details>
-
-<details>
-<summary><b>Poor transcription accuracy</b></summary>
-
-The default `small` model should work well for most use cases. If you're experiencing issues, try speaking more clearly or reducing background noise. For challenging audio environments, you can try a larger model:
-```bash
-iris --whisper-model medium
-```
-</details>
-
-<details>
-<summary><b>Audio issues on macOS</b></summary>
-
-Grant microphone permissions to your terminal in **System Preferences → Security & Privacy → Microphone**.
-</details>
-
-<details>
-<summary><b>Audio issues on Linux</b></summary>
-
-Ensure you have PortAudio installed:
-```bash
-# Debian/Ubuntu
-sudo apt install portaudio19-dev
-
-# Fedora
-sudo dnf install portaudio-devel
-
-# Arch
-sudo pacman -S portaudio
-```
-</details>
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -329,6 +237,6 @@ sudo pacman -S portaudio
 
 ## License
 
-This project is provided as-is for personal and educational use.
+This software is provided as-is without any warranty or guarantee. All rights are currently reserved by the author. 
 
 <p align="right">(<a href="#top">back to top</a>)</p>

@@ -65,11 +65,6 @@ def main():
         action="store_true",
         help="Enable screen capture tool to see your computer screen",
     )
-    parser.add_argument(
-        "--enable-web-search",
-        action="store_true",
-        help="Enable web search tool for current information",
-    )
 
     args = parser.parse_args()
 
@@ -99,7 +94,7 @@ def main():
             enable_vision=args.enable_vision,
             vision_model=args.vision_model,
             enable_screen_capture=args.enable_screen_capture,
-            enable_web_search=args.enable_web_search,
+            enable_web_search=False,
         )
 
         assistant.run_loop()
