@@ -25,9 +25,14 @@ dependencies = [
 
 [project.scripts]
 iris = "iris.cli:main"
+iris-benchmark = "irisdev.benchmark:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pandas>=2.0.0",
+    "typer>=0.9.0",
+]
 
 [build-system]
 requires = ["hatchling"]
