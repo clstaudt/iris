@@ -47,6 +47,8 @@ class StatusManager:
 
         # Status flags
         self.status_listening = False
+        self.status_paused = False
+        self.status_interrupted = False
         self.status_looking = False
         self.status_understanding = False
         self.status_thinking = False
@@ -55,6 +57,8 @@ class StatusManager:
 
         # Create persistent spinners (reused across updates for animation)
         self.spinner_listening = Spinner("dots", text="Listening", style="red")
+        self.spinner_paused = Spinner("dots", text="⏸ PAUSED", style="bold yellow")
+        self.spinner_interrupted = Spinner("dots", text="Interrupted", style="bright_red")
         self.spinner_looking = Spinner("dots", text="Looking", style="bright_magenta")
         self.spinner_understanding = Spinner("dots", text="Understanding", style="magenta")
         self.spinner_thinking = Spinner("dots", text="Thinking", style="cyan")
@@ -78,8 +82,20 @@ class StatusManager:
         status_parts = []
 
         with self.status_lock:
-            if self.status_listening:
+            # Priority order: Interrupted > Speaking > Paused > Other states
+            # Interrupted takes highest priority
+            if self.status_interrupted:
+                status_parts.append(self.spinner_interrupted)
+            # Check speech pipeline activities (speaking takes priority over listening/paused)
+            elif speech_pipeline and speech_pipeline.is_active:
+                status_parts.append(self.spinner_speaking)
+            # Paused replaces listening when active
+            elif self.status_paused:
+                status_parts.append(self.spinner_paused)
+            elif self.status_listening:
                 status_parts.append(self.spinner_listening)
+            
+            # Add other statuses (these can appear alongside main status)
             if self.status_looking:
                 status_parts.append(self.spinner_looking)
             if self.status_understanding:
@@ -88,10 +104,6 @@ class StatusManager:
                 status_parts.append(self.spinner_summarizing)
             if self.status_thinking:
                 status_parts.append(self.spinner_thinking)
-
-        # Check speech pipeline activities
-        if speech_pipeline and speech_pipeline.is_active:
-            status_parts.append(self.spinner_speaking)
 
         if not status_parts:
             status_text = Text("Ready", style="dim")
@@ -143,13 +155,25 @@ class StatusManager:
         else:
             bar_color = "yellow"
 
-        # Use thin bar characters for slim appearance
-        level_text = Text()
-        level_text.append("─" * filled, style=bar_color)
-        level_text.append("─" * (bar_width - filled), style="dim")
-
-        # Build status parts: spinner + level bar
-        status_parts = [self.spinner_listening, level_text]
+        # Build status parts based on current state
+        status_parts = []
+        
+        with self.status_lock:
+            # Show paused instead of listening if paused
+            if self.status_paused:
+                # When paused, don't show level bar - just PAUSED
+                status_parts.append(self.spinner_paused)
+                # Add explicit paused message
+                paused_msg = Text("Press Space to resume", style="dim yellow")
+                status_parts.append(paused_msg)
+            else:
+                # Normal listening with level bar
+                status_parts.append(self.spinner_listening)
+                # Use thin bar characters for slim appearance
+                level_text = Text()
+                level_text.append("─" * filled, style=bar_color)
+                level_text.append("─" * (bar_width - filled), style="dim")
+                status_parts.append(level_text)
 
         # Check speech pipeline activities
         if speech_pipeline and speech_pipeline.is_active:
@@ -175,16 +199,23 @@ class StatusManager:
         Args:
             speech_pipeline: Optional SpeechPipeline to check for speech activity
         """
-        if not self.status_bar_active:
-            # Use DynamicStatusBar so speech state is re-evaluated on each refresh
-            self.status_bar_live = Live(
-                DynamicStatusBar(self, speech_pipeline),
-                console=self.console,
-                refresh_per_second=10,
-                auto_refresh=True,
-            )
-            self.status_bar_live.start()
-            self.status_bar_active = True
+        # Always stop any existing status bar first to prevent overlaps
+        if self.status_bar_live and self.status_bar_active:
+            try:
+                self.status_bar_live.stop()
+            except Exception:
+                pass
+            self.status_bar_active = False
+        
+        # Create and start new status bar
+        self.status_bar_live = Live(
+            DynamicStatusBar(self, speech_pipeline),
+            console=self.console,
+            refresh_per_second=10,
+            auto_refresh=True,
+        )
+        self.status_bar_live.start()
+        self.status_bar_active = True
 
     def stop(self):
         """Stop the status bar display."""
@@ -280,29 +311,28 @@ class DisplayManager:
             message: Final message text
             speech_pipeline: Optional SpeechPipeline to check for speech activity
         """
-        # Show only the message (without status bar)
+        # Stop the live status bar cleanly
         if (
             self.status_manager.status_bar_live
             and self.status_manager.status_bar_active
         ):
-            assistant_panel = Panel(
-                Text(message, style="bold green"),
-                title="[bold green]Assistant[/bold green]",
-                border_style="green",
-                padding=(0, 1),
-                width=int(self.console.width * 0.85),
-            )
-            # Update to show only message
-            self.status_manager.status_bar_live.update(
-                Align.right(assistant_panel, pad=False)
-            )
-            # Stop it - leaves just the message on screen
-            self.status_manager.status_bar_live.stop()
+            try:
+                self.status_manager.status_bar_live.stop()
+            except Exception:
+                pass
             self.status_manager.status_bar_active = False
+        
+        # Print the final message panel to console (makes it permanent)
+        assistant_panel = Panel(
+            Text(message, style="bold green"),
+            title="[bold green]Assistant[/bold green]",
+            border_style="green",
+            padding=(0, 1),
+            width=int(self.console.width * 0.85),
+        )
+        self.console.print(Align.right(assistant_panel, pad=False))
+        self.console.print()
 
-            # Add spacing
-            self.console.print()
-
-            # Start fresh status bar below
-            self.status_manager.start(speech_pipeline)
+        # Start fresh status bar below (this will stop any existing one first)
+        self.status_manager.start(speech_pipeline)
 

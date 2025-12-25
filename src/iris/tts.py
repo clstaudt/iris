@@ -278,6 +278,8 @@ class SpeechPipeline:
         # Flags for status tracking
         self.is_speaking_flag = threading.Event()
         self.is_generating_flag = threading.Event()
+        self.interrupt_flag = threading.Event()
+        self.should_stop_playback = threading.Event()
         self._status_lock = threading.Lock()
         
         # Worker threads
@@ -308,6 +310,11 @@ class SpeechPipeline:
                     self.audio_queue.put(None)
                     break
 
+                # Check if we should skip generation due to interrupt
+                if self.should_stop_playback.is_set():
+                    self.text_queue.task_done()
+                    continue
+
                 # Set flag to indicate TTS generation in progress
                 self.is_generating_flag.set()
 
@@ -317,30 +324,81 @@ class SpeechPipeline:
                 # Clear flag when done generating
                 self.is_generating_flag.clear()
 
-                # Put generated audio in playback queue
-                if audio_file:
+                # Put generated audio in playback queue (only if not stopped)
+                if audio_file and not self.should_stop_playback.is_set():
                     self.audio_queue.put(audio_file)
+                elif audio_file:
+                    # Clean up generated file if we're stopping
+                    try:
+                        Path(audio_file).unlink(missing_ok=True)
+                    except Exception:
+                        pass
                 self.text_queue.task_done()
 
         def playback_worker():
             """Play audio files from audio queue sequentially."""
             while True:
-                audio_file = self.audio_queue.get()
+                # Use short timeout to check stop flag frequently while waiting
+                try:
+                    audio_file = self.audio_queue.get(timeout=0.1)
+                except queue.Empty:
+                    # If we're in stopped mode, sleep longer to avoid busy-waiting
+                    if self.should_stop_playback.is_set():
+                        import time
+                        time.sleep(0.1)
+                    continue
+                
                 if audio_file is None:  # Shutdown signal
                     break
 
-                # Play the audio
+                # Check if we should skip playback due to stop flag
+                if self.should_stop_playback.is_set():
+                    # We're stopped - cleanup this file and drain everything
+                    try:
+                        Path(audio_file).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    self.audio_queue.task_done()
+                    
+                    # Drain ALL remaining items in queue
+                    while not self.audio_queue.empty():
+                        try:
+                            remaining = self.audio_queue.get_nowait()
+                            if remaining and isinstance(remaining, str):
+                                Path(remaining).unlink(missing_ok=True)
+                            self.audio_queue.task_done()
+                        except Exception:
+                            pass
+                    continue
+
+                # We're not stopped - play the audio
                 self.is_speaking_flag.set()
-                self.player.play(audio_file)
-                self.is_speaking_flag.clear()
-
-                # Cleanup
                 try:
-                    Path(audio_file).unlink(missing_ok=True)
+                    self.player.play(audio_file)
                 except Exception:
+                    # Silently handle interruption errors
                     pass
-
-                self.audio_queue.task_done()
+                finally:
+                    self.is_speaking_flag.clear()
+                    
+                    # Cleanup this file
+                    try:
+                        Path(audio_file).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    
+                    self.audio_queue.task_done()
+                    
+                    # If stop flag was set during playback, drain remaining queue
+                    if self.should_stop_playback.is_set():
+                        while not self.audio_queue.empty():
+                            try:
+                                remaining = self.audio_queue.get_nowait()
+                                if remaining and isinstance(remaining, str):
+                                    Path(remaining).unlink(missing_ok=True)
+                                self.audio_queue.task_done()
+                            except Exception:
+                                pass
 
         # Start both threads
         self.generation_worker_thread = threading.Thread(
@@ -370,6 +428,11 @@ class SpeechPipeline:
         Args:
             text: Text to speak
         """
+        # Clear the stop flag when we want to start speaking again
+        self.should_stop_playback.clear()
+        self.player.should_stop = False
+        
+        # Queue the text
         self.text_queue.put(text)
 
     def wait_for_speech(self):
@@ -377,22 +440,64 @@ class SpeechPipeline:
         self.text_queue.join()  # Wait for generation
         self.audio_queue.join()  # Wait for playback
 
+    def interrupt(self) -> bool:
+        """
+        Interrupt current speech immediately and clear all pending speech.
+        
+        Returns:
+            True if speech was interrupted, False if nothing was playing
+        """
+        was_active = self.is_active
+        
+        # Set interrupt flag
+        self.interrupt_flag.set()
+        
+        # Stop everything
+        self.stop()
+        
+        # Clear interrupt flag
+        self.interrupt_flag.clear()
+        
+        return was_active
+
     def stop(self):
         """Stop the speech pipeline immediately."""
-        # Stop any currently playing audio
+        # Set BOTH flags to ensure immediate stop at all levels
+        self.should_stop_playback.set()
+        self.player.should_stop = True
+        
+        # Stop any currently playing audio (this interrupts player.play())
         self.player.stop()
         
-        # Clear queues
+        # Clear the speaking and generating flags immediately
+        self.is_speaking_flag.clear()
+        self.is_generating_flag.clear()
+        
+        # Give the playback worker a moment to see the flag and drain its queue
+        import time
+        time.sleep(0.15)
+        
+        # Clear text queue (stop generation)
         while not self.text_queue.empty():
             try:
                 self.text_queue.get_nowait()
                 self.text_queue.task_done()
             except Exception:
                 pass
+        
+        # Clear audio queue (playback worker will also drain this)
         while not self.audio_queue.empty():
             try:
-                self.audio_queue.get_nowait()
+                audio_file = self.audio_queue.get_nowait()
+                # Cleanup any audio files that won't be played
+                try:
+                    if audio_file and isinstance(audio_file, str):
+                        Path(audio_file).unlink(missing_ok=True)
+                except Exception:
+                    pass
                 self.audio_queue.task_done()
             except Exception:
                 pass
+        
+        # DON'T auto-clear the flag - let queue_speech() clear it when ready to speak again
 

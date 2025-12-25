@@ -182,7 +182,9 @@ class AudioRecorder:
         self.chunk_duration = chunk_duration
 
     def listen(
-        self, on_level: Callable[[float], None] | None = None
+        self,
+        on_level: Callable[[float], None] | None = None,
+        check_paused: Callable[[], bool] | None = None,
     ) -> str | None:
         """
         Record audio from microphone until silence is detected.
@@ -190,6 +192,7 @@ class AudioRecorder:
 
         Args:
             on_level: Optional callback called with audio level (0.0-1.0) for visualization
+            check_paused: Optional callback that returns True if recording should be paused
 
         Returns:
             Path to temporary audio file, or None if recording failed
@@ -198,10 +201,13 @@ class AudioRecorder:
         silent_chunks = 0
         has_audio = False
         max_silent_chunks = int(self.silence_duration * self.sample_rate / 1024)
+        paused = False
 
         def audio_callback(indata, frames, time_info, status):
             """Callback for audio stream."""
-            audio_chunks.append(indata.copy())
+            # Only record if not paused
+            if not paused:
+                audio_chunks.append(indata.copy())
 
         # Start recording immediately
         try:
@@ -214,6 +220,21 @@ class AudioRecorder:
                 try:
                     while True:
                         sd.sleep(50)  # Faster updates for smoother visualization
+
+                        # Check if we should pause/unpause
+                        if check_paused:
+                            new_paused = check_paused()
+                            if new_paused != paused:
+                                paused = new_paused
+                                if paused:
+                                    # Reset silence counter when pausing
+                                    silent_chunks = 0
+
+                        # Skip processing if paused
+                        if paused:
+                            if on_level:
+                                on_level(0.0)  # Show no activity when paused
+                            continue
 
                         if len(audio_chunks) > 0:
                             recent_chunk = audio_chunks[-1]
@@ -368,10 +389,16 @@ class AudioPlayer:
             audio_filter: Optional AudioFilter instance to apply to audio
         """
         self.audio_filter = audio_filter
+        self.should_stop = False
 
     def stop(self):
-        """Stop any currently playing audio."""
-        sd.stop()
+        """Stop any currently playing audio immediately."""
+        self.should_stop = True
+        try:
+            # More graceful stop to avoid malloc errors
+            sd.stop()
+        except Exception:
+            pass
 
     def play(self, audio_file: str):
         """
@@ -380,10 +407,21 @@ class AudioPlayer:
         Args:
             audio_file: Path to WAV file to play
         """
+        # Reset stop flag at start of playback
+        self.should_stop = False
+        
         try:
+            # Check if we should stop before even loading
+            if self.should_stop:
+                return
+            
             # Load audio into memory completely before any playback
             audio, sample_rate = sf.read(audio_file, dtype="float32")
 
+            # Check again before processing
+            if self.should_stop:
+                return
+            
             # Pre-process EVERYTHING before starting playback to avoid CPU spikes
             
             # Apply audio filter if specified
@@ -416,13 +454,35 @@ class AudioPlayer:
             # Ensure audio is contiguous in memory for efficient playback
             audio = np.ascontiguousarray(audio)
 
+            # Final check before starting playback
+            if self.should_stop:
+                return
+
             # Play with maximum buffer size and latency for ultra-smooth playback
             # Extra large buffer (32768 samples = ~740ms) prevents any underruns
             sd.play(audio, sample_rate, blocksize=32768, latency='high')
-            sd.wait()
+            
+            # Wait for playback to complete, checking stop flag frequently
+            while not self.should_stop:
+                try:
+                    stream = sd.get_stream()
+                    if stream is None or not stream.active:
+                        break
+                    sd.sleep(30)  # Check every 30ms for fast interrupt response
+                except Exception:
+                    # Stream already stopped or error
+                    break
+            
+            # If stopped, ensure audio is halted (but check if stream exists first)
+            if self.should_stop:
+                try:
+                    sd.stop()
+                except Exception:
+                    pass  # Already stopped
 
         except Exception as e:
-            print(f"Error playing audio: {e}")
-            import traceback
-
-            traceback.print_exc()
+            # Silently ignore errors from interrupted playback
+            if "PortAudioError" not in str(type(e).__name__):
+                print(f"Error playing audio: {e}")
+                import traceback
+                traceback.print_exc()

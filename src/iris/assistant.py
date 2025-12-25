@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
+from iris.keyboard import KeyboardHandler, KEYBOARD_AVAILABLE
 from iris.llm import ConversationManager
 from iris.personas import Persona, get_persona
 from iris.transcription import WhisperTranscriber
@@ -62,6 +63,7 @@ class VoiceAssistant:
         """
         # Initialize console
         self.console = Console()
+        self.quiet = quiet
         
         # Store persona and use its voice
         self.persona = persona if persona else get_persona("iris")
@@ -129,6 +131,26 @@ class VoiceAssistant:
             vision_model=vision_model if (enable_vision or enable_screen_capture) else None,
             quiet=quiet
         )
+        
+        # Initialize keyboard handler for pause/interrupt
+        self.keyboard_handler = KeyboardHandler()
+        self.listening_paused = False
+        self.generation_interrupted = False
+        self.pause_lock = threading.Lock()
+        self.keyboard_enabled = False
+        
+        if not KEYBOARD_AVAILABLE and not quiet:
+            self.console.print("[yellow]⚠ pynput not installed - pause/interrupt disabled[/yellow]")
+            self.console.print("[dim]  Install with: pip install pynput[/dim]")
+        elif KEYBOARD_AVAILABLE and not quiet:
+            self.console.print()
+            self.console.print("[bold cyan]Pause/Interrupt Controls:[/bold cyan]")
+            self.console.print("  Press [bold]Space[/bold] to pause/resume listening or interrupt speech")
+            self.console.print()
+            self.console.print("[dim]Note: On macOS, you may need to grant Input Monitoring permissions:[/dim]")
+            self.console.print("[dim]  System Settings > Privacy & Security > Input Monitoring[/dim]")
+            self.console.print("[dim]  Add your terminal app (Terminal.app, iTerm, etc.)[/dim]")
+            self.console.print()
 
     def chat(self, prompt: str) -> str:
         """
@@ -152,6 +174,11 @@ class VoiceAssistant:
 
             try:
                 for chunk_text in self.conversation.chat_stream(prompt):
+                    # Check if generation was interrupted
+                    with self.pause_lock:
+                        if self.generation_interrupted:
+                            break
+                    
                     full_response.append(chunk_text)
                     text_buffer += chunk_text
 
@@ -165,6 +192,11 @@ class VoiceAssistant:
                             current_text, self.speech_pipeline
                         )
 
+                    # Check if interrupted before queuing more speech
+                    with self.pause_lock:
+                        if self.generation_interrupted:
+                            continue
+                    
                     # Check if we should speak accumulated text
                     should_speak = False
                     text_to_speak = ""
@@ -207,9 +239,18 @@ class VoiceAssistant:
 
                 # Collect final answer
                 answer = "".join(full_response)
+                
+                # Check if generation was interrupted
+                with self.pause_lock:
+                    was_interrupted = self.generation_interrupted
 
-                # Final update: show ONLY the message (without status bar)
+                # Always finalize the message display (whether interrupted or not)
+                # This cleans up the streaming display properly
                 self.display_manager.finalize_message(answer, self.speech_pipeline)
+                
+                # Enable keyboard handler for speaking/interrupt phase
+                if self.keyboard_enabled and not was_interrupted:
+                    self.keyboard_handler.update_callback(self._handle_space_during_speaking)
 
             finally:
                 # Clear thinking status if still set
@@ -220,14 +261,14 @@ class VoiceAssistant:
                 if not self.status_manager.status_bar_active:
                     self.status_manager.start(self.speech_pipeline)
 
-            # Speak any remaining text that wasn't spoken yet
-            if text_buffer.strip():
+            # Speak any remaining text that wasn't spoken yet (unless interrupted)
+            with self.pause_lock:
+                was_interrupted = self.generation_interrupted
+            
+            if not was_interrupted and text_buffer.strip():
                 clean_text = self.conversation.clean_markdown(text_buffer)
                 if clean_text.strip():
                     self.speech_pipeline.queue_speech(clean_text)
-
-            # Wait for all speech to complete
-            self.speech_pipeline.wait_for_speech()
 
             return answer
 
@@ -247,6 +288,44 @@ class VoiceAssistant:
             traceback.print_exc()
             return error_msg
 
+    def _handle_space_during_listening(self):
+        """Handle space bar press during listening phase."""
+        with self.pause_lock:
+            self.listening_paused = not self.listening_paused
+            paused_state = self.listening_paused
+        
+        # Update status bar flag - the audio level callback will pick it up
+        with self.status_manager.status_lock:
+            self.status_manager.status_paused = paused_state
+        # Don't manually update - let the ongoing audio level updates handle it
+
+    def _handle_space_during_speaking(self):
+        """Handle space bar press during speaking phase."""
+        # Set flag to interrupt generation
+        with self.pause_lock:
+            self.generation_interrupted = True
+        
+        # Stop speech pipeline and clear all queued audio
+        self.speech_pipeline.stop()
+        
+        # Show interrupted status very briefly
+        with self.status_manager.status_lock:
+            self.status_manager.status_interrupted = True
+        
+        # Clear interrupted status after brief moment
+        def clear_interrupted():
+            import time
+            time.sleep(0.5)  # Show for 500ms
+            with self.status_manager.status_lock:
+                self.status_manager.status_interrupted = False
+        
+        threading.Thread(target=clear_interrupted, daemon=True).start()
+
+    def _check_listening_paused(self) -> bool:
+        """Check if listening is currently paused."""
+        with self.pause_lock:
+            return self.listening_paused
+
     def run_loop(self):
         """Run the main voice assistant loop."""
         self.console.clear()
@@ -257,6 +336,8 @@ class VoiceAssistant:
         info.append(f"◈ {self.persona.name}", style="dim magenta")
         info.append("  •  ", style="dim")
         info.append(f"{self.conversation.model}", style="dim")
+        info.append("  •  ", style="dim")
+        info.append("Space to pause/interrupt", style="dim cyan")
         info.append("  •  ", style="dim")
         info.append("Ctrl+C to exit", style="dim cyan")
 
@@ -276,6 +357,39 @@ class VoiceAssistant:
             while True:
                 try:
                     # 1. Listen for voice input with level visualization
+                    
+                    # Enable keyboard handler for listening phase FIRST
+                    self.listening_paused = False
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_paused = False
+                    
+                    if not self.keyboard_enabled:
+                        # Try to start keyboard handler (only once)
+                        self.keyboard_enabled = self.keyboard_handler.start(
+                            self._handle_space_during_listening
+                        )
+                        if not self.keyboard_enabled:
+                            # Show warning only once
+                            self.console.print()
+                            self.console.print(
+                                "[bold yellow]⚠ Space bar controls unavailable[/bold yellow]"
+                            )
+                            self.console.print(
+                                "[yellow]Iris needs Input Monitoring permission to detect key presses.[/yellow]"
+                            )
+                            self.console.print()
+                            self.console.print("[cyan]To enable:[/cyan]")
+                            self.console.print("  1. Open System Settings > Privacy & Security > Input Monitoring")
+                            self.console.print("  2. Add your terminal app (Terminal.app, iTerm2, etc.)")
+                            self.console.print("  3. Restart Iris")
+                            self.console.print()
+                            self.console.print("[dim]Continuing without pause/interrupt controls...[/dim]")
+                            self.console.print()
+                    else:
+                        # Just update callback, don't restart listener
+                        self.keyboard_handler.update_callback(self._handle_space_during_listening)
+                    
+                    # Now set listening status
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = True
                     self.status_manager.update_status_bar(self.speech_pipeline)
@@ -286,10 +400,17 @@ class VoiceAssistant:
                             level, self.speech_pipeline
                         )
 
-                    audio_path = self.recorder.listen(on_level=on_audio_level)
+                    audio_path = self.recorder.listen(
+                        on_level=on_audio_level,
+                        check_paused=self._check_listening_paused
+                    )
+
+                    # Disable keyboard handler for listening and clear paused state
+                    self.keyboard_handler.update_callback(None)
 
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
+                        self.status_manager.status_paused = False
                     self.status_manager.update_status_bar(self.speech_pipeline)
 
                     if not audio_path:
@@ -313,7 +434,43 @@ class VoiceAssistant:
                     self.display_manager.show_user_message(text)
 
                     # 3. Send to LLM (streams response and speaks it)
+                    self.generation_interrupted = False
                     self.chat(text)
+                    
+                        # Check if generation was interrupted before even starting to wait
+                    with self.pause_lock:
+                        was_interrupted = self.generation_interrupted
+                    
+                    # Only wait for speech if not interrupted during generation
+                    if not was_interrupted:
+                        # Wait for speech to finish OR interrupt
+                        # This prevents hearing our own voice while allowing interruption
+                        import time
+                        
+                        while True:
+                            # Check if interrupted during speech
+                            with self.pause_lock:
+                                if self.generation_interrupted:
+                                    # Disable keyboard handler immediately when interrupted
+                                    if self.keyboard_enabled:
+                                        self.keyboard_handler.update_callback(None)
+                                    # Give a moment for stop() and cleanup to complete
+                                    time.sleep(0.3)
+                                    break
+                            
+                            # Check if speech finished naturally
+                            if not self.speech_pipeline.is_active:
+                                break
+                            
+                            time.sleep(0.05)  # Check every 50ms
+
+                        # Disable keyboard handler after speaking finishes naturally
+                        if self.keyboard_enabled:
+                            self.keyboard_handler.update_callback(None)
+                    else:
+                        # Was interrupted during generation - just disable handler
+                        if self.keyboard_enabled:
+                            self.keyboard_handler.update_callback(None)
 
                     # Cleanup
                     Path(audio_path).unlink(missing_ok=True)
@@ -321,6 +478,7 @@ class VoiceAssistant:
                 except KeyboardInterrupt:
                     self.speech_pipeline.stop()
                     self.status_manager.stop()
+                    self.keyboard_handler.stop()
                     self.console.print("\n[bold cyan]Goodbye![/bold cyan]")
                     break
                 except Exception as e:
@@ -331,6 +489,7 @@ class VoiceAssistant:
         finally:
             self.speech_pipeline.stop()
             self.status_manager.stop()
+            self.keyboard_handler.stop()
             if self.tools:
                 self.tools.cleanup()
 

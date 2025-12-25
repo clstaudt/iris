@@ -72,6 +72,7 @@ Built with:
 - 🧠 **Local LLM** — Powered by Ollama, keeping all conversations private
 - 🗣️ **Natural Speech** — High-quality text-to-speech
 - ⚡ **Fast Response** — Natural conversation flow
+- ⏸️ **Pause & Interrupt** — Control the conversation flow with the space bar
 - 📊 **Rich Terminal UI** — Live status and conversation display
 - 🔄 **Conversation Memory** — Maintains context throughout the conversation
 - 👁️ **Vision Support** — Can see through your webcam
@@ -137,7 +138,12 @@ Start the voice assistant:
 iris
 ```
 
-Press `Ctrl+C` to exit.
+### Controls
+
+- **Space bar** — Pause/resume listening or interrupt speech
+- **Ctrl+C** — Exit the assistant
+
+While Iris is listening, press the space bar to pause recording. Press it again to resume. While Iris is speaking, press the space bar to interrupt and immediately return to listening mode.
 
 ### Command-line Options
 
