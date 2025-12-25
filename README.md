@@ -115,7 +115,7 @@ Feel free to experiment with different Ollama models! Try `llama3:8b`, `mistral`
 ### Installation
 
 ```bash
-git clone https://github.com/your-username/iris.git
+git clone https://github.com/clstaudt/iris.git
 cd iris
 uv sync
 uv run iris
