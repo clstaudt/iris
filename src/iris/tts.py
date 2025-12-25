@@ -1,15 +1,15 @@
-"""Text-to-speech generation and pipeline using kokoro-tts."""
+"""Text-to-speech generation and pipeline using kokoro-onnx."""
 
 import os
 import queue
-import shutil
-import subprocess
 import tempfile
 import threading
 import urllib.request
 import warnings
 from pathlib import Path
 
+import soundfile as sf
+from kokoro_onnx import Kokoro
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn
 
@@ -21,7 +21,7 @@ KOKORO_VOICES_URL = "https://github.com/nazdridoy/kokoro-tts/releases/download/v
 
 
 class KokoroGenerator:
-    """Generates speech audio using kokoro-tts."""
+    """Generates speech audio using kokoro-onnx."""
 
     def __init__(self, voice: str = "af_bella", speed: float = 1.25, quiet: bool = True):
         """
@@ -35,37 +35,14 @@ class KokoroGenerator:
         self.voice = voice
         self.speed = speed
         self.quiet = quiet
-        self.kokoro_cmd = self._find_kokoro_cmd()
         
         # Find model files - check multiple locations
         self.model_path, self.voices_path = self._locate_models()
-
-    def _find_kokoro_cmd(self) -> str:
-        """
-        Find kokoro-tts command.
         
-        Returns:
-            Path to kokoro-tts executable
-            
-        Raises:
-            FileNotFoundError: If kokoro-tts is not found
-        """
-        # Check PATH first
-        if cmd := shutil.which("kokoro-tts"):
-            return cmd
-        
-        # Check common locations
-        candidates = [
-            Path.home() / ".local" / "bin" / "kokoro-tts",  # Unix pip --user
-            Path.home() / ".cargo" / "bin" / "kokoro-tts",  # Rust install
-        ]
-        
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
-        
-        raise FileNotFoundError(
-            "kokoro-tts not found. Install with: pip install kokoro-tts"
+        # Initialize Kokoro
+        self.kokoro = Kokoro(
+            model_path=str(self.model_path),
+            voices_path=str(self.voices_path)
         )
 
     def _locate_models(self) -> tuple[Path, Path]:
@@ -232,7 +209,7 @@ class KokoroGenerator:
 
     def generate(self, text: str) -> str | None:
         """
-        Generate audio file from text using kokoro-tts CLI.
+        Generate audio file from text using kokoro-onnx Python API.
 
         Args:
             text: Text to convert to speech
@@ -246,62 +223,30 @@ class KokoroGenerator:
             temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
             temp_audio.close()
 
-            result = subprocess.run(
-                [
-                    self.kokoro_cmd,
-                    "/dev/stdin",
-                    temp_audio.name,
-                    "--voice",
-                    self.voice,
-                    "--speed",
-                    str(self.speed),
-                    "--lang",
-                    "en-us",
-                    "--format",
-                    "wav",
-                    "--model",
-                    str(self.model_path),
-                    "--voices",
-                    str(self.voices_path),
-                ],
-                input=text,
-                capture_output=True,
-                text=True,
-                timeout=120,
+            # Generate audio using kokoro-onnx Python API
+            audio_data, sample_rate = self.kokoro.create(
+                text=text,
+                voice=self.voice,
+                speed=self.speed,
+                lang="en-us"
             )
 
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"kokoro-tts CLI failed (exit {result.returncode}): "
-                    f"stdout={result.stdout}, stderr={result.stderr}"
-                )
+            # Save audio to file
+            sf.write(temp_audio.name, audio_data, sample_rate)
 
-            # Check if file was created and has content
+            # Verify file was created and has content
             if not Path(temp_audio.name).exists():
-                raise RuntimeError(
-                    f"kokoro-tts did not create output file. "
-                    f"stdout: {result.stdout}, stderr: {result.stderr}"
-                )
+                raise RuntimeError("Failed to create output file")
 
             file_size = Path(temp_audio.name).stat().st_size
             if file_size == 0:
-                raise RuntimeError(
-                    f"kokoro-tts created empty file. "
-                    f"stdout: {result.stdout}, stderr: {result.stderr}"
-                )
+                raise RuntimeError("Created empty audio file")
 
             return temp_audio.name
 
-        except FileNotFoundError:
-            print("Error: kokoro-tts CLI not found. Install with: pip install kokoro")
-            return None
-        except subprocess.TimeoutExpired:
-            print("Error: Speech generation timed out")
-            return None
         except Exception as e:
             print(f"Error generating speech: {e}")
             import traceback
-
             traceback.print_exc()
             return None
 
@@ -348,7 +293,15 @@ class SpeechPipeline:
         """
 
         def generation_worker():
-            """Generate TTS audio files from text queue."""
+            """Generate TTS audio files from text queue with lower priority."""
+            # Lower priority of generation thread to prevent audio underruns
+            try:
+                import os
+                # Increase niceness significantly (lower priority) on Unix systems
+                os.nice(10)
+            except (AttributeError, OSError):
+                pass  # Not available on all systems
+            
             while True:
                 text = self.text_queue.get()
                 if text is None:  # Shutdown signal

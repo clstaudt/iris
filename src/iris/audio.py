@@ -381,18 +381,20 @@ class AudioPlayer:
             audio_file: Path to WAV file to play
         """
         try:
-            # Load and play the audio
+            # Load audio into memory completely before any playback
             audio, sample_rate = sf.read(audio_file, dtype="float32")
 
+            # Pre-process EVERYTHING before starting playback to avoid CPU spikes
+            
             # Apply audio filter if specified
             if self.audio_filter:
                 audio = self.audio_filter.apply(audio, sample_rate)
 
             # Normalize audio to prevent clipping and reduce artifacts
-            # Scale to 90% of max to avoid clipping
+            # Scale to 85% of max to give extra headroom
             max_val = np.abs(audio).max()
             if max_val > 0:
-                audio = audio * (0.9 / max_val)
+                audio = audio * (0.85 / max_val)
 
             # Apply gentle fade in/out to reduce clicks
             fade_samples = int(sample_rate * 0.01)  # 10ms fade
@@ -411,8 +413,12 @@ class AudioPlayer:
                 else:
                     audio[-fade_samples:] *= fade_out[:, np.newaxis]
 
-            # Play audio with appropriate blocksize to reduce glitches
-            sd.play(audio, sample_rate, blocksize=2048)
+            # Ensure audio is contiguous in memory for efficient playback
+            audio = np.ascontiguousarray(audio)
+
+            # Play with maximum buffer size and latency for ultra-smooth playback
+            # Extra large buffer (32768 samples = ~740ms) prevents any underruns
+            sd.play(audio, sample_rate, blocksize=32768, latency='high')
             sd.wait()
 
         except Exception as e:
