@@ -1,7 +1,6 @@
 """Setup wizard for first-run experience."""
 
 import os
-import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -97,15 +96,6 @@ class SetupWizard:
         if checks["whisper"] == "missing":
             downloads_needed.append(("whisper", f"Whisper model ({self.whisper_model})"))
 
-        if checks["kokoro_cli"] == "missing":
-            self.console.print()
-            self.console.print(
-                "[bold red]✗ kokoro-tts CLI not found[/bold red]\n"
-                "  Please install it first:\n"
-                "  [cyan]pip install kokoro-tts[/cyan]\n"
-            )
-            return False
-
         if checks["kokoro_models"] == "missing":
             downloads_needed.append(("kokoro_models", "Kokoro TTS models (~360 MB)"))
 
@@ -173,7 +163,6 @@ class SetupWizard:
             "ollama": self._check_ollama_running(),
             "ollama_model": self._check_ollama_model(),
             "whisper": self._check_whisper_model(),
-            "kokoro_cli": self._check_kokoro_cli(),
             "kokoro_models": self._check_kokoro_models(),
         }
 
@@ -203,12 +192,6 @@ class SetupWizard:
             table.add_row("[green]✓[/green]", f"Whisper ({self.whisper_model})", "cached")
         else:
             table.add_row("[yellow]↓[/yellow]", f"Whisper ({self.whisper_model})", "needs download")
-
-        # Kokoro CLI
-        if checks["kokoro_cli"] == "ready":
-            table.add_row("[green]✓[/green]", "kokoro-tts CLI", "installed")
-        else:
-            table.add_row("[red]✗[/red]", "kokoro-tts CLI", "not found")
 
         # Kokoro models
         if checks["kokoro_models"] == "ready":
@@ -260,22 +243,6 @@ class SetupWizard:
 
         if model_path.exists() and any(model_path.iterdir()):
             return "ready"
-        return "missing"
-
-    def _check_kokoro_cli(self) -> str:
-        """Check if kokoro-tts CLI is installed."""
-        if shutil.which("kokoro-tts"):
-            return "ready"
-
-        # Check common locations
-        candidates = [
-            Path.home() / ".local" / "bin" / "kokoro-tts",
-            Path.home() / ".cargo" / "bin" / "kokoro-tts",
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return "ready"
-
         return "missing"
 
     def _check_kokoro_models(self) -> str:
@@ -450,6 +417,7 @@ def run_setup(whisper_model: str = "small", llm_model: str = "qwen3:1.7b") -> bo
     """
     wizard = SetupWizard(whisper_model=whisper_model, llm_model=llm_model)
     return wizard.run()
+
 
 
 

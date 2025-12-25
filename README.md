@@ -132,7 +132,6 @@ On first run, Iris includes a **setup wizard** that checks all dependencies and 
 ✓  Ollama                    running
 ↓  LLM (qwen3:1.7b)          needs download
 ↓  Whisper (small)           needs download
-✓  kokoro-tts CLI            installed
 ↓  Kokoro TTS models         needs download
 
 The following components need to be downloaded:
@@ -149,6 +148,8 @@ Download now? [Y/n]:
 ```
 
 The wizard will show progress bars during downloads and tell you exactly where files are being stored.
+
+**Note**: The Kokoro TTS Python library (`kokoro-onnx`) is installed automatically with other dependencies when you run `uv sync`. Only the model files need to be downloaded separately.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
