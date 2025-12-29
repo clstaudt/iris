@@ -180,6 +180,35 @@ class AudioRecorder:
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
         self.chunk_duration = chunk_duration
+        self._device_error = False  # Track if we've had a device error
+
+    @staticmethod
+    def check_audio_devices() -> tuple[bool, str]:
+        """
+        Check if audio input devices are available.
+
+        Returns:
+            Tuple of (devices_available: bool, message: str)
+        """
+        try:
+            devices = sd.query_devices()
+            input_devices = [d for d in devices if d['max_input_channels'] > 0]
+
+            if not input_devices:
+                return False, "No audio input devices found. Please connect a microphone."
+
+            # Check if default input device is valid
+            try:
+                default_input = sd.query_devices(kind='input')
+                if default_input['max_input_channels'] == 0:
+                    return False, "Default input device has no input channels."
+            except Exception:
+                return False, "No default audio input device configured."
+
+            return True, "Audio input device available"
+
+        except Exception as e:
+            return False, f"Error checking audio devices: {e}"
 
     def listen(
         self, on_level: Callable[[float], None] | None = None
@@ -239,7 +268,17 @@ class AudioRecorder:
                     # Re-raise to allow proper shutdown in main loop
                     raise
         except Exception as e:
-            print(f"Recording error: {e}")
+            error_str = str(e).lower()
+            # Check if this is a device error (no microphone available)
+            if "device" in error_str or "input" in error_str or "invalid" in error_str:
+                if not self._device_error:
+                    # Only print the error once
+                    self._device_error = True
+                    print(f"\n[ERROR] Audio device error: {e}")
+                    print("No microphone available. Please connect a microphone and restart.")
+            else:
+                # Other errors - print them
+                print(f"Recording error: {e}")
             return None
 
         if not audio_chunks:
@@ -337,7 +376,17 @@ class AudioRecorder:
                 except KeyboardInterrupt:
                     raise
         except Exception as e:
-            print(f"Recording error: {e}")
+            error_str = str(e).lower()
+            # Check if this is a device error (no microphone available)
+            if "device" in error_str or "input" in error_str or "invalid" in error_str:
+                if not self._device_error:
+                    # Only print the error once
+                    self._device_error = True
+                    print(f"\n[ERROR] Audio device error: {e}")
+                    print("No microphone available. Please connect a microphone and restart.")
+            else:
+                # Other errors - print them
+                print(f"Recording error: {e}")
             return None
 
         if not audio_chunks:

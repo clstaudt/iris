@@ -251,6 +251,21 @@ class VoiceAssistant:
         """Run the main voice assistant loop."""
         self.console.clear()
 
+        # Check if audio devices are available before starting
+        from iris.audio import AudioRecorder
+        devices_ok, device_msg = AudioRecorder.check_audio_devices()
+        if not devices_ok:
+            self.console.print()
+            self.console.print("[bold red]✗ Microphone Error[/bold red]")
+            self.console.print(f"\n{device_msg}")
+            self.console.print()
+            self.console.print("[dim]Possible solutions:[/dim]")
+            self.console.print("  • Connect a microphone or headset")
+            self.console.print("  • Check system audio input settings")
+            self.console.print("  • Restart the application after connecting a microphone")
+            self.console.print()
+            return
+
         # App name display with persona
         name_text = Text("\niris\n", style="bold bright_white", justify="center")
         info = Text()
@@ -291,6 +306,17 @@ class VoiceAssistant:
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
                     self.status_manager.update_status_bar(self.speech_pipeline)
+
+                    # Check if we had a device error
+                    if self.recorder._device_error:
+                        self.speech_pipeline.stop()
+                        self.status_manager.stop()
+                        self.console.print()
+                        self.console.print("[bold red]✗ Microphone disconnected or unavailable[/bold red]")
+                        self.console.print()
+                        self.console.print("[dim]Please connect a microphone and restart the application.[/dim]")
+                        self.console.print()
+                        break
 
                     if not audio_path:
                         continue
