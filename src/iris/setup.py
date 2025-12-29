@@ -1,7 +1,6 @@
 """Setup wizard for first-run experience."""
 
 import os
-import subprocess
 import urllib.request
 from pathlib import Path
 
@@ -16,7 +15,6 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 from rich.table import Table
-from rich.text import Text
 
 # Kokoro model download URLs
 KOKORO_MODEL_URL = (
@@ -108,7 +106,9 @@ class SetupWizard:
 
         # Ask user to confirm downloads
         self.console.print()
-        self.console.print("[bold yellow]The following components need to be downloaded:[/bold yellow]")
+        self.console.print(
+            "[bold yellow]The following components need to be downloaded:[/bold yellow]"
+        )
         for _, desc in downloads_needed:
             self.console.print(f"  • {desc}")
 
@@ -116,7 +116,7 @@ class SetupWizard:
         self.console.print()
         self.console.print("[dim]Download locations:[/dim]")
         if checks["ollama_model"] == "missing":
-            self.console.print(f"  [dim]• Ollama models: ~/.ollama/models/[/dim]")
+            self.console.print("  [dim]• Ollama models: ~/.ollama/models/[/dim]")
         if checks["whisper"] == "missing":
             self.console.print(f"  [dim]• Whisper model: {WHISPER_CACHE_DIR}/[/dim]")
         if checks["kokoro_models"] == "missing":
@@ -215,8 +215,8 @@ class SetupWizard:
         try:
             import ollama
             models = ollama.list()
-            model_names = [m.model for m in models.models]
-            
+            model_names = [m.model for m in models.models if m.model]
+
             # Check for exact match or match without tag
             for name in model_names:
                 if name == self.llm_model or name.startswith(f"{self.llm_model}:"):
@@ -228,7 +228,7 @@ class SetupWizard:
                     their_tag = name.split(":")[-1] if ":" in name else "latest"
                     if our_tag == their_tag:
                         return "ready"
-            
+
             return "missing"
         except Exception:
             return "missing"
@@ -241,8 +241,12 @@ class SetupWizard:
         model_dir_name = f"models--Systran--faster-whisper-{self.whisper_model}"
         model_path = WHISPER_CACHE_DIR / model_dir_name
 
-        if model_path.exists() and any(model_path.iterdir()):
-            return "ready"
+        try:
+            if model_path.exists() and model_path.is_dir() and any(model_path.iterdir()):
+                return "ready"
+        except (PermissionError, OSError):
+            # Can't read directory - treat as missing
+            pass
         return "missing"
 
     def _check_kokoro_models(self) -> str:
@@ -271,7 +275,7 @@ class SetupWizard:
     def _download_ollama_model(self) -> bool:
         """Download Ollama model with progress display."""
         self.console.print(f"[bold]Pulling Ollama model: {self.llm_model}[/bold]")
-        self.console.print(f"[dim]Location: ~/.ollama/models/[/dim]")
+        self.console.print("[dim]Location: ~/.ollama/models/[/dim]")
         self.console.print()
 
         try:
@@ -290,14 +294,14 @@ class SetupWizard:
 
                 for response in ollama.pull(self.llm_model, stream=True):
                     status = response.get("status", "")
-                    
+
                     if status != current_status:
                         current_status = status
                         progress.update(task, description=status[:40])
 
                     # Update progress if available
-                    completed = response.get("completed", 0)
-                    total = response.get("total", 0)
+                    completed = response.get("completed") or 0
+                    total = response.get("total") or 0
                     if total > 0:
                         percentage = (completed / total) * 100
                         progress.update(task, completed=percentage)
@@ -352,7 +356,10 @@ class SetupWizard:
             return False
 
     def _download_kokoro_models(self) -> bool:
-        """Download Kokoro TTS models with progress display."""
+        """
+        Download Kokoro TTS models with progress display.
+        Uses atomic download - both files must succeed or neither is kept.
+        """
         self.console.print("[bold]Downloading Kokoro TTS models[/bold]")
         self.console.print(f"[dim]Location: {KOKORO_MODELS_DIR}/[/dim]")
         self.console.print()
@@ -360,13 +367,22 @@ class SetupWizard:
         # Create target directory
         KOKORO_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+        model_path = KOKORO_MODELS_DIR / "kokoro-v1.0.onnx"
+        voices_path = KOKORO_MODELS_DIR / "voices-v1.0.bin"
+
+        # Download to temp files first for atomicity
         downloads = [
-            (KOKORO_MODEL_URL, KOKORO_MODELS_DIR / "kokoro-v1.0.onnx", "Kokoro model"),
-            (KOKORO_VOICES_URL, KOKORO_MODELS_DIR / "voices-v1.0.bin", "Voice data"),
+            (KOKORO_MODEL_URL, model_path, "Kokoro model"),
+            (KOKORO_VOICES_URL, voices_path, "Voice data"),
         ]
 
         try:
+            # Download all files (they will be downloaded to .tmp first)
             for url, path, description in downloads:
+                # Skip if file already exists and has content
+                if path.exists() and path.stat().st_size > 0:
+                    self.console.print(f"[dim]{description} already exists, skipping[/dim]")
+                    continue
                 self._download_file(url, path, description)
 
             self.console.print("[green]✓ Kokoro TTS models downloaded[/green]")
@@ -375,33 +391,80 @@ class SetupWizard:
 
         except Exception as e:
             self.console.print(f"[red]✗ Failed to download Kokoro models: {e}[/red]")
-            self.console.print(f"[dim]You can download manually from:[/dim]")
+            self.console.print("[dim]You can download manually from:[/dim]")
             self.console.print(f"[dim]  {KOKORO_MODEL_URL}[/dim]")
             self.console.print(f"[dim]  {KOKORO_VOICES_URL}[/dim]")
+
+            # Clean up any partial downloads
+            for _, path, _ in downloads:
+                if path.exists() and path.stat().st_size == 0:
+                    try:
+                        path.unlink()
+                    except Exception:
+                        pass
+
             return False
 
     def _download_file(self, url: str, path: Path, description: str):
-        """Download a single file with progress bar."""
-        with urllib.request.urlopen(url, timeout=30) as response:
-            total_size = int(response.headers.get("Content-Length", 0))
+        """
+        Download a single file with progress bar.
 
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]{task.description}"),
-                BarColumn(),
-                DownloadColumn(),
-                TransferSpeedColumn(),
-                console=self.console,
-            ) as progress:
-                task = progress.add_task(description, total=total_size)
+        Args:
+            url: URL to download from
+            path: Path to save to
+            description: Description for progress display
 
-                with open(path, "wb") as f:
-                    while True:
-                        chunk = response.read(8192)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        progress.update(task, advance=len(chunk))
+        Raises:
+            Exception: If download fails or file validation fails
+        """
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+
+        try:
+            # Use longer timeout for large files (5 minutes)
+            with urllib.request.urlopen(url, timeout=300) as response:
+                total_size = int(response.headers.get("Content-Length", 0))
+
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[bold blue]{task.description}"),
+                    BarColumn(),
+                    DownloadColumn(),
+                    TransferSpeedColumn(),
+                    console=self.console,
+                ) as progress:
+                    task = progress.add_task(description, total=total_size)
+
+                    with open(temp_path, "wb") as f:
+                        downloaded = 0
+                        while True:
+                            chunk = response.read(8192)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            progress.update(task, advance=len(chunk))
+
+                # Validate download
+                if total_size > 0 and downloaded != total_size:
+                    raise RuntimeError(
+                        f"Download incomplete: expected {total_size} bytes, got {downloaded} bytes"
+                    )
+
+                # Validate file exists and has content
+                if not temp_path.exists() or temp_path.stat().st_size == 0:
+                    raise RuntimeError("Downloaded file is empty or missing")
+
+                # Move temp file to final location
+                temp_path.replace(path)
+
+        except Exception as e:
+            # Clean up partial download
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            raise e
 
 
 def run_setup(whisper_model: str = "small", llm_model: str = "qwen3:1.7b") -> bool:
