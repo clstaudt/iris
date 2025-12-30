@@ -9,7 +9,7 @@ from typing import Optional
 
 # Suppress OpenCV/AVCapture warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
-os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "1"
+# Note: We handle stderr redirection in _look() to suppress warnings without blocking permissions
 
 try:
     from PIL import Image
