@@ -16,7 +16,14 @@ warnings.filterwarnings("ignore")
 class ConversationManager:
     """Manages LLM conversations with context and summarization."""
 
-    def __init__(self, model: str = "qwen3:1.7b", persona: Optional[Persona] = None, tools=None, vision_model: Optional[str] = None, quiet: bool = True):
+    def __init__(
+        self,
+        model: str = "qwen3:1.7b",
+        persona: Optional[Persona] = None,
+        tools=None,
+        vision_model: Optional[str] = None,
+        quiet: bool = True,
+    ):
         """
         Initialize conversation manager.
 
@@ -87,9 +94,7 @@ class ConversationManager:
             else:
                 # Fallback: use a conservative default
                 if not self.quiet:
-                    print(
-                        "Could not detect model context length, using default: 25,600 tokens"
-                    )
+                    print("Could not detect model context length, using default: 25,600 tokens")
                 return 25600
 
         except Exception as e:
@@ -142,12 +147,12 @@ class ConversationManager:
         # Remove emojis using regex (matches all emoji characters)
         emoji_pattern = re.compile(
             "["
-            "\U0001F600-\U0001F64F"  # emoticons
-            "\U0001F300-\U0001F5FF"  # symbols & pictographs
-            "\U0001F680-\U0001F6FF"  # transport & map symbols
-            "\U0001F1E0-\U0001F1FF"  # flags (iOS)
-            "\U00002702-\U000027B0"
-            "\U000024C2-\U0001F251"
+            "\U0001f600-\U0001f64f"  # emoticons
+            "\U0001f300-\U0001f5ff"  # symbols & pictographs
+            "\U0001f680-\U0001f6ff"  # transport & map symbols
+            "\U0001f1e0-\U0001f1ff"  # flags (iOS)
+            "\U00002702-\U000027b0"
+            "\U000024c2-\U0001f251"
             "]+",
             flags=re.UNICODE,
         )
@@ -185,7 +190,9 @@ class ConversationManager:
                     },
                 ],
             )
-            return summary_response.get("message", {}).get("content", "Previous conversation context.")
+            return summary_response.get("message", {}).get(
+                "content", "Previous conversation context."
+            )
         except Exception as e:
             print(f"Warning: Could not summarize: {e}")
             # Fallback: just take first message of each type
@@ -201,23 +208,25 @@ class ConversationManager:
         """
         # Build system prompt with persona description
         system_content = self.persona.description
-        
+
         # Add tool awareness if tools are available
         if self.tools and self.tools.has_tools():
             tool_names = list(self.tools._enabled_tools.keys())
-            
+
             # Add general tool instruction
-            tool_instructions = "\n\nIMPORTANT - You have access to tools that you must use appropriately:\n"
-            
-            if 'look' in tool_names:
+            tool_instructions = (
+                "\n\nIMPORTANT - You have access to tools that you must use appropriately:\n"
+            )
+
+            if "look" in tool_names:
                 tool_instructions += (
                     "- 'look' function: Your CAMERA. You CANNOT see through the camera without calling this.\n"
                     "  * YOU MUST call 'look' for ANY question about physical objects, gestures, or camera view\n"
                     "  * NEVER describe what the camera sees without calling this function first\n"
                     "  * Call it EVERY TIME they say 'look again' - always capture fresh\n"
                 )
-            
-            if 'capture_screen' in tool_names:
+
+            if "capture_screen" in tool_names:
                 tool_instructions += (
                     "- 'capture_screen' function: Your ONLY way to see the COMPUTER SCREEN.\n"
                     "  * YOU MUST call this function for ANY question about the screen, windows, or applications\n"
@@ -225,16 +234,14 @@ class ConversationManager:
                     "  * If asked about 'screen', 'monitor', 'display', 'window', 'application' - USE THIS TOOL\n"
                     "  * Do NOT guess or make up what's on screen - you CANNOT see it without this function\n"
                 )
-            
-            if 'search' in tool_names:
-                tool_instructions += (
-                    "- 'search' function: Use this to find current information, news, or facts you don't know.\n"
-                )
-            
+
+            if "search" in tool_names:
+                tool_instructions += "- 'search' function: Use this to find current information, news, or facts you don't know.\n"
+
             tool_instructions += "\nIMPORTANT: You MUST use these functions when appropriate. NEVER make up or guess what you see."
-            
+
             system_content += tool_instructions
-        
+
         system_prompt = {
             "role": "system",
             "content": system_content,
@@ -308,92 +315,91 @@ class ConversationManager:
         if self.tools and self.tools.has_tools():
             # Use streaming even for tool check - only buffer if we see tool calls
             stream = ollama.chat(
-                model=self.model,
-                messages=messages,
-                tools=self.tools.get_schemas(),
-                stream=True
+                model=self.model, messages=messages, tools=self.tools.get_schemas(), stream=True
             )
-            
+
             # Collect response and check for tool calls
             full_response = []
             tool_calls = None
-            
+
             for chunk in stream:
-                message_chunk = chunk.get('message', {})
-                
+                message_chunk = chunk.get("message", {})
+
                 # Collect content
-                if 'content' in message_chunk:
-                    full_response.append(message_chunk['content'])
-                
+                if "content" in message_chunk:
+                    full_response.append(message_chunk["content"])
+
                 # Check for tool calls - they might appear in any chunk, not just the last
-                if message_chunk.get('tool_calls'):
-                    tool_calls = message_chunk['tool_calls']
-            
+                if message_chunk.get("tool_calls"):
+                    tool_calls = message_chunk["tool_calls"]
+
             # If LLM wants to use tools, execute them and get new response
             if tool_calls:
                 # Build message with tool call
-                messages.append({
-                    'role': 'assistant',
-                    'content': ''.join(full_response),
-                    'tool_calls': tool_calls
-                })
-                
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "".join(full_response),
+                        "tool_calls": tool_calls,
+                    }
+                )
+
                 # Check if any tool is a vision tool (look/camera)
                 uses_vision = False
                 for tool_call in tool_calls:
-                    tool_name = tool_call['function']['name']
-                    tool_args = tool_call['function'].get('arguments', {})
-                    
+                    tool_name = tool_call["function"]["name"]
+                    tool_args = tool_call["function"].get("arguments", {})
+
                     # Check if this is a vision tool and set status BEFORE executing
-                    if tool_name == 'look':
+                    if tool_name == "look":
                         uses_vision = True
                         # Set looking status immediately when we know LLM wants to look
                         if self.tools.status_manager:
                             with self.tools.status_manager.status_lock:
                                 self.tools.status_manager.status_looking = True
-                    elif tool_name == 'capture_screen':
+                    elif tool_name == "capture_screen":
                         uses_vision = True  # Screen capture also needs vision model
-                    
+
                     # Execute the tool
                     result = self.tools.execute(tool_name, **tool_args)
-                    
+
                     # Format tool response for LLM
-                    tool_msg = {'role': 'tool', 'content': ''}
-                    
+                    tool_msg = {"role": "tool", "content": ""}
+
                     # Check if tool execution failed
-                    if not result.get('success'):
+                    if not result.get("success"):
                         # Tool failed - tell LLM about the error
-                        tool_msg['content'] = f"Error: {result.get('message', 'Tool execution failed')}"
+                        tool_msg["content"] = (
+                            f"Error: {result.get('message', 'Tool execution failed')}"
+                        )
                         messages.append(tool_msg)
                         continue
-                    
+
                     # If tool returned an image, include it
-                    if result.get('image'):
-                        tool_msg['images'] = [result['image']]
-                        tool_msg['content'] = result.get('message', 'Image captured')
-                    elif result.get('result'):
-                        tool_msg['content'] = str(result['result'])
+                    if result.get("image"):
+                        tool_msg["images"] = [result["image"]]
+                        tool_msg["content"] = result.get("message", "Image captured")
+                    elif result.get("result"):
+                        tool_msg["content"] = str(result["result"])
                     else:
-                        tool_msg['content'] = result.get('message', 'Tool executed')
-                    
+                        tool_msg["content"] = result.get("message", "Tool executed")
+
                     messages.append(tool_msg)
-                
+
                 # Choose model: use vision model if vision was used, otherwise primary model
-                response_model = self.vision_model if (uses_vision and self.vision_model) else self.model
-                
-                # Now get final response with tool results (streaming)
-                stream = ollama.chat(
-                    model=response_model,
-                    messages=messages,
-                    stream=True
+                response_model = (
+                    self.vision_model if (uses_vision and self.vision_model) else self.model
                 )
-                
+
+                # Now get final response with tool results (streaming)
+                stream = ollama.chat(model=response_model, messages=messages, stream=True)
+
                 full_response = []
                 for chunk in stream:
-                    chunk_text = chunk['message']['content']
+                    chunk_text = chunk["message"]["content"]
                     full_response.append(chunk_text)
                     yield chunk_text
-                
+
                 # Store in history
                 answer = "".join(full_response)
                 self.conversation_history.append({"role": "user", "content": prompt})
@@ -405,11 +411,11 @@ class ConversationManager:
                 for chunk_text in full_response:
                     if chunk_text:
                         yield chunk_text
-                
+
                 self.conversation_history.append({"role": "user", "content": prompt})
                 self.conversation_history.append({"role": "assistant", "content": answer})
                 return
-        
+
         # No tools - standard streaming
         stream = ollama.chat(model=self.model, messages=messages, stream=True)
 
@@ -425,4 +431,3 @@ class ConversationManager:
 
         self.conversation_history.append({"role": "user", "content": prompt})
         self.conversation_history.append({"role": "assistant", "content": answer_clean})
-

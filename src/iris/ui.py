@@ -216,10 +216,7 @@ class DisplayManager:
             speech_pipeline: Optional SpeechPipeline to check for speech activity
         """
         # Update the status bar with the level indicator
-        if (
-            self.status_manager.status_bar_live
-            and self.status_manager.status_bar_active
-        ):
+        if self.status_manager.status_bar_live and self.status_manager.status_bar_active:
             self.status_manager.status_bar_live.update(
                 self.status_manager.make_status_bar_with_level(level, speech_pipeline)
             )
@@ -266,10 +263,7 @@ class DisplayManager:
         )
 
         # Update the existing Live display
-        if (
-            self.status_manager.status_bar_live
-            and self.status_manager.status_bar_active
-        ):
+        if self.status_manager.status_bar_live and self.status_manager.status_bar_active:
             self.status_manager.status_bar_live.update(display_group)
 
     def finalize_message(self, message: str, speech_pipeline=None):
@@ -281,10 +275,7 @@ class DisplayManager:
             speech_pipeline: Optional SpeechPipeline to check for speech activity
         """
         # Show only the message (without status bar)
-        if (
-            self.status_manager.status_bar_live
-            and self.status_manager.status_bar_active
-        ):
+        if self.status_manager.status_bar_live and self.status_manager.status_bar_active:
             assistant_panel = Panel(
                 Text(message, style="bold green"),
                 title="[bold green]Assistant[/bold green]",
@@ -293,9 +284,7 @@ class DisplayManager:
                 width=int(self.console.width * 0.85),
             )
             # Update to show only message
-            self.status_manager.status_bar_live.update(
-                Align.right(assistant_panel, pad=False)
-            )
+            self.status_manager.status_bar_live.update(Align.right(assistant_panel, pad=False))
             # Stop it - leaves just the message on screen
             self.status_manager.status_bar_live.stop()
             self.status_manager.status_bar_active = False
@@ -305,4 +294,3 @@ class DisplayManager:
 
             # Start fresh status bar below
             self.status_manager.start(speech_pipeline)
-

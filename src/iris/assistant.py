@@ -62,7 +62,7 @@ class VoiceAssistant:
         """
         # Initialize console
         self.console = Console()
-        
+
         # Store persona and use its voice
         self.persona = persona if persona else get_persona("iris")
         if persona:
@@ -73,13 +73,13 @@ class VoiceAssistant:
 
         # Initialize components
         self.recorder = AudioRecorder(sample_rate, silence_threshold, silence_duration)
-        
+
         # Initialize audio player with filter from persona
         audio_filter = get_filter(self.persona.audio_filter) if self.persona.audio_filter else None
         self.player = AudioPlayer(audio_filter=audio_filter)
-        
+
         self.transcriber = WhisperTranscriber(whisper_model, whisper_device, quiet=quiet)
-        
+
         # Initialize TTS with persona's voice and speed
         self.tts_generator = KokoroGenerator(tts_voice, self.persona.speed, quiet=quiet)
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
@@ -87,47 +87,52 @@ class VoiceAssistant:
         # Initialize UI
         self.status_manager = StatusManager(self.console)
         self.display_manager = DisplayManager(self.console, self.status_manager)
-        
+
         # Setup tools (after status_manager is created)
         self.tools = None
         if enable_vision or enable_screen_capture or enable_web_search:
             from iris.tools import Tools
-            
-            self.tools = Tools(
-                console=self.console,
-                status_manager=self.status_manager
-            )
-            
+
+            self.tools = Tools(console=self.console, status_manager=self.status_manager)
+
             if enable_vision:
                 if self.tools.enable_camera():
                     if not quiet:
                         self.console.print("[dim]✓ Vision enabled[/dim]")
                 else:
-                    self.console.print("[yellow]⚠ Vision dependencies not installed (opencv-python, pillow)[/yellow]")
-            
+                    self.console.print(
+                        "[yellow]⚠ Vision dependencies not installed (opencv-python, pillow)[/yellow]"
+                    )
+
             if enable_screen_capture:
                 if self.tools.enable_screen_capture():
                     if not quiet:
                         self.console.print("[dim]✓ Screen capture enabled[/dim]")
-                        self.console.print(f"[dim]  Available tools: {list(self.tools._enabled_tools.keys())}[/dim]")
+                        self.console.print(
+                            f"[dim]  Available tools: {list(self.tools._enabled_tools.keys())}[/dim]"
+                        )
                 else:
-                    self.console.print("[yellow]⚠ Screen capture dependencies not installed (mss)[/yellow]")
-            
+                    self.console.print(
+                        "[yellow]⚠ Screen capture dependencies not installed (mss)[/yellow]"
+                    )
+
             if enable_web_search:
                 if self.tools.enable_web_search():
                     if not quiet:
                         self.console.print("[dim]✓ Web search enabled[/dim]")
                 else:
-                    self.console.print("[yellow]⚠ Web search dependencies not installed (requests)[/yellow]")
-        
+                    self.console.print(
+                        "[yellow]⚠ Web search dependencies not installed (requests)[/yellow]"
+                    )
+
         # Initialize conversation manager with tools
         # If vision OR screen capture is enabled, pass the vision model for automatic switching
         self.conversation = ConversationManager(
-            llm_model, 
-            persona=self.persona, 
+            llm_model,
+            persona=self.persona,
             tools=self.tools,
             vision_model=vision_model if (enable_vision or enable_screen_capture) else None,
-            quiet=quiet
+            quiet=quiet,
         )
 
     def chat(self, prompt: str) -> str:
@@ -160,7 +165,6 @@ class VoiceAssistant:
 
                     # Update the display to show streaming message
                     if current_text.strip():
-
                         self.display_manager.update_streaming_display(
                             current_text, self.speech_pipeline
                         )
@@ -253,6 +257,7 @@ class VoiceAssistant:
 
         # Check if audio devices are available before starting
         from iris.audio import AudioRecorder
+
         devices_ok, device_msg = AudioRecorder.check_audio_devices()
         if not devices_ok:
             self.console.print()
@@ -297,9 +302,7 @@ class VoiceAssistant:
 
                     def on_audio_level(level: float):
                         """Update audio level display."""
-                        self.display_manager.update_audio_level_display(
-                            level, self.speech_pipeline
-                        )
+                        self.display_manager.update_audio_level_display(level, self.speech_pipeline)
 
                     audio_path = self.recorder.listen(on_level=on_audio_level)
 
@@ -312,9 +315,13 @@ class VoiceAssistant:
                         self.speech_pipeline.stop()
                         self.status_manager.stop()
                         self.console.print()
-                        self.console.print("[bold red]✗ Microphone disconnected or unavailable[/bold red]")
+                        self.console.print(
+                            "[bold red]✗ Microphone disconnected or unavailable[/bold red]"
+                        )
                         self.console.print()
-                        self.console.print("[dim]Please connect a microphone and restart the application.[/dim]")
+                        self.console.print(
+                            "[dim]Please connect a microphone and restart the application.[/dim]"
+                        )
                         self.console.print()
                         break
 
@@ -359,4 +366,3 @@ class VoiceAssistant:
             self.status_manager.stop()
             if self.tools:
                 self.tools.cleanup()
-

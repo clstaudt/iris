@@ -16,8 +16,12 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, Downlo
 warnings.filterwarnings("ignore")
 
 # Kokoro model download URLs
-KOKORO_MODEL_URL = "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx"
-KOKORO_VOICES_URL = "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin"
+KOKORO_MODEL_URL = (
+    "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx"
+)
+KOKORO_VOICES_URL = (
+    "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin"
+)
 
 
 class KokoroGenerator:
@@ -35,63 +39,60 @@ class KokoroGenerator:
         self.voice = voice
         self.speed = speed
         self.quiet = quiet
-        
+
         # Find model files - check multiple locations
         self.model_path, self.voices_path = self._locate_models()
-        
+
         # Initialize Kokoro
-        self.kokoro = Kokoro(
-            model_path=str(self.model_path),
-            voices_path=str(self.voices_path)
-        )
+        self.kokoro = Kokoro(model_path=str(self.model_path), voices_path=str(self.voices_path))
 
     def _locate_models(self) -> tuple[Path, Path]:
         """
         Locate kokoro model files.
-        
+
         Searches in order:
         1. IRIS_MODELS_DIR environment variable
         2. ~/.iris/models/
         3. ~/.local/share/iris/models/
         4. ./models/ (relative to current directory)
-        
+
         If models are not found and not in quiet mode, prompts the user to download them.
-        
+
         Returns:
             Tuple of (model_path, voices_path)
-        
+
         Raises:
             FileNotFoundError: If models cannot be found and user declines download
         """
         model_file = "kokoro-v1.0.onnx"
         voices_file = "voices-v1.0.bin"
-        
+
         # Check environment variable first
         if env_dir := os.environ.get("IRIS_MODELS_DIR"):
             model_path = Path(env_dir) / model_file
             voices_path = Path(env_dir) / voices_file
             if model_path.exists() and voices_path.exists():
                 return model_path, voices_path
-        
+
         # Check standard locations
         search_paths = [
             Path.home() / ".iris" / "models",
             Path.home() / ".local" / "share" / "iris" / "models",
             Path.cwd() / "models",
         ]
-        
+
         for search_dir in search_paths:
             model_path = search_dir / model_file
             voices_path = search_dir / voices_file
             if model_path.exists() and voices_path.exists():
                 return model_path, voices_path
-        
+
         # Models not found - prompt user to download (unless in quiet mode)
         default_dir = search_paths[0]  # ~/.iris/models
-        
+
         if not self.quiet and self._prompt_download(default_dir, model_file, voices_file):
             return default_dir / model_file, default_dir / voices_file
-        
+
         # Models not found
         raise FileNotFoundError(
             f"Could not find kokoro models ({model_file}, {voices_file}).\n"
@@ -104,17 +105,17 @@ class KokoroGenerator:
     def _prompt_download(self, target_dir: Path, model_file: str, voices_file: str) -> bool:
         """
         Prompt the user to download kokoro models.
-        
+
         Args:
             target_dir: Directory to download models to
             model_file: Name of the model file
             voices_file: Name of the voices file
-            
+
         Returns:
             True if download succeeded, False if user declined or download failed
         """
         console = Console()
-        
+
         console.print()
         console.print("[bold yellow]Kokoro TTS models not found![/bold yellow]")
         console.print()
@@ -124,7 +125,7 @@ class KokoroGenerator:
         console.print()
         console.print(f"They will be downloaded to: [cyan]{target_dir}[/cyan]")
         console.print()
-        
+
         try:
             response = console.input("[bold]Download models now? [Y/n]: [/bold]").strip().lower()
             if response in ("", "y", "yes"):
@@ -139,36 +140,36 @@ class KokoroGenerator:
     def _download_models(self, target_dir: Path, model_file: str, voices_file: str) -> bool:
         """
         Download kokoro models from Hugging Face.
-        
+
         Args:
             target_dir: Directory to save models to
             model_file: Name of the model file
             voices_file: Name of the voices file
-            
+
         Returns:
             True if download succeeded, False otherwise
         """
         console = Console()
-        
+
         # Create target directory
         target_dir.mkdir(parents=True, exist_ok=True)
-        
+
         downloads = [
             (KOKORO_MODEL_URL, target_dir / model_file, "Kokoro model"),
             (KOKORO_VOICES_URL, target_dir / voices_file, "Voice data"),
         ]
-        
+
         console.print()
-        
+
         try:
             for url, path, description in downloads:
                 self._download_file(console, url, path, description)
-            
+
             console.print()
             console.print("[bold green]✓ Models downloaded successfully![/bold green]")
             console.print()
             return True
-            
+
         except Exception as e:
             console.print(f"\n[bold red]Download failed: {e}[/bold red]")
             console.print("Please download manually from:")
@@ -179,7 +180,7 @@ class KokoroGenerator:
     def _download_file(self, console: Console, url: str, path: Path, description: str):
         """
         Download a single file with progress bar.
-        
+
         Args:
             console: Rich Console instance
             url: URL to download from
@@ -189,7 +190,7 @@ class KokoroGenerator:
         # Get file size from headers
         with urllib.request.urlopen(url, timeout=30) as response:
             total_size = int(response.headers.get("Content-Length", 0))
-            
+
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[bold blue]{task.description}"),
@@ -198,7 +199,7 @@ class KokoroGenerator:
                 console=console,
             ) as progress:
                 task = progress.add_task(description, total=total_size)
-                
+
                 with open(path, "wb") as f:
                     while True:
                         chunk = response.read(8192)
@@ -225,10 +226,7 @@ class KokoroGenerator:
 
             # Generate audio using kokoro-onnx Python API
             audio_data, sample_rate = self.kokoro.create(
-                text=text,
-                voice=self.voice,
-                speed=self.speed,
-                lang="en-us"
+                text=text, voice=self.voice, speed=self.speed, lang="en-us"
             )
 
             # Save audio to file
@@ -247,6 +245,7 @@ class KokoroGenerator:
         except Exception as e:
             print(f"Error generating speech: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -254,7 +253,7 @@ class KokoroGenerator:
 class SpeechPipeline:
     """
     Parallel speech generation and playback pipeline.
-    
+
     Generation and playback happen in parallel for maximum responsiveness.
     Text is queued for generation, which produces audio files that are
     then queued for playback.
@@ -270,20 +269,20 @@ class SpeechPipeline:
         """
         self.generator = generator
         self.player = player
-        
+
         # Queues for pipeline
         self.text_queue = queue.Queue()
         self.audio_queue = queue.Queue()
-        
+
         # Flags for status tracking
         self.is_speaking_flag = threading.Event()
         self.is_generating_flag = threading.Event()
         self._status_lock = threading.Lock()
-        
+
         # Worker threads
         self.generation_worker_thread = None
         self.playback_worker_thread = None
-        
+
         # Start the pipeline
         self._start_pipeline()
 
@@ -297,11 +296,12 @@ class SpeechPipeline:
             # Lower priority of generation thread to prevent audio underruns
             try:
                 import os
+
                 # Increase niceness significantly (lower priority) on Unix systems
                 os.nice(10)
             except (AttributeError, OSError):
                 pass  # Not available on all systems
-            
+
             while True:
                 text = self.text_queue.get()
                 if text is None:  # Shutdown signal
@@ -343,12 +343,8 @@ class SpeechPipeline:
                 self.audio_queue.task_done()
 
         # Start both threads
-        self.generation_worker_thread = threading.Thread(
-            target=generation_worker, daemon=True
-        )
-        self.playback_worker_thread = threading.Thread(
-            target=playback_worker, daemon=True
-        )
+        self.generation_worker_thread = threading.Thread(target=generation_worker, daemon=True)
+        self.playback_worker_thread = threading.Thread(target=playback_worker, daemon=True)
         self.generation_worker_thread.start()
         self.playback_worker_thread.start()
 
@@ -381,7 +377,7 @@ class SpeechPipeline:
         """Stop the speech pipeline immediately."""
         # Stop any currently playing audio
         self.player.stop()
-        
+
         # Clear queues
         while not self.text_queue.empty():
             try:
@@ -395,4 +391,3 @@ class SpeechPipeline:
                 self.audio_queue.task_done()
             except Exception:
                 pass
-

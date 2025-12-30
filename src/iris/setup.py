@@ -124,9 +124,7 @@ class SetupWizard:
 
         self.console.print()
         try:
-            response = self.console.input(
-                "[bold]Download now? [Y/n]: [/bold]"
-            ).strip().lower()
+            response = self.console.input("[bold]Download now? [Y/n]: [/bold]").strip().lower()
             if response not in ("", "y", "yes"):
                 self.console.print("[dim]Setup cancelled.[/dim]")
                 return False
@@ -205,6 +203,7 @@ class SetupWizard:
         """Check if Ollama service is running."""
         try:
             import ollama
+
             ollama.list()
             return "ready"
         except Exception:
@@ -214,6 +213,7 @@ class SetupWizard:
         """Check if the specified Ollama model is available."""
         try:
             import ollama
+
             models = ollama.list()
             model_names = [m.model for m in models.models if m.model]
 
@@ -480,10 +480,3 @@ def run_setup(whisper_model: str = "small", llm_model: str = "qwen3:1.7b") -> bo
     """
     wizard = SetupWizard(whisper_model=whisper_model, llm_model=llm_model)
     return wizard.run()
-
-
-
-
-
-
-

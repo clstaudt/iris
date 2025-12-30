@@ -62,9 +62,7 @@ def generate_test_texts(
 
             # If empty or too short, use fallback
             if not text or len(text) < 10:
-                console.print(
-                    f"  [yellow]• Generated text too short, using fallback[/yellow]"
-                )
+                console.print(f"  [yellow]• Generated text too short, using fallback[/yellow]")
                 text = get_fallback(i)
 
             word_count = len(text.split())
@@ -72,9 +70,7 @@ def generate_test_texts(
             console.print(f"  [dim]• Generated: {word_count} words[/dim]")
 
         except Exception as e:
-            console.print(
-                f"  [yellow]• Warning: Generation failed ({e}), using fallback[/yellow]"
-            )
+            console.print(f"  [yellow]• Warning: Generation failed ({e}), using fallback[/yellow]")
             texts.append(get_fallback(i))
 
     return texts
@@ -105,13 +101,13 @@ def benchmark_cli(
     start = time.perf_counter()
 
     # Create temp files for input text and output audio
-    with tempfile.NamedTemporaryFile(mode='w', suffix=".txt", delete=False) as text_file:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as text_file:
         text_file.write(text)
         text_file_path = text_file.name
-    
+
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as audio_file:
         audio_file_path = audio_file.name
-    
+
     try:
         # Build command with model paths if provided
         cmd = [cli_path, text_file_path, audio_file_path, "--voice", voice]
@@ -119,14 +115,14 @@ def benchmark_cli(
             cmd.extend(["--model", str(model_path)])
         if voices_path:
             cmd.extend(["--voices", str(voices_path)])
-        
+
         result = subprocess.run(
             cmd,
             capture_output=True,
             timeout=30,
             text=True,
         )
-        
+
         if result.returncode != 0:
             raise RuntimeError(
                 f"kokoro-tts CLI failed with exit code {result.returncode}\n"
@@ -145,7 +141,7 @@ def find_cli_tool() -> str | None:
     """Find kokoro-tts CLI in PATH or uv tools directory."""
     if cli_path := shutil.which("kokoro-tts"):
         return cli_path
-    
+
     # Check uv tools directory
     uv_tools = Path.home() / ".local" / "bin" / "kokoro-tts"
     return str(uv_tools) if uv_tools.exists() else None
@@ -190,7 +186,7 @@ def run_benchmarks(
                 temp_gen = KokoroGenerator(voice=voice, speed=speed, quiet=True)
                 model_path = temp_gen.model_path
                 voices_path = temp_gen.voices_path
-            
+
             console.print("[dim]Warming up CLI...[/dim]")
             for _ in range(warmup):
                 benchmark_cli(texts[0], cli_path, voice, model_path, voices_path)
@@ -200,7 +196,9 @@ def run_benchmarks(
     if not cli_only and generator:
         methods.append(("onnx", lambda t: benchmark_onnx(t, generator)))
     if not onnx_only and cli_path:
-        methods.append(("cli", lambda t: benchmark_cli(t, cli_path, voice, model_path, voices_path)))
+        methods.append(
+            ("cli", lambda t: benchmark_cli(t, cli_path, voice, model_path, voices_path))
+        )
 
     # Run benchmarks with progress tracking
     results = []
@@ -220,17 +218,20 @@ def run_benchmarks(
             word_count = len(text.split())
             for method_name, bench_func in methods:
                 for i in range(iterations):
-                    results.append({
-                        "method": method_name,
-                        "text_id": text_idx,
-                        "text": text_preview,
-                        "word_count": word_count,
-                        "iteration": i,
-                        "time_sec": bench_func(text),
-                    })
+                    results.append(
+                        {
+                            "method": method_name,
+                            "text_id": text_idx,
+                            "text": text_preview,
+                            "word_count": word_count,
+                            "iteration": i,
+                            "time_sec": bench_func(text),
+                        }
+                    )
                     progress.update(
-                        task, advance=1,
-                        description=f"[cyan]{method_name}[/cyan] | text {text_idx+1} ({word_count} words) | {i+1}/{iterations}",
+                        task,
+                        advance=1,
+                        description=f"[cyan]{method_name}[/cyan] | text {text_idx + 1} ({word_count} words) | {i + 1}/{iterations}",
                     )
 
     return pd.DataFrame(results)
@@ -253,7 +254,7 @@ def analyze_results(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         )
         .reset_index()
     )
-    
+
     # Add word_count from the first occurrence
     word_counts = df.groupby("text_id")["word_count"].first().reset_index()
     summary = summary.merge(word_counts, on="text_id")
@@ -265,11 +266,7 @@ def analyze_results(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         ci = stats.t.interval(0.95, n - 1, loc=x.mean(), scale=sem)
         return pd.Series({"ci_lower": ci[0], "ci_upper": ci[1]})
 
-    ci_df = (
-        df.groupby(["method", "text_id"])["time_sec"]
-        .apply(ci_95)
-        .reset_index()
-    )
+    ci_df = df.groupby(["method", "text_id"])["time_sec"].apply(ci_95).reset_index()
     summary = summary.merge(ci_df, on=["method", "text_id"])
 
     # Comparisons
@@ -333,9 +330,7 @@ def print_results(summary: pd.DataFrame, comparisons: pd.DataFrame, texts: list[
         console.print(f"  {i}. [{word_count} words] {preview}")
 
     # Summary table
-    table = Table(
-        title="\n📊 Summary Statistics", show_header=True, header_style="bold cyan"
-    )
+    table = Table(title="\n📊 Summary Statistics", show_header=True, header_style="bold cyan")
     table.add_column("Method", style="cyan")
     table.add_column("Text", justify="right")
     table.add_column("Words", justify="right")
@@ -399,9 +394,7 @@ def print_results(summary: pd.DataFrame, comparisons: pd.DataFrame, texts: list[
             console.print()
             console.print("[bold cyan]🏆 Conclusion:[/bold cyan]")
             if onnx_wins > cli_wins:
-                avg_speedup = sig_comparisons[sig_comparisons["speedup"] > 1][
-                    "speedup"
-                ].mean()
+                avg_speedup = sig_comparisons[sig_comparisons["speedup"] > 1]["speedup"].mean()
                 console.print(
                     f"  • [bold green]onnx[/bold green] is faster (significant in {onnx_wins}/{len(comparisons)} cases)"
                 )
@@ -419,9 +412,7 @@ def print_results(summary: pd.DataFrame, comparisons: pd.DataFrame, texts: list[
         else:
             console.print()
             console.print("[bold cyan]🏆 Conclusion:[/bold cyan]")
-            console.print(
-                "  • [yellow]No statistically significant differences found[/yellow]"
-            )
+            console.print("  • [yellow]No statistically significant differences found[/yellow]")
 
     console.print()
     console.print("[bold cyan]" + "═" * 70 + "[/bold cyan]")
@@ -433,9 +424,7 @@ def main(
     iterations: Annotated[
         int, typer.Option("-n", "--iterations", help="Number of iterations per test")
     ] = 10,
-    warmup: Annotated[
-        int, typer.Option("-w", "--warmup", help="Number of warmup iterations")
-    ] = 2,
+    warmup: Annotated[int, typer.Option("-w", "--warmup", help="Number of warmup iterations")] = 2,
     texts: Annotated[
         list[str],
         typer.Option("--text", help="Custom test text (can be used multiple times)"),
@@ -444,9 +433,7 @@ def main(
         list[int],
         typer.Option("--words", help="Target word counts for generated texts"),
     ] = None,
-    llm: Annotated[
-        str, typer.Option(help="Ollama model for text generation")
-    ] = "qwen3:1.7b",
+    llm: Annotated[str, typer.Option(help="Ollama model for text generation")] = "qwen3:1.7b",
     voice: Annotated[str, typer.Option(help="Voice to use for TTS")] = "af_bella",
     speed: Annotated[float, typer.Option(help="Speech speed multiplier")] = 1.0,
     onnx_only: Annotated[
@@ -483,9 +470,13 @@ def main(
             console.print()
             console.print("Or run with [cyan]--onnx-only[/cyan] to skip this check.")
             console.print()
-            
+
             try:
-                response = console.input("[bold]Continue with ONNX-only benchmark? [y/N]: [/bold]").strip().lower()
+                response = (
+                    console.input("[bold]Continue with ONNX-only benchmark? [y/N]: [/bold]")
+                    .strip()
+                    .lower()
+                )
                 if response not in ("y", "yes"):
                     console.print("[dim]Benchmark cancelled.[/dim]")
                     sys.exit(0)
@@ -528,4 +519,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

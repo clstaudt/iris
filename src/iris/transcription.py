@@ -167,4 +167,3 @@ class StreamingTranscriber:
             for chunk_file in self._chunk_files:
                 Path(chunk_file).unlink(missing_ok=True)
             self._chunk_files.clear()
-
