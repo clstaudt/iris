@@ -49,6 +49,8 @@ class StatusManager:
         self.status_listening = False
         self.status_looking = False
         self.status_capturing_screen = False
+        self.status_searching = False
+        self.status_browsing = False
         self.status_understanding = False
         self.status_thinking = False
         self.status_summarizing = False
@@ -58,6 +60,8 @@ class StatusManager:
         self.spinner_listening = Spinner("dots", text="Listening", style="red")
         self.spinner_looking = Spinner("dots", text="Looking", style="bright_magenta")
         self.spinner_capturing_screen = Spinner("dots", text="Capturing Screen", style="bright_magenta")
+        self.spinner_searching = Spinner("dots", text="Searching", style="bright_cyan")
+        self.spinner_browsing = Spinner("dots", text="Browsing", style="bright_cyan")
         self.spinner_understanding = Spinner("dots", text="Understanding", style="magenta")
         self.spinner_thinking = Spinner("dots", text="Thinking", style="cyan")
         self.spinner_speaking = Spinner("dots", text="Speaking", style="yellow")
@@ -86,6 +90,10 @@ class StatusManager:
                 status_parts.append(self.spinner_looking)
             if self.status_capturing_screen:
                 status_parts.append(self.spinner_capturing_screen)
+            if self.status_searching:
+                status_parts.append(self.spinner_searching)
+            if self.status_browsing:
+                status_parts.append(self.spinner_browsing)
             if self.status_understanding:
                 status_parts.append(self.spinner_understanding)
             if self.status_summarizing:
@@ -241,6 +249,35 @@ class DisplayManager:
         )
         self.console.print(Align.left(user_panel, pad=False))
         self.console.print()
+
+    def show_tool_activity(self, tool_name: str, detail: str = ""):
+        """
+        Display a compact indicator that a tool was used.
+
+        Args:
+            tool_name: Name of the tool (e.g. "search", "browse")
+            detail: Brief detail string (e.g. query or URL)
+        """
+        labels = {
+            "search": "Searched",
+            "browse": "Browsed",
+            "look": "Looked",
+            "capture_screen": "Captured screen",
+        }
+        label = labels.get(tool_name, tool_name)
+        content = f"{label}: {detail}" if detail else label
+
+        panel = Panel(
+            Text(content, style="dim"),
+            border_style="dim",
+            padding=(0, 1),
+            expand=False,
+        )
+
+        if self.status_manager.status_bar_live and self.status_manager.status_bar_active:
+            self.status_manager.status_bar_live.console.print(Align.center(panel))
+        else:
+            self.console.print(Align.center(panel))
 
     def update_streaming_display(self, message: str, speech_pipeline=None):
         """

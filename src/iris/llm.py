@@ -236,7 +236,20 @@ class ConversationManager:
                 )
 
             if "search" in tool_names:
-                tool_instructions += "- 'search' function: Use this to find current information, news, or facts you don't know.\n"
+                tool_instructions += (
+                    "- 'search' function: Search the web for CURRENT information.\n"
+                    "  * YOU MUST call this for questions about current events, news, weather, prices, or recent facts\n"
+                    "  * Use when the user asks about something you're unsure of or that changes over time\n"
+                    "  * NEVER guess at current facts - search first\n"
+                )
+
+            if "browse" in tool_names:
+                tool_instructions += (
+                    "- 'browse' function: Fetch and read the contents of a specific webpage.\n"
+                    "  * When the user names a website (e.g. 'The Guardian', 'BBC News'), infer its URL and call this\n"
+                    "  * Use to read full article content from URLs found via 'search'\n"
+                    "  * Provide the full URL including https://\n"
+                )
 
             tool_instructions += "\nIMPORTANT: You MUST use these functions when appropriate. NEVER make up or guess what you see."
 
@@ -294,13 +307,14 @@ class ConversationManager:
 
         return managed_messages
 
-    def chat_stream(self, prompt: str):
+    def chat_stream(self, prompt: str, on_tool_use=None):
         """
         Send prompt to LLM and stream response with tool support.
         Automatically switches to vision model when vision tools are used.
 
         Args:
             prompt: User prompt text
+            on_tool_use: Optional callback(tool_name, tool_args) called before each tool executes
 
         Yields:
             Chunks of response text
@@ -362,6 +376,9 @@ class ConversationManager:
                         if self.tools.status_manager:
                             with self.tools.status_manager.status_lock:
                                 self.tools.status_manager.status_capturing_screen = True
+
+                    if on_tool_use:
+                        on_tool_use(tool_name, tool_args)
 
                     # Execute the tool
                     result = self.tools.execute(tool_name, **tool_args)
