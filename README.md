@@ -247,7 +247,7 @@ iris --enable-screen-capture
 - "What application am I using?"
 - "Describe what you see on my display"
 
-> **macOS note:** On first use, you may be prompted to grant screen recording permission in **System Settings > Privacy & Security > Screen Recording**. Restart Iris after granting permission.
+> **macOS note:** Screen recording permission must be granted to the **terminal app running Iris** in **System Settings > Privacy & Security > Screen Recording**. Restart the terminal app after granting permission.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
