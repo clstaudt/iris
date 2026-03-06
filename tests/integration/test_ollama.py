@@ -31,3 +31,4 @@ class TestConversationManager:
         """Context includes system prompt."""
         messages = conversation.manage_context()
         assert any("Iris" in m.get("content", "") for m in messages)
+
