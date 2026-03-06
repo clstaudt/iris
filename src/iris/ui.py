@@ -48,6 +48,7 @@ class StatusManager:
         # Status flags
         self.status_listening = False
         self.status_looking = False
+        self.status_capturing_screen = False
         self.status_understanding = False
         self.status_thinking = False
         self.status_summarizing = False
@@ -56,6 +57,7 @@ class StatusManager:
         # Create persistent spinners (reused across updates for animation)
         self.spinner_listening = Spinner("dots", text="Listening", style="red")
         self.spinner_looking = Spinner("dots", text="Looking", style="bright_magenta")
+        self.spinner_capturing_screen = Spinner("dots", text="Capturing Screen", style="bright_magenta")
         self.spinner_understanding = Spinner("dots", text="Understanding", style="magenta")
         self.spinner_thinking = Spinner("dots", text="Thinking", style="cyan")
         self.spinner_speaking = Spinner("dots", text="Speaking", style="yellow")
@@ -82,6 +84,8 @@ class StatusManager:
                 status_parts.append(self.spinner_listening)
             if self.status_looking:
                 status_parts.append(self.spinner_looking)
+            if self.status_capturing_screen:
+                status_parts.append(self.spinner_capturing_screen)
             if self.status_understanding:
                 status_parts.append(self.spinner_understanding)
             if self.status_summarizing:

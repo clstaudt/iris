@@ -237,6 +237,7 @@ class Tools:
     def _capture_screen(self, **kwargs) -> dict:
         """
         Capture a screenshot of the user's screen.
+        Note: Capturing screen status should already be set by LLM before this is called.
 
         Args:
             **kwargs: Ignored - accepts any arguments LLM might pass
@@ -244,11 +245,6 @@ class Tools:
         Returns:
             Dict with 'success', 'image', and 'message' keys
         """
-        import time
-
-        if self.console:
-            self.console.print("[dim yellow]📸 Capturing screen...[/dim yellow]")
-
         try:
             # Capture the primary monitor
             with mss.mss() as sct:
@@ -290,16 +286,15 @@ class Tools:
                 image.save(buffer, format="JPEG", quality=85)
                 image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-                if self.console:
-                    self.console.print("[dim green]✓ Screen captured successfully[/dim green]")
-
                 return {"success": True, "image": image_base64, "message": "Screen captured"}
 
         except Exception as e:
             error_msg = f"Error capturing screen: {e}. You may need to grant screen recording permission in System Settings."
-            if self.console:
-                self.console.print(f"[red]{error_msg}[/red]")
             return {"success": False, "message": error_msg}
+        finally:
+            if self.status_manager:
+                with self.status_manager.status_lock:
+                    self.status_manager.status_capturing_screen = False
 
     def get_schemas(self) -> list[dict]:
         """

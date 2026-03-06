@@ -46,6 +46,7 @@
         <li><a href="#example-queries">Example Queries</a></li>
         <li><a href="#personas">Personas</a></li>
         <li><a href="#vision-capabilities">Vision Capabilities</a></li>
+        <li><a href="#screen-capture">Screen Capture</a></li>
       </ul>
     </li>
     <li><a href="#acknowledgments">Acknowledgments</a></li>
@@ -75,6 +76,7 @@ Built with:
 - 📊 **Rich Terminal UI** — Live status and conversation display
 - 🔄 **Conversation Memory** — Maintains context throughout the conversation
 - 👁️ **Vision Support** — Can see through your webcam
+- 🖥️ **Screen Capture** — Can see what's on your screen
 - 🔒 **Fully Offline** — No internet required after setup
 
 <p align="right">(<a href="#top">back to top</a>)</p>
@@ -150,6 +152,8 @@ Options:
   --persona {iris,hal,computer}
                         Persona/character for the assistant (default: iris)
   --enable-vision       Enable camera/vision tool (requires vision model)
+  --enable-screen-capture
+                        Enable screen capture tool to see your computer screen
   --vision-model MODEL  Vision model to use (default: qwen3-vl:8b)
   --skip-setup          Skip the setup wizard
 ```
@@ -168,6 +172,12 @@ iris --persona hal
 # Enable vision
 ollama pull qwen3-vl:8b
 iris --enable-vision
+
+# Enable screen capture
+iris --enable-screen-capture
+
+# Enable both vision and screen capture
+iris --enable-vision --enable-screen-capture
 ```
 
 ### Example Queries
@@ -218,6 +228,26 @@ iris --enable-vision
 ollama pull qwen3-vl:14b
 iris --enable-vision --vision-model qwen3-vl:14b
 ```
+
+### Screen Capture
+
+With screen capture enabled, Iris can see what's displayed on your monitor. This uses the same vision model as the camera and requires screen recording permission on macOS.
+
+```bash
+# Pull the vision model (if not already done)
+ollama pull qwen3-vl:8b
+
+# Enable screen capture
+iris --enable-screen-capture
+```
+
+**Try asking:**
+- "What's on my screen right now?"
+- "Can you read the code I have open?"
+- "What application am I using?"
+- "Describe what you see on my display"
+
+> **macOS note:** On first use, you may be prompted to grant screen recording permission in **System Settings > Privacy & Security > Screen Recording**. Restart Iris after granting permission.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 

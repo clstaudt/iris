@@ -358,7 +358,10 @@ class ConversationManager:
                             with self.tools.status_manager.status_lock:
                                 self.tools.status_manager.status_looking = True
                     elif tool_name == "capture_screen":
-                        uses_vision = True  # Screen capture also needs vision model
+                        uses_vision = True
+                        if self.tools.status_manager:
+                            with self.tools.status_manager.status_lock:
+                                self.tools.status_manager.status_capturing_screen = True
 
                     # Execute the tool
                     result = self.tools.execute(tool_name, **tool_args)
