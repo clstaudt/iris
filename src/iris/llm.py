@@ -228,11 +228,10 @@ class ConversationManager:
 
             if "capture_screen" in tool_names:
                 tool_instructions += (
-                    "- 'capture_screen' function: Your ONLY way to see the COMPUTER SCREEN.\n"
-                    "  * YOU MUST call this function for ANY question about the screen, windows, or applications\n"
-                    "  * NEVER describe what's on screen without calling this function first\n"
-                    "  * If asked about 'screen', 'monitor', 'display', 'window', 'application' - USE THIS TOOL\n"
-                    "  * Do NOT guess or make up what's on screen - you CANNOT see it without this function\n"
+                    "- 'capture_screen' function: Screenshot of the user's PHYSICAL computer screen.\n"
+                    "  * ONLY use when they ask about what is on their screen, desktop, or open applications\n"
+                    "  * NEVER use this to read websites - use 'browse' for websites\n"
+                    "  * 'page', 'article', 'headline', 'website' refer to the WEB, not the screen\n"
                 )
 
             if "search" in tool_names:
@@ -247,6 +246,7 @@ class ConversationManager:
                 tool_instructions += (
                     "- 'browse' function: Fetch and read the contents of a specific webpage.\n"
                     "  * When the user names a website (e.g. 'The Guardian', 'BBC News'), infer its URL and call this\n"
+                    "  * Use to read, scan, or check any web page, article, or headline\n"
                     "  * Use to read full article content from URLs found via 'search'\n"
                     "  * Provide the full URL including https://\n"
                 )

@@ -35,7 +35,7 @@ except ImportError:
     HAS_SCREEN = False
 
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     import trafilatura
 
     HAS_SEARCH = True
@@ -156,7 +156,12 @@ class Tools:
                     "type": "function",
                     "function": {
                         "name": "capture_screen",
-                        "description": "Capture and see what is currently displayed on the user's computer screen/monitor/display. ALWAYS use this when asked about: screen, display, monitor, windows, applications, what's open, operating system, or anything visible on the digital screen.",
+                        "description": (
+                            "Take a screenshot of the user's physical computer screen."
+                            " Use ONLY when they ask about what is on their screen,"
+                            " monitor, or desktop. NEVER use this to read websites"
+                            " - use 'browse' for that."
+                        ),
                         "parameters": {"type": "object", "properties": {}, "required": []},
                     },
                 },
