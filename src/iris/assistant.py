@@ -84,6 +84,14 @@ class VoiceAssistant:
         if persona:
             tts_voice = persona.voice
 
+        # Resolve voice: check if it's a cloned voice in the voice store
+        reference_audio = None
+        if persona:
+            from iris.voices import VoiceStore
+
+            store = VoiceStore()
+            tts_voice, reference_audio = store.resolve_voice(persona.voice)
+
         if not quiet:
             self.console.print("[dim]Initializing components...[/dim]")
 
@@ -96,8 +104,10 @@ class VoiceAssistant:
 
         self.transcriber = WhisperTranscriber(whisper_model, whisper_device, quiet=quiet)
 
-        # Initialize TTS with persona's voice and speed
-        self.tts_generator = KokoroGenerator(tts_voice, self.persona.speed, quiet=quiet)
+        # Initialize TTS with persona's voice and speed (+ optional voice cloning)
+        self.tts_generator = KokoroGenerator(
+            tts_voice, self.persona.speed, quiet=quiet, reference_audio=reference_audio
+        )
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
 
         if self.event_bus:

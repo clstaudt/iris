@@ -3,7 +3,7 @@ name = "iris"
 version = "0.1.0"
 description = "Voice assistant with speech-to-text, LLM, and text-to-speech"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "faster-whisper>=1.0.0",
     "kokoro-onnx>=0.3.6",
@@ -15,6 +15,7 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "numpy>=1.24.0",
     "torch>=2.0.0",
+    "torchaudio>=2.0.0",
     "pyyaml>=6.0.0",
     "scipy>=1.11.0",
     "opencv-python>=4.8.0",
@@ -23,6 +24,7 @@ dependencies = [
     "mss>=9.0.0",
     "ddgs>=7.0.0",
     "trafilatura>=2.0.0",
+    "kanade-tokenizer @ git+https://github.com/frothywater/kanade-tokenizer",
 ]
 
 [project.scripts]
@@ -41,6 +43,9 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
@@ -54,4 +59,17 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 ignore = []
+
+[tool.uv]
+# Ignore kanade-tokenizer's cu126 PyTorch index — use PyPI for cross-platform compatibility
+no-sources-package = ["torch", "torchaudio"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
 

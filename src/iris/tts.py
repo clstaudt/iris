@@ -52,26 +52,46 @@ def is_language_supported(whisper_lang: str) -> bool:
 
 
 class KokoroGenerator:
-    """Generates speech audio using kokoro-onnx."""
+    """Generates speech audio using kokoro-onnx, with optional voice cloning."""
 
-    def __init__(self, voice: str = "af_bella", speed: float = 1.25, quiet: bool = True):
+    def __init__(
+        self,
+        voice: str = "af_bella",
+        speed: float = 1.25,
+        quiet: bool = True,
+        reference_audio: str | Path | None = None,
+    ):
         """
         Initialize kokoro TTS generator.
 
         Args:
-            voice: Voice to use for generation
+            voice: Voice to use for generation (Kokoro built-in voice ID)
             speed: Speech speed multiplier
             quiet: If True, skip interactive prompts (setup wizard handles downloads)
+            reference_audio: Optional path to reference audio for voice cloning.
+                When set, Kanade voice conversion is applied after Kokoro synthesis.
         """
         self.voice = voice
         self.speed = speed
         self.quiet = quiet
+        self.reference_audio = str(reference_audio) if reference_audio else None
+        self._cloner = None
 
         # Find model files - check multiple locations
         self.model_path, self.voices_path = self._locate_models()
 
         # Initialize Kokoro
         self.kokoro = Kokoro(model_path=str(self.model_path), voices_path=str(self.voices_path))
+
+        # Lazy-init voice cloner only if reference audio is provided
+        if self.reference_audio:
+            self._init_cloner()
+
+    def _init_cloner(self):
+        """Initialize the voice cloner (lazy-loaded on first use)."""
+        from iris.cloning import VoiceCloner
+
+        self._cloner = VoiceCloner()
 
     def _locate_models(self) -> tuple[Path, Path]:
         """
@@ -239,6 +259,9 @@ class KokoroGenerator:
         """
         Generate audio file from text using kokoro-onnx Python API.
 
+        If a reference audio is set, applies Kanade voice conversion
+        after Kokoro synthesis to clone the reference voice.
+
         Args:
             text: Text to convert to speech
             language: Whisper language code (e.g. 'en', 'fr', 'ja').
@@ -270,6 +293,15 @@ class KokoroGenerator:
 
             # Save audio to file
             sf.write(temp_audio.name, audio_data, sample_rate)
+
+            # Apply voice cloning if reference audio is set
+            if self._cloner and self.reference_audio:
+                cloned_path = self._cloner.convert_to_tempfile(
+                    temp_audio.name, self.reference_audio
+                )
+                # Replace base audio with cloned audio
+                Path(temp_audio.name).unlink(missing_ok=True)
+                temp_audio.name = cloned_path
 
             # Verify file was created and has content
             if not Path(temp_audio.name).exists():

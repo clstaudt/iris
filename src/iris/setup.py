@@ -69,8 +69,9 @@ class SetupWizard:
         # Display status table
         self._display_status(checks)
 
-        # If everything is ready, we're done
-        if all(status == "ready" for status in checks.values()):
+        # If everything is ready, we're done (kanade is optional, skip it)
+        required_checks = {k: v for k, v in checks.items() if k != "kanade"}
+        if all(status == "ready" for status in required_checks.values()):
             self.console.print()
             self.console.print("[bold green]✓ All dependencies ready![/bold green]")
             self.console.print()
@@ -162,6 +163,7 @@ class SetupWizard:
             "ollama_model": self._check_ollama_model(),
             "whisper": self._check_whisper_model(),
             "kokoro_models": self._check_kokoro_models(),
+            "kanade": self._check_kanade_model(),
         }
 
     def _display_status(self, checks: dict[str, str]):
@@ -196,6 +198,12 @@ class SetupWizard:
             table.add_row("[green]✓[/green]", "Kokoro TTS models", "cached")
         else:
             table.add_row("[yellow]↓[/yellow]", "Kokoro TTS models", "needs download")
+
+        # Kanade voice cloning model (optional)
+        if checks["kanade"] == "ready":
+            table.add_row("[green]✓[/green]", "Kanade voice cloning", "cached")
+        else:
+            table.add_row("[dim]-[/dim]", "Kanade voice cloning", "downloads on first use")
 
         self.console.print(table)
 
@@ -270,6 +278,20 @@ class SetupWizard:
             if (search_dir / model_file).exists() and (search_dir / voices_file).exists():
                 return "ready"
 
+        return "missing"
+
+    def _check_kanade_model(self) -> str:
+        """Check if Kanade voice cloning model is cached."""
+        # Kanade downloads from HuggingFace on first use
+        # Check if it's already in the HuggingFace cache
+        model_dir_name = "models--frothywater--kanade-12.5hz"
+        model_path = WHISPER_CACHE_DIR / model_dir_name
+
+        try:
+            if model_path.exists() and model_path.is_dir() and any(model_path.iterdir()):
+                return "ready"
+        except (PermissionError, OSError):
+            pass
         return "missing"
 
     def _download_ollama_model(self) -> bool:
