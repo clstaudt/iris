@@ -15,7 +15,7 @@ from iris.audio import AudioPlayer, AudioRecorder, get_filter
 from iris.llm import ConversationManager
 from iris.personas import Persona, get_persona
 from iris.transcription import WhisperTranscriber
-from iris.tts import KokoroGenerator, SpeechPipeline
+from iris.tts import KokoroGenerator, SpeechPipeline, is_language_supported
 from iris.ui import DisplayManager, StatusManager
 
 warnings.filterwarnings("ignore")
@@ -62,6 +62,9 @@ class VoiceAssistant:
         """
         # Initialize console
         self.console = Console()
+
+        # Track current conversation language for continuity
+        self.conversation_language = "en"
 
         # Store persona and use its voice
         self.persona = persona if persona else get_persona("iris")
@@ -135,12 +138,13 @@ class VoiceAssistant:
             quiet=quiet,
         )
 
-    def chat(self, prompt: str) -> str:
+    def chat(self, prompt: str, response_language: str = "en") -> str:
         """
         Send prompt to LLM, stream response, and speak it.
 
         Args:
             prompt: User prompt text
+            response_language: Language to respond in (Whisper code)
 
         Returns:
             LLM response text
@@ -151,6 +155,9 @@ class VoiceAssistant:
                 self.status_manager.status_thinking = True
             self.status_manager.update_status_bar(self.speech_pipeline)
 
+            # Set the speech pipeline language for this turn
+            self.speech_pipeline.current_language = response_language
+
             # Stream the response and display it live
             full_response = []
             text_buffer = ""  # Buffer for speech chunks
@@ -160,7 +167,7 @@ class VoiceAssistant:
                 self.display_manager.show_tool_activity(tool_name, detail)
 
             try:
-                for chunk_text in self.conversation.chat_stream(prompt, on_tool_use=on_tool_use):
+                for chunk_text in self.conversation.chat_stream(prompt, response_language=response_language, on_tool_use=on_tool_use):
                     full_response.append(chunk_text)
                     text_buffer += chunk_text
 
@@ -337,7 +344,7 @@ class VoiceAssistant:
                         self.status_manager.status_understanding = True
                     self.status_manager.update_status_bar(self.speech_pipeline)
 
-                    text = self.transcriber.transcribe(audio_path)
+                    text, detected_language = self.transcriber.transcribe(audio_path)
 
                     with self.status_manager.status_lock:
                         self.status_manager.status_understanding = False
@@ -346,11 +353,17 @@ class VoiceAssistant:
                     if not text:
                         continue
 
+                    # Determine response language: use detected if TTS supports it,
+                    # otherwise keep the current conversation language.
+                    if is_language_supported(detected_language):
+                        self.conversation_language = detected_language
+                    response_language = self.conversation_language
+
                     # Display user message
                     self.display_manager.show_user_message(text)
 
                     # 3. Send to LLM (streams response and speaks it)
-                    self.chat(text)
+                    self.chat(text, response_language=response_language)
 
                     # Cleanup
                     Path(audio_path).unlink(missing_ok=True)
