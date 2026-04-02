@@ -38,6 +38,7 @@
       <ul>
         <li><a href="#prerequisites">Prerequisites</a></li>
         <li><a href="#installation">Installation</a></li>
+        <li><a href="#docker">Docker</a></li>
       </ul>
     </li>
     <li>
@@ -126,6 +127,42 @@ uv run iris
 ### First Run Setup
 
 On first run, Iris will check dependencies and offer to download any missing models (LLM, Whisper, and Kokoro TTS ~360 MB). Use `--skip-setup` to bypass this wizard.
+
+### Docker
+
+Run iris fully containerized with Docker Compose. This starts an Ollama server and the iris application together — no local Python installation needed.
+
+```bash
+git clone https://github.com/clstaudt/iris.git
+cd iris
+docker compose up
+```
+
+On first launch the iris setup wizard runs inside the container and downloads all required models. They are persisted in Docker volumes, so subsequent starts are fast.
+
+Pass any iris CLI arguments via `docker compose run`:
+
+```bash
+docker compose run iris iris --llm-model llama3:8b --persona hal
+```
+
+#### Using an External Ollama Server
+
+If you already have Ollama running on the host or another machine, you can skip the bundled Ollama container:
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+# Edit OLLAMA_HOST in the file, then:
+docker compose up iris
+```
+
+#### GPU Support
+
+To enable NVIDIA GPU passthrough for Ollama, uncomment the `deploy` section in `docker-compose.yml`.
+
+#### Audio Devices (Linux)
+
+Voice input/output requires access to the host audio system. On Linux with PulseAudio, uncomment the audio device sections in `docker-compose.yml`. On macOS and Windows, audio passthrough to Docker is not natively supported.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 

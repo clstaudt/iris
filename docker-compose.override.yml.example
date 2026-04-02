@@ -1,0 +1,33 @@
+# =============================================================================
+# Docker Compose Override – Use an External Ollama Server
+# =============================================================================
+#
+# Use this file to connect iris to an Ollama instance you already have running
+# (on the host, on another machine, etc.) instead of the bundled container.
+#
+# Usage:
+#   1. Copy this file:
+#        cp docker-compose.override.yml.example docker-compose.override.yml
+#
+#   2. Edit OLLAMA_HOST below to point to your server.
+#
+#   3. Start only the iris service (the bundled ollama service is not needed):
+#        docker compose up iris
+#
+# =============================================================================
+
+services:
+  iris:
+    environment:
+      # Point to your existing Ollama server.
+      # Examples:
+      #   - Ollama on the host machine:  "http://host.docker.internal:11434"
+      #   - Ollama on a LAN machine:     "http://192.168.1.100:11434"
+      OLLAMA_HOST: "http://host.docker.internal:11434"
+
+    # The bundled ollama service is not needed
+    depends_on: []
+
+    # Allows reaching the host machine via host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

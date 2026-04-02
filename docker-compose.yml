@@ -1,0 +1,75 @@
+# =============================================================================
+# Iris Voice Assistant – Docker Compose
+# =============================================================================
+#
+# Quick start:
+#   docker compose up
+#
+# This starts two services:
+#   1. ollama  – Local LLM inference server
+#   2. iris    – The voice assistant (waits for Ollama, runs setup, then starts)
+#
+# Pass any iris CLI arguments via the `command` key on the iris service, e.g.:
+#   docker compose run iris iris --llm-model llama3:8b --persona hal
+#
+# To use an external Ollama-compatible API instead of the bundled Ollama
+# service, see docker-compose.override.yml.example.
+#
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Ollama – Local LLM server
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # Uncomment to enable GPU passthrough (NVIDIA)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------
+  # Iris – Voice assistant
+  # ---------------------------------------------------------------------------
+  iris:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      # The ollama Python library reads this to find the Ollama server
+      OLLAMA_HOST: "http://ollama:11434"
+    volumes:
+      # Persist Whisper & Kokoro model downloads across container restarts
+      - whisper_cache:/root/.cache/huggingface
+      - iris_data:/root/.iris
+    # Audio device passthrough (Linux with PulseAudio)
+    # Uncomment the following to enable microphone and speaker access:
+    # devices:
+    #   - /dev/snd:/dev/snd
+    # environment (append):
+    #   PULSE_SERVER: unix:/run/user/1000/pulse/native
+    # volumes (append):
+    #   - /run/user/1000/pulse:/run/user/1000/pulse
+    stdin_open: true
+    tty: true
+
+volumes:
+  ollama_data:
+  whisper_cache:
+  iris_data:
