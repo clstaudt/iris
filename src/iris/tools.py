@@ -1,11 +1,16 @@
 """Simple tool system for LLM function calling."""
 
 import base64
+import logging
 import os
 import sys
+import time
 import warnings
 from io import BytesIO
-from typing import Optional
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Suppress OpenCV/AVCapture warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -30,11 +35,12 @@ except ImportError:
     HAS_SCREEN = False
 
 try:
-    import requests
+    from ddgs import DDGS
+    import trafilatura
 
-    HAS_REQUESTS = True
+    HAS_SEARCH = True
 except ImportError:
-    HAS_REQUESTS = False
+    HAS_SEARCH = False
 
 
 class Tools:
@@ -77,12 +83,21 @@ class Tools:
 
     def enable_web_search(self):
         """
-        Enable web search tool.
+        Enable web search and browse tools.
 
         Returns:
             True if enabled successfully, False if dependencies missing
         """
-        if HAS_REQUESTS:
+        if HAS_SEARCH:
+            from trafilatura.settings import use_config
+
+            self._traf_config = use_config()
+            self._traf_config.set(
+                "DEFAULT",
+                "USER_AGENTS",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
             self._enabled_tools["search"] = {
                 "function": self._search,
                 "schema": {
@@ -96,6 +111,30 @@ class Tools:
                                 "query": {"type": "string", "description": "Search query"}
                             },
                             "required": ["query"],
+                        },
+                    },
+                },
+            }
+            self._enabled_tools["browse"] = {
+                "function": self._browse,
+                "schema": {
+                    "type": "function",
+                    "function": {
+                        "name": "browse",
+                        "description": (
+                            "Fetch and read the contents of a webpage."
+                            " Use when the user mentions a specific website"
+                            " or you need to read a URL from search results."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "url": {
+                                    "type": "string",
+                                    "description": "Full URL to fetch (e.g. https://www.theguardian.com)",
+                                }
+                            },
+                            "required": ["url"],
                         },
                     },
                 },
@@ -117,7 +156,12 @@ class Tools:
                     "type": "function",
                     "function": {
                         "name": "capture_screen",
-                        "description": "Capture and see what is currently displayed on the user's computer screen/monitor/display. ALWAYS use this when asked about: screen, display, monitor, windows, applications, what's open, operating system, or anything visible on the digital screen.",
+                        "description": (
+                            "Take a screenshot of the user's physical computer screen."
+                            " Use ONLY when they ask about what is on their screen,"
+                            " monitor, or desktop. NEVER use this to read websites"
+                            " - use 'browse' for that."
+                        ),
                         "parameters": {"type": "object", "properties": {}, "required": []},
                     },
                 },
@@ -136,14 +180,8 @@ class Tools:
         Returns:
             Dict with 'success', 'image', and 'message' keys
         """
-        import time
-        import contextlib
-
         camera = None
         try:
-            # Redirect stderr to suppress AVCapture warnings at OS level
-            import sys
-
             old_stderr_fd = sys.stderr.fileno()
             saved_stderr_fd = os.dup(old_stderr_fd)
             devnull_fd = os.open(os.devnull, os.O_WRONLY)
@@ -205,7 +243,7 @@ class Tools:
 
     def _search(self, query: str) -> dict:
         """
-        Search the web.
+        Search the web using DuckDuckGo.
 
         Args:
             query: Search query string
@@ -213,26 +251,97 @@ class Tools:
         Returns:
             Dict with 'success', 'result', and 'message' keys
         """
-        if self.console:
-            self.console.print(f"[dim cyan]🔍 Searching: {query}[/dim cyan]")
+        logger.info("Searching: %s", query)
+
+        if self.status_manager:
+            with self.status_manager.status_lock:
+                self.status_manager.status_searching = True
 
         try:
-            # Use DuckDuckGo instant answer API
-            response = requests.get(
-                "https://api.duckduckgo.com/", params={"q": query, "format": "json"}, timeout=5
-            )
-            data = response.json()
+            results = DDGS().text(query, max_results=5)
 
-            # Try to get meaningful result
-            result = data.get("AbstractText") or data.get("Answer") or "No results found"
+            if not results:
+                logger.warning("Search returned no results for: %s", query)
+                return {"success": True, "result": "No results found.", "message": "No results"}
 
-            if self.console:
-                self.console.print("[dim green]✓ Search complete[/dim green]")
+            logger.info("Search got %d results for: %s", len(results), query)
 
-            return {"success": True, "result": result, "message": f"Search results for: {query}"}
+            formatted = []
+            for r in results:
+                title = r.get("title", "")
+                body = r.get("body", "")
+                href = r.get("href", "")
+                formatted.append(f"- {title}: {body} ({href})")
+
+            result_text = "\n".join(formatted)
+            return {
+                "success": True,
+                "result": result_text,
+                "message": f"Search results for: {query}",
+            }
 
         except Exception as e:
+            logger.error("Search failed for '%s': %s", query, e, exc_info=True)
             return {"success": False, "result": "Search failed", "message": f"Error: {e}"}
+        finally:
+            if self.status_manager:
+                with self.status_manager.status_lock:
+                    self.status_manager.status_searching = False
+
+    def _browse(self, url: str) -> dict:
+        """
+        Fetch and extract readable text from a webpage using trafilatura.
+
+        Args:
+            url: URL to fetch
+
+        Returns:
+            Dict with 'success', 'result', and 'message' keys
+        """
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
+        logger.info("Browsing: %s", url)
+
+        if self.status_manager:
+            with self.status_manager.status_lock:
+                self.status_manager.status_browsing = True
+
+        try:
+            downloaded = trafilatura.fetch_url(url, config=self._traf_config)
+            if downloaded is None:
+                logger.warning("Browse could not fetch: %s", url)
+                return {"success": False, "result": "", "message": f"Could not fetch {url}"}
+
+            text = trafilatura.extract(
+                downloaded,
+                include_links=True,
+                include_tables=True,
+                output_format="txt",
+                config=self._traf_config,
+            )
+            if not text:
+                logger.warning("Browse fetched but no content extracted: %s", url)
+                return {"success": False, "result": "", "message": "No content extracted"}
+
+            logger.info("Browse got %d chars from %s", len(text), url)
+
+            if len(text) > 4000:
+                text = text[:4000] + "\n...(truncated)"
+
+            return {
+                "success": True,
+                "result": text,
+                "message": f"Content from: {url}",
+            }
+
+        except Exception as e:
+            logger.error("Browse failed for '%s': %s", url, e, exc_info=True)
+            return {"success": False, "result": "Browse failed", "message": f"Error: {e}"}
+        finally:
+            if self.status_manager:
+                with self.status_manager.status_lock:
+                    self.status_manager.status_browsing = False
 
     def _capture_screen(self, **kwargs) -> dict:
         """
@@ -263,9 +372,6 @@ class Tools:
 
                 # Convert to PIL Image
                 image = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
-
-                # Check if image is completely black (permission denied on macOS)
-                import numpy as np
 
                 img_array = np.array(image)
                 if img_array.max() == 0:  # Completely black

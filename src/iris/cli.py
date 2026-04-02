@@ -5,8 +5,10 @@ Uses: faster-whisper (GPU), Ollama (qwen3:1.7b), and kokoro-tts
 """
 
 import argparse
+import logging
 import sys
 import warnings
+from pathlib import Path
 
 from rich.console import Console
 
@@ -15,6 +17,20 @@ from iris.personas import list_personas, get_persona
 warnings.filterwarnings("ignore")
 
 console = Console()
+
+LOG_DIR = Path.home() / ".iris"
+LOG_FILE = LOG_DIR / "iris.log"
+
+
+def setup_logging():
+    """Configure file logging to ~/.iris/iris.log."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(LOG_FILE),
+        level=logging.DEBUG,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 
 def main():
@@ -65,8 +81,15 @@ def main():
         action="store_true",
         help="Enable screen capture tool to see your computer screen",
     )
+    parser.add_argument(
+        "--enable-web-search",
+        action="store_true",
+        help="Enable web search tool to look up current information",
+    )
 
     args = parser.parse_args()
+
+    setup_logging()
 
     try:
         # Run setup wizard to check dependencies and download models
@@ -94,7 +117,7 @@ def main():
             enable_vision=args.enable_vision,
             vision_model=args.vision_model,
             enable_screen_capture=args.enable_screen_capture,
-            enable_web_search=False,
+            enable_web_search=args.enable_web_search,
         )
 
         assistant.run_loop()

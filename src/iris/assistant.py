@@ -155,8 +155,12 @@ class VoiceAssistant:
             full_response = []
             text_buffer = ""  # Buffer for speech chunks
 
+            def on_tool_use(tool_name, tool_args):
+                detail = tool_args.get("query") or tool_args.get("url", "")
+                self.display_manager.show_tool_activity(tool_name, detail)
+
             try:
-                for chunk_text in self.conversation.chat_stream(prompt):
+                for chunk_text in self.conversation.chat_stream(prompt, on_tool_use=on_tool_use):
                     full_response.append(chunk_text)
                     text_buffer += chunk_text
 
