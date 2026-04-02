@@ -1,4 +1,4 @@
-::# syntax=docker/dockerfile:1
+n syntax=docker/dockerfile:1
 
 # =============================================================================
 # Iris Voice Assistant - Docker Image
@@ -27,7 +27,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 
 # Copy project metadata first for layer caching
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
 
 # Install the project and all dependencies into a virtual-env
@@ -44,7 +44,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 \
         libgl1 \
         libglib2.0-0 \
-        curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

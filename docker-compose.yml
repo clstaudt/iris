@@ -27,11 +27,6 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
     # Uncomment to enable GPU passthrough (NVIDIA)
     # deploy:
     #   resources:
@@ -49,8 +44,7 @@ services:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      ollama:
-        condition: service_healthy
+      - ollama
     environment:
       # The ollama Python library reads this to find the Ollama server
       OLLAMA_HOST: "http://ollama:11434"

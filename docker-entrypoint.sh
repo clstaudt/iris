@@ -14,17 +14,18 @@ OLLAMA_HOST="${OLLAMA_HOST:-http://ollama:11434}"
 # Wait for Ollama to become reachable
 # ---------------------------------------------------------------------------
 echo "Waiting for Ollama at ${OLLAMA_HOST} ..."
-max_retries=60
-retry=0
-until curl -sf "${OLLAMA_HOST}/api/tags" > /dev/null 2>&1; do
-    retry=$((retry + 1))
-    if [ "$retry" -ge "$max_retries" ]; then
-        echo "Error: Ollama did not become ready within ${max_retries}s"
-        exit 1
-    fi
-    sleep 1
-done
-echo "Ollama is ready."
+python3 -c "
+import urllib.request, time, sys
+for i in range(60):
+    try:
+        urllib.request.urlopen('${OLLAMA_HOST}', timeout=2)
+        print('Ollama is ready.')
+        sys.exit(0)
+    except Exception:
+        time.sleep(1)
+print('Error: Ollama did not become ready within 60s')
+sys.exit(1)
+"
 
 # ---------------------------------------------------------------------------
 # Exec the command (defaults to "iris", see CMD in Dockerfile)
