@@ -294,19 +294,35 @@ class ConversationManager:
 
         return managed_messages
 
-    def chat_stream(self, prompt: str):
+    def chat_stream(self, prompt: str, response_language: str = "en"):
         """
         Send prompt to LLM and stream response with tool support.
         Automatically switches to vision model when vision tools are used.
 
         Args:
             prompt: User prompt text
+            response_language: Language the assistant should respond in
+                (Whisper ISO 639-1 code, e.g. 'en', 'fr', 'ja')
 
         Yields:
             Chunks of response text
         """
+        # Language names for the LLM instruction
+        _lang_names = {
+            "en": "English", "fr": "French", "it": "Italian",
+            "ja": "Japanese", "zh": "Chinese (Mandarin)",
+        }
+
         # Get managed conversation context
         messages = self.manage_context()
+
+        # Inject a language instruction so the LLM replies in the right language
+        if response_language != "en":
+            lang_name = _lang_names.get(response_language, response_language)
+            messages.append({
+                "role": "system",
+                "content": f"The user is speaking in {lang_name}. Respond in {lang_name}.",
+            })
 
         # Add current user message
         messages.append({"role": "user", "content": prompt})
