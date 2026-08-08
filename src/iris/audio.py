@@ -2,6 +2,7 @@
 
 import tempfile
 import threading
+import time
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
@@ -166,6 +167,7 @@ class AudioRecorder:
         silence_threshold: float = 0.02,
         silence_duration: float = 2.5,
         chunk_duration: float = 2.0,
+        device: int | None = None,
     ):
         """
         Initialize audio recorder.
@@ -175,11 +177,13 @@ class AudioRecorder:
             silence_threshold: RMS threshold for silence detection
             silence_duration: Duration of silence to stop recording
             chunk_duration: Duration of chunks for streaming transcription
+            device: Input device index (None = system default)
         """
         self.sample_rate = sample_rate
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
         self.chunk_duration = chunk_duration
+        self.device = device
         self._device_error = False  # Track if we've had a device error
 
     @staticmethod
@@ -210,16 +214,57 @@ class AudioRecorder:
         except Exception as e:
             return False, f"Error checking audio devices: {e}"
 
-    def listen(self, on_level: Callable[[float], None] | None = None) -> str | None:
+    @staticmethod
+    def input_device_name() -> str:
+        """Return the name of the default audio input device."""
+        try:
+            return sd.query_devices(kind="input")["name"]
+        except Exception:
+            return "Unknown microphone"
+
+    @staticmethod
+    def list_input_devices() -> list[dict]:
+        """List available audio input devices as {index, name} dicts."""
+        try:
+            return [
+                {"index": i, "name": d["name"]}
+                for i, d in enumerate(sd.query_devices())
+                if d["max_input_channels"] > 0
+            ]
+        except Exception:
+            return []
+
+    def set_device(self, index: int | None):
+        """Select the input device by index (None = system default).
+
+        Takes effect on the next listen() call."""
+        self.device = index
+
+    def current_device_name(self) -> str:
+        """Return the name of the currently selected input device."""
+        try:
+            if self.device is not None:
+                return sd.query_devices()[self.device]["name"]
+            return sd.query_devices(kind="input")["name"]
+        except Exception:
+            return "Unknown microphone"
+
+    def listen(
+        self,
+        on_level: Callable[[float], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> str | None:
         """
         Record audio from microphone until silence is detected.
         Starts recording immediately without waiting for speech threshold.
 
         Args:
             on_level: Optional callback called with audio level (0.0-1.0) for visualization
+            should_stop: Optional callable; recording aborts (returning None) as soon
+                as it returns True. Checked every 50 ms.
 
         Returns:
-            Path to temporary audio file, or None if recording failed
+            Path to temporary audio file, or None if recording failed or was aborted
         """
         audio_chunks = []
         silent_chunks = 0
@@ -237,10 +282,14 @@ class AudioRecorder:
                 channels=1,
                 callback=audio_callback,
                 blocksize=1024,
+                device=self.device,
             ):
                 try:
                     while True:
                         sd.sleep(50)  # Faster updates for smoother visualization
+
+                        if should_stop and should_stop():
+                            return None
 
                         if len(audio_chunks) > 0:
                             recent_chunk = audio_chunks[-1]
@@ -249,7 +298,9 @@ class AudioRecorder:
                             # Notify level callback (normalize to 0-1 range)
                             if on_level:
                                 # Scale RMS to a 0-1 range (typical speech is 0.01-0.2)
-                                normalized_level = min(1.0, rms / 0.15)
+                                # float() matters: rms is a numpy scalar, which
+                                # is not JSON-serializable for GUI consumers
+                                normalized_level = float(min(1.0, rms / 0.15))
                                 on_level(normalized_level)
 
                             # Track if we've captured any audio above silence
@@ -331,6 +382,7 @@ class AudioRecorder:
                 channels=1,
                 callback=audio_callback,
                 blocksize=1024,
+                device=self.device,
             ):
                 try:
                     while True:
@@ -413,12 +465,51 @@ class AudioPlayer:
         """Stop any currently playing audio."""
         sd.stop()
 
-    def play(self, audio_file: str):
+    @staticmethod
+    def _emit_levels(
+        audio: np.ndarray,
+        sample_rate: int,
+        on_level: Callable[[float], None],
+        stop: threading.Event,
+        rate: int = 15,
+    ):
+        """Walk the audio's RMS envelope in wall-clock time during playback.
+
+        sounddevice plays the buffer without exposing progress, so the envelope
+        is precomputed and replayed on a timer alongside it.
+        """
+        mono = audio if audio.ndim == 1 else audio.mean(axis=1)
+        frame = max(1, int(sample_rate / rate))
+        frames = len(mono) // frame
+        if frames == 0:
+            return
+        envelope = np.sqrt(
+            np.mean(mono[: frames * frame].reshape(frames, frame) ** 2, axis=1)
+        )
+        # Playback is normalized to 0.85 peak; scale so speech reaches the top
+        envelope = np.minimum(envelope / 0.25, 1.0)
+        # Syllables make the raw envelope jump between frames, which reads as
+        # flicker on a meter; a short moving average keeps the shape but not
+        # the jitter.
+        if frames >= 3:
+            envelope = np.convolve(envelope, np.ones(3) / 3, mode="same")
+
+        start = time.monotonic()
+        while not stop.is_set():
+            index = int((time.monotonic() - start) * rate)
+            if index >= frames:
+                return
+            on_level(float(envelope[index]))
+            stop.wait(1 / rate)
+
+    def play(self, audio_file: str, on_level: Callable[[float], None] | None = None):
         """
         Play pre-generated audio file with optional filter.
 
         Args:
             audio_file: Path to WAV file to play
+            on_level: Optional callback receiving the playback level (0.0-1.0)
+                at ~15 Hz while the audio plays, for output level meters
         """
         try:
             # Load audio into memory completely before any playback
@@ -459,7 +550,23 @@ class AudioPlayer:
             # Play with maximum buffer size and latency for ultra-smooth playback
             # Extra large buffer (32768 samples = ~740ms) prevents any underruns
             sd.play(audio, sample_rate, blocksize=32768, latency="high")
+
+            level_thread = None
+            level_stop = threading.Event()
+            if on_level:
+                level_thread = threading.Thread(
+                    target=self._emit_levels,
+                    args=(audio, sample_rate, on_level, level_stop),
+                    daemon=True,
+                )
+                level_thread.start()
+
             sd.wait()
+
+            if level_thread:
+                level_stop.set()
+                level_thread.join(timeout=0.5)
+                on_level(0.0)
 
         except Exception as e:
             print(f"Error playing audio: {e}")

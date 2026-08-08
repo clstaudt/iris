@@ -57,6 +57,39 @@ class ConversationManager:
         if not quiet:
             print(f"Model context length: {self.max_context_tokens:,} tokens")
 
+    @staticmethod
+    def list_available_models() -> list[dict]:
+        """List Ollama models that can hold a conversation.
+
+        Embedding-only models are excluded. Each entry reports whether the
+        model supports tool calling, which Iris needs for vision/search tools.
+        """
+        try:
+            models = []
+            for entry in ollama.list().models:
+                name = entry.model
+                try:
+                    capabilities = list(ollama.show(name).capabilities or [])
+                except Exception:
+                    capabilities = []
+                if "embedding" in capabilities:
+                    continue
+                models.append(
+                    {
+                        "name": name,
+                        "tools": "tools" in capabilities,
+                        "vision": "vision" in capabilities,
+                    }
+                )
+            return sorted(models, key=lambda m: m["name"])
+        except Exception:
+            return []
+
+    def set_model(self, model: str):
+        """Switch the primary model, keeping conversation history intact."""
+        self.model = model
+        self.max_context_tokens = self._get_model_context_length()
+
     def _get_model_context_length(self) -> int:
         """
         Get the model's context length from Ollama.

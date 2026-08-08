@@ -47,6 +47,7 @@ class WhisperTranscriber:
             device=device,
             compute_type="float16" if device == "cuda" else "int8",
         )
+        self.model_name = model
         self.device = device
         self._transcription_lock = threading.Lock()
         if not quiet:

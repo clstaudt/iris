@@ -251,6 +251,49 @@ iris --enable-screen-capture
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
+<!-- DESKTOP UI -->
+
+## Desktop UI (Electron shell, development mode)
+
+An experimental desktop UI lives in `ui/`: an Electron shell (Svelte 5 + Vite + Tailwind) that wraps the Python core. The assistant logic stays in Python; Electron is a thin presentation layer talking to it over newline-delimited JSON-RPC on stdio (`python -m iris.rpc_server`, also installed as the `iris-gui` entry point).
+
+The window shows a terminal-style chat transcript that grows upward, anchored at the bottom by a large graphical status zone. At rest the status zone is a soft white circle. It turns red and pulses with your voice as it listens, becomes a slowly rotating purple spinner while transcribing and a cyan one while thinking, opens a camera aperture while looking through the camera or capturing the screen, and pulses yellow with the speech it is playing back — state is conveyed purely by color, glow, and motion, readable from across the room.
+
+**Run it:**
+
+```bash
+uv sync                 # Python core (once)
+cd ui
+npm install             # once
+npm run dev             # starts Vite + Electron + the Python core
+```
+
+The assistant starts listening as soon as the window opens (model loading takes a moment on first launch) — just speak, like in the terminal app. Use ⏸ to pause listening (models stay loaded, so resume is instant), ⏭ to interrupt speech (barge-in), or type a message in the input field.
+
+Unlike the CLI, which gates them behind flags, the desktop UI enables the camera, screen capture and web search tools by default; each one degrades to a warning if its optional dependencies are missing. Image prompts are routed to an installed vision model when there is one, otherwise they stay on the primary model.
+
+The control bar also lets you switch the persona, the Ollama model, and the microphone while the app runs. The model menu lists what Ollama has installed (embedding-only models are hidden, and models without tool-calling support are marked); switching keeps the conversation history. If the configured model is missing, Iris says so at startup instead of failing on the first reply.
+
+The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `assistant.start/stop/interrupt/pause/resume`, `chat.send_text`, `persona.list/set`, `llm.list/set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `chat.user/chunk/done`, `tool.use`, `error`).
+
+> **Note for Cursor/VSCode terminals:** if Electron exits immediately with `Cannot set properties of undefined`, your terminal exports `ELECTRON_RUN_AS_NODE=1`. The `dev` script already clears it; when launching `electron .` manually, prefix it with `ELECTRON_RUN_AS_NODE=`.
+
+### macOS microphone permission in dev mode
+
+If the waveform stays flat and the orb never reacts, macOS is returning pure silence instead of audio — the symptom of a missing microphone grant. In development the grant does **not** belong to Electron: macOS assigns it to the *responsible process*, which is the app that started the dev server (Cursor, VS Code, Terminal or iTerm). That is also why "Electron" may not appear in the Privacy list at all.
+
+Check what your shell actually captures:
+
+```bash
+.venv/bin/python -c "import sounddevice as sd, numpy as np; r = sd.rec(int(3*16000), samplerate=16000, channels=1); sd.wait(); print('max amplitude:', float(np.abs(r).max()))"
+```
+
+A working microphone reports a non-zero value (a quiet room still has a noise floor). Exactly `0.0` means capture is being denied. Fix it by enabling the microphone for your launching app under **System Settings > Privacy & Security > Microphone**, then quitting and reopening that app (a reload is not enough). Running `npm run dev` from a terminal that already has the grant — the same one where `iris` works on the CLI — also resolves it.
+
+The app surfaces this itself: a red line appears in the transcript when the microphone delivers only silence for a few seconds.
+
+<p align="right">(<a href="#top">back to top</a>)</p>
+
 <!-- ACKNOWLEDGMENTS -->
 
 ## Acknowledgments

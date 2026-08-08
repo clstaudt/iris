@@ -312,6 +312,9 @@ class SpeechPipeline:
         # Current language for TTS (set by assistant on each turn)
         self.current_language = "en"
 
+        # Optional callback receiving playback level (0.0-1.0) for output meters
+        self.on_output_level = None
+
         # Queues for pipeline
         self.text_queue = queue.Queue()
         self.audio_queue = queue.Queue()
@@ -376,7 +379,7 @@ class SpeechPipeline:
 
                 # Play the audio
                 self.is_speaking_flag.set()
-                self.player.play(audio_file)
+                self.player.play(audio_file, on_level=self.on_output_level)
                 self.is_speaking_flag.clear()
 
                 # Cleanup

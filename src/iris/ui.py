@@ -11,7 +11,20 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
+from iris.events import EventBus
+
 warnings.filterwarnings("ignore")
+
+STATUS_FLAG_NAMES = (
+    "listening",
+    "looking",
+    "capturing_screen",
+    "searching",
+    "browsing",
+    "understanding",
+    "thinking",
+    "summarizing",
+)
 
 
 class DynamicStatusBar:
@@ -45,16 +58,14 @@ class StatusManager:
         """
         self.console = console
 
-        # Status flags
-        self.status_listening = False
-        self.status_looking = False
-        self.status_capturing_screen = False
-        self.status_searching = False
-        self.status_browsing = False
-        self.status_understanding = False
-        self.status_thinking = False
-        self.status_summarizing = False
+        # Status flags (backing fields; accessed through properties below so
+        # that an attached EventBus is notified on every change)
+        for _flag in STATUS_FLAG_NAMES:
+            setattr(self, f"_status_{_flag}", False)
         self.status_lock = threading.Lock()
+
+        # Optional event bus (attached by the GUI controller; None in CLI mode)
+        self.event_bus: EventBus | None = None
 
         # Create persistent spinners (reused across updates for animation)
         self.spinner_listening = Spinner("dots", text="Listening", style="red")
@@ -203,6 +214,41 @@ class StatusManager:
         if self.status_bar_live and self.status_bar_active:
             self.status_bar_live.stop()
             self.status_bar_active = False
+
+    def flags_snapshot(self) -> dict:
+        """Return a {flag_name: bool} snapshot of all status flags."""
+        with self.status_lock:
+            return {flag: getattr(self, f"_status_{flag}") for flag in STATUS_FLAG_NAMES}
+
+    def _notify_flags_changed(self):
+        """Emit a flags event on the bus. Callers may hold status_lock, so this
+        must not acquire it (single-threaded flag mutation makes the unlocked
+        read a benign race)."""
+        bus = self.event_bus
+        if bus is not None:
+            snapshot = {flag: getattr(self, f"_status_{flag}") for flag in STATUS_FLAG_NAMES}
+            bus.emit("flags", {"flags": snapshot})
+
+
+def _make_status_property(flag: str) -> property:
+    """Create a property for a status flag that notifies the bus on change."""
+
+    def getter(self):
+        return getattr(self, f"_status_{flag}")
+
+    def setter(self, value):
+        value = bool(value)
+        if getattr(self, f"_status_{flag}") == value:
+            return
+        setattr(self, f"_status_{flag}", value)
+        self._notify_flags_changed()
+
+    return property(getter, setter)
+
+
+for _flag in STATUS_FLAG_NAMES:
+    setattr(StatusManager, f"status_{_flag}", _make_status_property(_flag))
+del _flag
 
 
 class DisplayManager:

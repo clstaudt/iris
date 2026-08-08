@@ -2,6 +2,7 @@
 
 import sys
 import threading
+import time
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -12,8 +13,10 @@ from rich.panel import Panel
 from rich.text import Text
 
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
+from iris.events import EventBus
 from iris.llm import ConversationManager
 from iris.personas import Persona, get_persona
+from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
 from iris.tts import KokoroGenerator, SpeechPipeline, is_language_supported
 from iris.ui import DisplayManager, StatusManager
@@ -37,9 +40,10 @@ class VoiceAssistant:
         quiet: bool = True,
         persona: Optional[Persona] = None,
         enable_vision: bool = False,
-        vision_model: str = "qwen3-vl:8b",
+        vision_model: Optional[str] = "qwen3-vl:8b",
         enable_screen_capture: bool = False,
         enable_web_search: bool = False,
+        event_bus: Optional[EventBus] = None,
     ):
         """
         Initialize the voice assistant.
@@ -59,9 +63,18 @@ class VoiceAssistant:
             vision_model: Vision model to use when vision is needed (default: qwen3-vl:8b)
             enable_screen_capture: Enable screen capture tool
             enable_web_search: Enable web search tool
+            event_bus: Optional EventBus for streaming activity to an external UI
         """
         # Initialize console
         self.console = Console()
+
+        # Event bus for external UIs (None in pure CLI mode)
+        self.event_bus = event_bus
+
+        # Cooperative control signals for external UIs
+        self.interrupt_event = threading.Event()  # barge-in: cancel current turn
+        self.stop_event = threading.Event()  # request run_loop shutdown
+        self.pause_event = threading.Event()  # pause listening (models stay loaded)
 
         # Track current conversation language for continuity
         self.conversation_language = "en"
@@ -87,15 +100,19 @@ class VoiceAssistant:
         self.tts_generator = KokoroGenerator(tts_voice, self.persona.speed, quiet=quiet)
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
 
+        if self.event_bus:
+            self.speech_pipeline.on_output_level = lambda level: self.event_bus.emit(
+                "audio.output", {"rms": level}
+            )
+
         # Initialize UI
         self.status_manager = StatusManager(self.console)
+        self.status_manager.event_bus = self.event_bus
         self.display_manager = DisplayManager(self.console, self.status_manager)
 
         # Setup tools (after status_manager is created)
         self.tools = None
         if enable_vision or enable_screen_capture or enable_web_search:
-            from iris.tools import Tools
-
             self.tools = Tools(console=self.console, status_manager=self.status_manager)
 
             if enable_vision:
@@ -138,6 +155,17 @@ class VoiceAssistant:
             quiet=quiet,
         )
 
+    def config_info(self) -> dict:
+        """Describe the loaded models and audio input for external UIs."""
+        return {
+            "persona": self.persona.name,
+            "llm_model": self.conversation.model,
+            "whisper_model": self.transcriber.model_name,
+            "whisper_device": self.transcriber.device,
+            "tts_voice": self.tts_generator.voice,
+            "input_device": self.recorder.current_device_name(),
+        }
+
     def chat(self, prompt: str, response_language: str = "en") -> str:
         """
         Send prompt to LLM, stream response, and speak it.
@@ -165,11 +193,23 @@ class VoiceAssistant:
             def on_tool_use(tool_name, tool_args):
                 detail = tool_args.get("query") or tool_args.get("url", "")
                 self.display_manager.show_tool_activity(tool_name, detail)
+                if self.event_bus:
+                    self.event_bus.emit("tool.use", {"tool": tool_name, "detail": detail})
 
+            interrupted = False
             try:
                 for chunk_text in self.conversation.chat_stream(prompt, response_language=response_language, on_tool_use=on_tool_use):
+                    # Barge-in: cancel the rest of this turn
+                    if self.interrupt_event.is_set():
+                        interrupted = True
+                        self.interrupt_event.clear()
+                        break
+
                     full_response.append(chunk_text)
                     text_buffer += chunk_text
+
+                    if self.event_bus:
+                        self.event_bus.emit("chat.chunk", {"text": chunk_text})
 
                     # Build current response text
                     current_text = "".join(full_response)
@@ -223,6 +263,14 @@ class VoiceAssistant:
                 # Collect final answer
                 answer = "".join(full_response)
 
+                if interrupted:
+                    # Cancel any queued/pending speech for this turn
+                    self.speech_pipeline.stop()
+                    text_buffer = ""
+
+                if self.event_bus:
+                    self.event_bus.emit("chat.done", {"text": answer, "interrupted": interrupted})
+
                 # Final update: show ONLY the message (without status bar)
                 self.display_manager.finalize_message(answer, self.speech_pipeline)
 
@@ -256,6 +304,8 @@ class VoiceAssistant:
                 self.status_manager.start(self.speech_pipeline)
 
             error_msg = f"Error communicating with Ollama: {e}"
+            if self.event_bus:
+                self.event_bus.emit("error", {"message": error_msg})
             self.console.print(f"[red]Error:[/red] {error_msg}")
             import traceback
 
@@ -305,17 +355,45 @@ class VoiceAssistant:
 
         try:
             while True:
+                # External UI requested shutdown
+                if self.stop_event.is_set():
+                    break
+
+                # Paused: wait without touching the microphone (models stay loaded)
+                if self.pause_event.is_set():
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_listening = False
+                    time.sleep(0.1)
+                    continue
+
+                # External UI requested barge-in while between turns
+                if self.interrupt_event.is_set():
+                    self.interrupt_event.clear()
+                    self.speech_pipeline.stop()
+
                 try:
                     # 1. Listen for voice input with level visualization
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = True
                     self.status_manager.update_status_bar(self.speech_pipeline)
 
+                    last_level_emit = [0.0]
+
                     def on_audio_level(level: float):
                         """Update audio level display."""
                         self.display_manager.update_audio_level_display(level, self.speech_pipeline)
+                        # Throttle level events to ~15 Hz for external UIs
+                        if self.event_bus:
+                            now = time.monotonic()
+                            if now - last_level_emit[0] >= 1 / 15:
+                                last_level_emit[0] = now
+                                self.event_bus.emit("audio.level", {"rms": level})
 
-                    audio_path = self.recorder.listen(on_level=on_audio_level)
+                    audio_path = self.recorder.listen(
+                        on_level=on_audio_level,
+                        should_stop=lambda: self.pause_event.is_set()
+                        or self.stop_event.is_set(),
+                    )
 
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
@@ -361,6 +439,10 @@ class VoiceAssistant:
 
                     # Display user message
                     self.display_manager.show_user_message(text)
+                    if self.event_bus:
+                        self.event_bus.emit(
+                            "chat.user", {"text": text, "language": response_language}
+                        )
 
                     # 3. Send to LLM (streams response and speaks it)
                     self.chat(text, response_language=response_language)
