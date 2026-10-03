@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, systemPreferences } from "electron";
+import { app, BrowserWindow, ipcMain, shell, systemPreferences } from "electron";
 import path from "node:path";
 import { PythonBridge } from "./python-bridge";
 
@@ -18,7 +18,7 @@ function createWindow() {
     show: false,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 16 },
-    backgroundColor: "#050505",
+    backgroundColor: "#121316",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -28,6 +28,15 @@ function createWindow() {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
+  });
+
+  // Links in replies open in the browser; the app window never navigates away
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== mainWindow?.webContents.getURL()) event.preventDefault();
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {

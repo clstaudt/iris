@@ -138,6 +138,31 @@ class TestGenerateLanguage:
             os.unlink(result)
 
 
+class TestPersonaVoice:
+    """Personas must keep their own voice wherever it can speak the language."""
+
+    @patch.object(KokoroGenerator, "_locate_models")
+    @patch("iris.tts.Kokoro")
+    def _generator(self, voice, MockKokoro, mock_locate):
+        mock_locate.return_value = ("/fake/model.onnx", "/fake/voices.bin")
+        return KokoroGenerator(voice=voice, speed=1.0, quiet=True)
+
+    def test_english_keeps_the_persona_voice(self):
+        assert self._generator("af_sarah").voice_for("en") == ("en-us", "af_sarah")
+
+    def test_british_voice_gets_british_english(self):
+        assert self._generator("bm_lewis").voice_for("en") == ("en-gb", "bm_lewis")
+
+    def test_language_the_voice_cannot_speak_uses_its_default(self):
+        assert self._generator("bm_lewis").voice_for("fr") == ("fr-fr", "ff_siwis")
+
+    def test_voice_switch_applies_to_the_next_sentence(self):
+        """Switching persona swaps generator.voice; the next reply must use it."""
+        gen = self._generator("af_sarah")
+        gen.voice = "bm_lewis"
+        assert gen.voice_for("en") == ("en-gb", "bm_lewis")
+
+
 # ---------------------------------------------------------------------------
 # SpeechPipeline passes language through
 # ---------------------------------------------------------------------------
@@ -181,6 +206,7 @@ class TestTranscriptionLanguage:
         mock_info.language = "fr"
         mock_segment = MagicMock()
         mock_segment.text = "Bonjour"
+        mock_segment.no_speech_prob = 0.02
         MockWhisper.return_value.transcribe.return_value = ([mock_segment], mock_info)
 
         with patch("iris.transcription.torch", create=True) as mock_torch:
@@ -191,6 +217,22 @@ class TestTranscriptionLanguage:
         text, lang = transcriber.transcribe("/fake/audio.wav")
         assert text == "Bonjour"
         assert lang == "fr"
+
+    @patch("iris.transcription.WhisperModel")
+    def test_transcribe_drops_segments_rated_as_silence(self, MockWhisper):
+        """Noise transcribed as "You" must not become a user turn."""
+        from iris.transcription import WhisperTranscriber
+
+        mock_info = MagicMock()
+        mock_info.language = "en"
+        phantom = MagicMock()
+        phantom.text = "You"
+        phantom.no_speech_prob = 0.9
+        MockWhisper.return_value.transcribe.return_value = ([phantom], mock_info)
+
+        transcriber = WhisperTranscriber(model="tiny", device="cpu", quiet=True)
+        text, _ = transcriber.transcribe("/fake/audio.wav")
+        assert text == ""
 
 
 # ---------------------------------------------------------------------------

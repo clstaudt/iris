@@ -25,12 +25,15 @@ KOKORO_VOICES_URL = (
 
 # Mapping from Whisper language codes to Kokoro TTS language/voice settings.
 # Kokoro supports: en-us, en-gb, fr-fr, it, ja, cmn
+# A Kokoro voice name starts with its language ("af_bella": American English,
+# "bm_lewis": British English, "ff_siwis": French...). A persona keeps its own
+# voice for languages that voice speaks, and borrows the default otherwise.
 LANGUAGE_VOICE_MAP = {
-    "en": {"code": "en-us", "default_voice": "af_bella"},
-    "fr": {"code": "fr-fr", "default_voice": "ff_siwis"},
-    "it": {"code": "it", "default_voice": "if_sara"},
-    "ja": {"code": "ja", "default_voice": "jf_alpha"},
-    "zh": {"code": "cmn", "default_voice": "zf_xiaoni"},
+    "en": {"code": "en-us", "default_voice": "af_bella", "voice_prefixes": "ab"},
+    "fr": {"code": "fr-fr", "default_voice": "ff_siwis", "voice_prefixes": "f"},
+    "it": {"code": "it", "default_voice": "if_sara", "voice_prefixes": "i"},
+    "ja": {"code": "ja", "default_voice": "jf_alpha", "voice_prefixes": "j"},
+    "zh": {"code": "cmn", "default_voice": "zf_xiaoni", "voice_prefixes": "z"},
 }
 
 
@@ -235,6 +238,26 @@ class KokoroGenerator:
                         f.write(chunk)
                         progress.update(task, advance=len(chunk))
 
+    def voice_for(self, language: str) -> tuple[str, str]:
+        """Pick (Kokoro language code, voice) for a reply in this language.
+
+        The persona's voice is used whenever it speaks the language, so
+        personas sound different from each other; for a language it cannot
+        speak, that language's default voice takes over.
+        """
+        lang_info = get_language_info(language)
+        if lang_info is None:
+            # Unsupported language – fall back to English with the own voice
+            kokoro_lang, voice = "en-us", self.voice
+        elif self.voice[:1] in lang_info["voice_prefixes"]:
+            kokoro_lang, voice = lang_info["code"], self.voice
+        else:
+            kokoro_lang, voice = lang_info["code"], lang_info["default_voice"]
+        # British voices are given British pronunciation
+        if kokoro_lang == "en-us" and voice.startswith("b"):
+            kokoro_lang = "en-gb"
+        return kokoro_lang, voice
+
     def generate(self, text: str, language: str = "en") -> str | None:
         """
         Generate audio file from text using kokoro-onnx Python API.
@@ -248,14 +271,7 @@ class KokoroGenerator:
         Returns:
             Path to generated WAV file, or None if generation failed
         """
-        lang_info = get_language_info(language)
-        if lang_info:
-            kokoro_lang = lang_info["code"]
-            voice = lang_info["default_voice"]
-        else:
-            # Unsupported language – fall back to English with default voice
-            kokoro_lang = "en-us"
-            voice = self.voice
+        kokoro_lang, voice = self.voice_for(language)
 
         temp_audio = None
         try:
@@ -422,6 +438,14 @@ class SpeechPipeline:
         """Wait for all speech generation and playback to finish."""
         self.text_queue.join()  # Wait for generation
         self.audio_queue.join()  # Wait for playback
+
+    def pause(self):
+        """Hold speech mid-sentence; queued text keeps being synthesized."""
+        self.player.pause()
+
+    def resume(self):
+        """Continue speech from where pause() held it."""
+        self.player.resume()
 
     def stop(self):
         """Stop the speech pipeline immediately."""

@@ -1,31 +1,66 @@
 @import "tailwindcss";
 
+/* Charcoal panels in the manner of a modern editor theme, with the iris
+   petals (periwinkle, cyan, warm orange) as sparing accents. */
+@theme {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI",
+    system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  --color-frame: #121316;
+  --color-panel: #1a1b1f;
+  --color-raised: #222328;
+  --color-hover: #2a2b31;
+  --color-line: rgb(255 255 255 / 0.07);
+  --color-line-strong: rgb(255 255 255 / 0.12);
+
+  --color-ink: #e4e5e9;
+  --color-ink-2: #a5a8b1;
+  --color-ink-3: #6e727c;
+
+  --color-accent: #a3a1f7;
+  --color-petal-cyan: #79c7d9;
+  --color-petal-warm: #e6ab7a;
+  --color-danger: #df8a93;
+}
+
 :root {
   color-scheme: dark;
 }
 
 body {
-  font-family:
-    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
   user-select: none;
 }
 
 input,
+textarea,
 select {
   user-select: text;
 }
 
-/* Slim dark scrollbar for the transcript */
+/* Transcript text can be selected and copied */
+.selectable {
+  user-select: text;
+}
+
+/* Slim dark scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 10px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #262626;
-  border-radius: 4px;
+  background: rgb(255 255 255 / 0.08);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #404040;
+  background: rgb(255 255 255 / 0.16);
+  border: 3px solid transparent;
+  background-clip: padding-box;
 }

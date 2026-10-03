@@ -131,3 +131,15 @@ def get_persona(persona_name: str = "iris") -> Persona:
 def list_personas() -> list[str]:
     """Get list of available persona names."""
     return list(PERSONAS.keys())
+
+
+def reload_personas() -> dict[str, str]:
+    """Re-scan the persona directories, picking up files added since start.
+
+    Returns:
+        {persona_id: display name} for every persona now available
+    """
+    fresh = load_all_personas()
+    PERSONAS.clear()
+    PERSONAS.update(fresh)
+    return {persona_id: persona.name for persona_id, persona in PERSONAS.items()}

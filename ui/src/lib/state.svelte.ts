@@ -1,0 +1,434 @@
+/** Central reactive store, fed by Python events over the RPC bridge. */
+
+import { onEvent, rpc, type AppInfo } from "./bridge";
+
+export type AssistantState =
+  | "idle"
+  | "starting"
+  | "listening"
+  | "understanding"
+  | "thinking"
+  | "speaking"
+  | "looking"
+  | "capturing_screen"
+  | "searching"
+  | "browsing"
+  | "summarizing"
+  | "paused"
+  | "muted"
+  | "typing";
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "tool" | "error" | "system";
+  text: string;
+  streaming: boolean;
+  tool?: string;
+  /** How a user turn arrived */
+  source?: "voice" | "text";
+  /** Error category, so a resolved warning can be retracted */
+  kind?: string;
+}
+
+/** A typed message waiting for the current turn to finish. */
+export interface PendingTurn {
+  id: string;
+  text: string;
+}
+
+/** Orb colors: muted tones, so state reads from the hue without glaring. */
+export const STATE_COLORS: Record<string, string> = {
+  idle: "#d6d7dd",
+  starting: "#868b98",
+  listening: "#e07c88",
+  understanding: "#a996e6",
+  thinking: "#76c1d4",
+  speaking: "#e3b072",
+  looking: "#d295d4",
+  capturing_screen: "#d295d4",
+  searching: "#82b6d6",
+  browsing: "#82b6d6",
+  summarizing: "#90a6e4",
+  paused: "#62666e",
+  muted: "#8d919b",
+  typing: "#a9b1c9",
+};
+
+export const STATE_LABELS: Record<string, string> = {
+  idle: "Ready",
+  starting: "Loading models",
+  listening: "Listening",
+  understanding: "Transcribing",
+  thinking: "Thinking",
+  speaking: "Speaking",
+  looking: "Looking through the camera",
+  capturing_screen: "Looking at your screen",
+  searching: "Searching the web",
+  browsing: "Reading a web page",
+  summarizing: "Summarizing",
+  paused: "Paused",
+  muted: "Microphone off",
+  typing: "Microphone waits while you type",
+};
+
+/** States in which a reply is underway and can be stopped. */
+export const BUSY_STATES = new Set([
+  "understanding",
+  "thinking",
+  "speaking",
+  "looking",
+  "capturing_screen",
+  "searching",
+  "browsing",
+  "summarizing",
+]);
+
+/** A switchable tool group as the core reports it. */
+export interface ToolState {
+  enabled: boolean;
+  available: boolean;
+}
+
+export interface AssistantConfig {
+  persona: string;
+  llm_model: string;
+  whisper_model: string;
+  whisper_device: string;
+  tts_voice: string;
+  input_device: string;
+  speak_replies?: boolean;
+  ollama_host?: string;
+  ollama_url?: string;
+  mic_on?: boolean;
+  paused?: boolean;
+  tools?: Record<string, ToolState>;
+}
+
+/** User choices remembered across launches. */
+interface SavedSettings {
+  llm_model?: string;
+  persona?: string;
+  input_device?: string;
+  speak_replies?: boolean;
+  tools?: Record<string, boolean>;
+  ollama_host?: string;
+}
+
+const SETTINGS_KEY = "iris.settings";
+
+function loadSettings(): SavedSettings {
+  try {
+    return JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as SavedSettings;
+  } catch {
+    return {};
+  }
+}
+
+function saveSettings(patch: SavedSettings) {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...loadSettings(), ...patch }));
+  } catch {
+    // Storage unavailable: settings simply aren't remembered
+  }
+}
+
+class IrisStore {
+  state = $state<AssistantState>("starting");
+  running = $state(false);
+  personas = $state<string[]>([]);
+  /** Display names keyed by persona id */
+  personaNames = $state<Record<string, string>>({});
+  persona = $state("iris");
+  config = $state<AssistantConfig | null>(null);
+  inputDevices = $state<{ index: number; name: string }[]>([]);
+  models = $state<{ name: string; tools: boolean; vision: boolean }[]>([]);
+  messages = $state<ChatMessage[]>([]);
+  pending = $state<PendingTurn[]>([]);
+  speakReplies = $state(true);
+  settingsOpen = $state(false);
+
+  /** Mic input level, driving the meter and spinner while listening. */
+  level = $state(0);
+  /** TTS playback level, driving the meter while the assistant speaks. */
+  outputLevel = $state(0);
+
+  private streamingIndex: number | null = null;
+  /** Typed turns that started before their send() call returned. */
+  private startedTurns = new Set<string>();
+  private holding = false;
+  private micRestored = false;
+
+  get busy() {
+    return BUSY_STATES.has(this.state);
+  }
+
+  get micOn() {
+    return this.config?.mic_on ?? true;
+  }
+
+  get paused() {
+    return this.state === "paused";
+  }
+
+  handleEvent(type: string, data: Record<string, unknown>) {
+    switch (type) {
+      case "config": {
+        const previous = this.config?.llm_model;
+        this.config = data as unknown as AssistantConfig;
+        this.persona = this.config.persona.toLowerCase();
+        this.speakReplies = this.config.speak_replies ?? true;
+        if (previous && previous !== this.config.llm_model) {
+          this.messages = this.messages.filter((m) => m.kind !== "model_missing");
+        }
+        this.restoreMic();
+        break;
+      }
+
+      case "state":
+        this.state = (data.state as AssistantState) ?? "idle";
+        this.running = this.state !== "idle";
+        break;
+
+      case "audio.level":
+        this.level = (data.rms as number) ?? 0;
+        break;
+
+      case "audio.output":
+        this.outputLevel = (data.rms as number) ?? 0;
+        break;
+
+      case "chat.user": {
+        const id = data.id as string | undefined;
+        if (id) {
+          this.startedTurns.add(id);
+          this.pending = this.pending.filter((p) => p.id !== id);
+        }
+        this.streamingIndex = null;
+        this.messages.push({
+          role: "user",
+          text: (data.text as string) ?? "",
+          source: (data.source as "voice" | "text") ?? "voice",
+          streaming: false,
+        });
+        break;
+      }
+
+      case "chat.chunk": {
+        const chunk = (data.text as string) ?? "";
+        if (
+          this.streamingIndex === null ||
+          this.messages[this.streamingIndex]?.role !== "assistant"
+        ) {
+          this.messages.push({ role: "assistant", text: "", streaming: true });
+          this.streamingIndex = this.messages.length - 1;
+        }
+        this.messages[this.streamingIndex].text += chunk;
+        break;
+      }
+
+      case "chat.done": {
+        if (this.streamingIndex !== null && this.messages[this.streamingIndex]) {
+          this.messages[this.streamingIndex].text = (data.text as string) ?? "";
+          this.messages[this.streamingIndex].streaming = false;
+        } else if ((data.text as string)?.trim()) {
+          this.messages.push({
+            role: "assistant",
+            text: data.text as string,
+            streaming: false,
+          });
+        }
+        this.streamingIndex = null;
+        break;
+      }
+
+      case "tool.use":
+        this.messages.push({
+          role: "tool",
+          text: (data.detail as string) ?? "",
+          tool: (data.tool as string) ?? "tool",
+          streaming: false,
+        });
+        break;
+
+      case "error":
+        this.streamingIndex = null;
+        this.messages.push({
+          role: "error",
+          text: (data.message as string) ?? "Unknown error",
+          kind: data.kind as string | undefined,
+          streaming: false,
+        });
+        break;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Commands
+  // ------------------------------------------------------------------
+
+  async send(text: string) {
+    const value = text.trim();
+    if (!value) return;
+    const result = await rpc<{ ok: boolean; id?: string }>("chat.send_text", {
+      text: value,
+    });
+    if (result.ok && result.id && !this.startedTurns.has(result.id)) {
+      this.pending.push({ id: result.id, text: value });
+    }
+  }
+
+  /** Close the mic while a draft is being typed; reopen it when it is gone. */
+  async setTyping(on: boolean) {
+    if (on === this.holding) return;
+    this.holding = on;
+    try {
+      await rpc("assistant.hold", { on });
+    } catch (err) {
+      console.error("[store] assistant.hold failed:", err);
+    }
+  }
+
+  async toggleMic() {
+    await rpc("mic.set", { on: !this.micOn });
+  }
+
+  /** Pause or resume the whole conversation: listening, reply and speech. */
+  async togglePause() {
+    await rpc(this.paused ? "assistant.resume" : "assistant.pause");
+  }
+
+  async toggleVoice() {
+    const enabled = !this.speakReplies;
+    this.speakReplies = enabled;
+    saveSettings({ speak_replies: enabled });
+    await rpc("voice.set_output", { enabled });
+  }
+
+  async interrupt() {
+    await rpc("assistant.interrupt");
+  }
+
+  async setPersona(name: string) {
+    this.persona = name;
+    saveSettings({ persona: name });
+    await rpc("persona.set", { name });
+  }
+
+  async setTool(name: string, enabled: boolean) {
+    saveSettings({ tools: { ...loadSettings().tools, [name]: enabled } });
+    await rpc("tools.set", { name, enabled });
+  }
+
+  /** Re-read personas, so files added to ~/.iris/personas show up. */
+  async refreshPersonas() {
+    const result = await rpc<{ personas: string[]; names: Record<string, string> }>(
+      "persona.list"
+    );
+    this.personas = result.personas;
+    this.personaNames = result.names ?? {};
+  }
+
+  /** Point the core at another Ollama server ("" = default); on success the
+   *  model list is refreshed, since it differs per server. */
+  async setOllamaHost(url: string): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string; host?: string }>(
+      "llm.set_host",
+      { url }
+    );
+    if (!result.ok) return result.error ?? "Could not connect";
+    saveSettings({ ollama_host: result.host ?? "" });
+    this.models = [];
+    const llms = await rpc<{ models: { name: string; tools: boolean; vision: boolean }[] }>(
+      "llm.list"
+    );
+    this.models = llms.models;
+    return null;
+  }
+
+  async setModel(name: string) {
+    saveSettings({ llm_model: name });
+    await rpc("llm.set", { name });
+  }
+
+  async setMic(index: number | null) {
+    const device = this.inputDevices.find((d) => d.index === index);
+    saveSettings({ input_device: device?.name });
+    await rpc("audio.set_input", { index });
+  }
+
+  /** Reselect the remembered microphone once both it and the assistant exist. */
+  private restoreMic() {
+    if (this.micRestored || !this.config || this.inputDevices.length === 0) return;
+    this.micRestored = true;
+    const saved = loadSettings().input_device;
+    if (!saved || saved === this.config.input_device) return;
+    const device = this.inputDevices.find((d) => d.name === saved);
+    if (device) rpc("audio.set_input", { index: device.index }).catch(() => {});
+  }
+
+  async init() {
+    onEvent((type, data) => this.handleEvent(type, data));
+
+    const micStatus = await window.iris.micStatus();
+    if (micStatus !== "granted") {
+      this.messages.push({
+        role: "error",
+        text:
+          `Microphone access ${micStatus}. Enable it under System Settings > ` +
+          `Privacy & Security > Microphone for the app that launched this dev ` +
+          `server (Cursor, VS Code, Terminal or iTerm), then relaunch it.`,
+        streaming: false,
+      });
+    }
+
+    try {
+      const info = await rpc<AppInfo>("app.info");
+      this.personas = info.personas;
+      this.personaNames = info.persona_names ?? {};
+      this.state = info.state as AssistantState;
+      this.running = info.running;
+      if (info.config) this.config = info.config;
+
+      // After a reload the core still holds the conversation; rebuild it
+      if (info.running) {
+        try {
+          const history = await rpc<{ events: { type: string; data: Record<string, unknown> }[] }>(
+            "chat.history"
+          );
+          for (const event of history.events) this.handleEvent(event.type, event.data);
+        } catch (err) {
+          console.warn("[store] chat.history unavailable:", err);
+        }
+      }
+
+      // Start before listing models: listing asks Ollama about each one,
+      // which is slow against a remote server
+      if (!info.running) {
+        const saved = loadSettings();
+        const options: Record<string, unknown> = {};
+        if (saved.llm_model) options.llm_model = saved.llm_model;
+        if (saved.persona) options.persona = saved.persona;
+        if (saved.speak_replies !== undefined) options.speak_replies = saved.speak_replies;
+        if (saved.tools) options.tools = saved.tools;
+        if (saved.ollama_host) options.ollama_host = saved.ollama_host;
+        this.speakReplies = saved.speak_replies ?? true;
+        await rpc("assistant.start", options);
+      }
+
+      rpc<{ devices: { index: number; name: string }[] }>("audio.list_inputs").then(
+        (inputs) => {
+          this.inputDevices = inputs.devices;
+          this.restoreMic();
+        }
+      );
+      rpc<{ models: { name: string; tools: boolean; vision: boolean }[] }>(
+        "llm.list"
+      ).then((llms) => {
+        this.models = llms.models;
+      });
+    } catch (err) {
+      console.error("[store] init failed:", err);
+    }
+  }
+}
+
+export const store = new IrisStore();
