@@ -153,6 +153,7 @@ Options:
                         Whisper model (default: auto, large-v3-turbo on a GPU, small on a CPU)
   --whisper-engine {auto,mlx,faster-whisper}
                         Speech recognition engine (default: auto, MLX on Apple Silicon)
+  --wake-word WORD      Listen only for this word until addressed, e.g. Iris
   --persona {iris,hal,computer}
                         Persona/character for the assistant (default: iris)
   --enable-vision       Enable camera/vision tool (requires vision model)
@@ -278,6 +279,7 @@ Iris starts listening as soon as the models are loaded. Speaking and typing shar
 - While you type, the microphone stays closed, so keyboard noise never becomes a spoken turn. Typing anywhere in the window goes to the message box.
 - **Pause** (or a click on the orb) holds the whole conversation: speech stops mid-sentence, the reply stops streaming, the microphone closes, and queued messages wait. **Resume** picks up where it stopped.
 - **Mic** switches listening off while still answering typed messages; **Voice** switches spoken replies off for a text-only chat; **Stop** cancels the current reply.
+- **Wake word** (Settings): Iris stays dormant until addressed by name. "Iris, what's the weather?" wakes it and is answered at once; a bare "Iris" plays a soft chime and waits for the request. Follow-ups need no name until 30 seconds pass without a turn. While dormant, a voice-activity detector screens out everything that isn't speech, and only speech reaches the smallest Whisper model: about 30–40 ms per utterance on the GPU of an Apple Silicon Mac. The wake word only counts at the start of an utterance, so "tell Iris I said hi" doesn't wake it.
 
 **Memory.** Iris keeps one continuous conversation that survives restarts and is remembered by topic in `~/.iris/memory.db`. The model always sees the recent turns plus a one-line index of every topic it remembers. When you come back to something, it decides itself to `recall` that topic or to `search_memory`, a full-text search over everything said; there are no embeddings and no similarity thresholds. Conversations are sorted into topics by the same model, but only during quiet spells. Filing gives way the moment you speak or type, and a filing call already in flight is cut off, so replies never wait for it. The memory panel (clock icon, top right) lists the topics with their summaries and conversations, and can forget a topic. **Amnesia** in the message box keeps the current conversation out of memory: Iris follows it as usual, but writes nothing, and forgets it entirely when amnesia is switched off. `iris --no-memory` turns memory off altogether.
 
@@ -289,7 +291,7 @@ The settings panel (top right) holds the persona, the Ollama server, the languag
 - **Speech recognition:** on Apple Silicon Macs, Whisper runs on the GPU through MLX with large-v3-turbo, which is several times faster than CPU decoding and leaves the CPU idle. Elsewhere faster-whisper runs, with large-v3-turbo on an NVIDIA GPU and small on a CPU. The CLI accepts `--whisper-engine` and `--whisper-model` to override this.
 - **Tools:** unlike the CLI, which gates them behind flags, the desktop UI enables the camera, screen capture and web search tools by default. A tool whose optional dependencies are missing is shown as not installed. Image prompts are routed to a vision model when the server has one.
 
-The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `voice.set_output`, `chat.send_text/history`, `memory.topics/topic/forget/set_amnesia`, `persona.list/set`, `llm.list/set/set_host`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `memory.updated`, `error`).
+The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `wake.set`, `voice.set_output`, `chat.send_text/history`, `memory.topics/topic/forget/set_amnesia`, `persona.list/set`, `llm.list/set/set_host`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `wake`, `memory.updated`, `error`).
 
 > **Note for Cursor/VSCode terminals:** if Electron exits immediately with `Cannot set properties of undefined`, your terminal exports `ELECTRON_RUN_AS_NODE=1`. The `dev` script already clears it; when launching `electron .` manually, prefix it with `ELECTRON_RUN_AS_NODE=`.
 

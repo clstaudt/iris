@@ -17,6 +17,7 @@ warnings.filterwarnings("ignore")
 
 STATUS_FLAG_NAMES = (
     "listening",
+    "dormant",  # listening only for the wake word
     "looking",
     "capturing_screen",
     "searching",

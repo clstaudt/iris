@@ -54,6 +54,9 @@ class FakeAssistant:
         while not self.stop_event.is_set():
             self.stop_event.wait(0.05)
 
+    def set_wake_word(self, word):
+        self.wake_word = word or None
+
     def config_info(self):
         return {
             "persona": "Iris",
@@ -248,5 +251,21 @@ def test_amnesia_is_switched_on_the_conversation(monkeypatch):
         assert _wait_for(lambda: controller.assistant.conversation.amnesia is True)
         controller.set_amnesia(False)
         assert controller.assistant.conversation.amnesia is False
+    finally:
+        controller.stop()
+
+
+def test_wake_word_is_set_on_the_assistant(monkeypatch):
+    monkeypatch.setattr("iris.controller.VoiceAssistant", FakeAssistant)
+
+    controller = AssistantController(EventBus())
+    assert controller.set_wake_word("Iris")["ok"] is False  # not running yet
+    try:
+        controller.start({})
+        assert _wait_for(lambda: controller.assistant is not None)
+        assert controller.set_wake_word("Iris")["ok"] is True
+        assert controller.assistant.wake_word == "Iris"
+        controller.set_wake_word("")
+        assert controller.assistant.wake_word is None
     finally:
         controller.stop()

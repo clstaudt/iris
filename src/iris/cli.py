@@ -45,6 +45,11 @@ def main():
         help="Whisper model size (default: auto, large-v3-turbo on a GPU, small on a CPU)",
     )
     parser.add_argument(
+        "--wake-word",
+        default=None,
+        help="Listen only for this word until addressed, e.g. --wake-word Iris",
+    )
+    parser.add_argument(
         "--whisper-engine",
         default="auto",
         choices=["auto", "mlx", "faster-whisper"],
@@ -125,6 +130,7 @@ def main():
             whisper_model=args.whisper_model,
             whisper_device=args.device,
             whisper_engine=args.whisper_engine,
+            wake_word=args.wake_word,
             llm_model=args.llm_model,
             persona=persona,
             enable_vision=args.enable_vision,
