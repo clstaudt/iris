@@ -115,6 +115,7 @@ export interface AssistantConfig {
   llm_model: string;
   whisper_model: string;
   whisper_device: string;
+  whisper_engine?: string;
   tts_voice: string;
   input_device: string;
   speak_replies?: boolean;

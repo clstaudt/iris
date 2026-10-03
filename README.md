@@ -149,6 +149,10 @@ iris --help
 Options:
   --llm-model LLM_MODEL
                         Ollama model name (default: qwen3:1.7b)
+  --whisper-model {auto,tiny,base,small,medium,large-v3,large-v3-turbo}
+                        Whisper model (default: auto, large-v3-turbo on a GPU, small on a CPU)
+  --whisper-engine {auto,mlx,faster-whisper}
+                        Speech recognition engine (default: auto, MLX on Apple Silicon)
   --persona {iris,hal,computer}
                         Persona/character for the assistant (default: iris)
   --enable-vision       Enable camera/vision tool (requires vision model)
@@ -282,6 +286,7 @@ The settings panel (top right) holds the persona, the Ollama server, the languag
 - **Personas:** besides the built-in ones, YAML files in `~/.iris/personas` appear in the menu. Each persona speaks with its own voice, except in languages that voice cannot speak.
 - **Ollama server:** empty uses `OLLAMA_HOST` (or `http://localhost:11434`). An OpenAI-style URL ending in `/v1` works too. The server is checked before Iris switches to it.
 - **Models:** the menu lists what the server has installed; switching keeps the conversation history.
+- **Speech recognition:** on Apple Silicon Macs, Whisper runs on the GPU through MLX with large-v3-turbo, which is several times faster than CPU decoding and leaves the CPU idle. Elsewhere faster-whisper runs, with large-v3-turbo on an NVIDIA GPU and small on a CPU. The CLI accepts `--whisper-engine` and `--whisper-model` to override this.
 - **Tools:** unlike the CLI, which gates them behind flags, the desktop UI enables the camera, screen capture and web search tools by default. A tool whose optional dependencies are missing is shown as not installed. Image prompts are routed to a vision model when the server has one.
 
 The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `voice.set_output`, `chat.send_text/history`, `memory.topics/topic/forget/set_amnesia`, `persona.list/set`, `llm.list/set/set_host`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `memory.updated`, `error`).

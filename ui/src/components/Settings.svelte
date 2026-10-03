@@ -184,7 +184,8 @@
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
           <dt class="text-ink-3">Recognition</dt>
           <dd class="text-ink-2">
-            Whisper {store.config.whisper_model} · {store.config.whisper_device}
+            Whisper {store.config.whisper_model} ·
+            {store.config.whisper_engine === "mlx" ? "MLX" : store.config.whisper_device}
           </dd>
           <dt class="text-ink-3">Voice</dt>
           <dd class="text-ink-2">{store.config.tts_voice}</dd>

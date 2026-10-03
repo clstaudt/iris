@@ -213,7 +213,7 @@ class TestTranscriptionLanguage:
         with patch("iris.transcription.torch", create=True) as mock_torch:
             mock_torch.backends.mps.is_available.return_value = False
             mock_torch.cuda.is_available.return_value = False
-            transcriber = WhisperTranscriber(model="tiny", device="cpu", quiet=True)
+            transcriber = WhisperTranscriber(model="tiny", device="cpu", quiet=True, engine="faster-whisper")
 
         text, lang = transcriber.transcribe("/fake/audio.wav")
         assert text == "Bonjour"
@@ -231,7 +231,7 @@ class TestTranscriptionLanguage:
         phantom.no_speech_prob = 0.9
         MockWhisper.return_value.transcribe.return_value = ([phantom], mock_info)
 
-        transcriber = WhisperTranscriber(model="tiny", device="cpu", quiet=True)
+        transcriber = WhisperTranscriber(model="tiny", device="cpu", quiet=True, engine="faster-whisper")
         text, _ = transcriber.transcribe("/fake/audio.wav")
         assert text == ""
 

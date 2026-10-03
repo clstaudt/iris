@@ -39,8 +39,9 @@ class VoiceAssistant:
 
     def __init__(
         self,
-        whisper_model: str = "small",
+        whisper_model: str = "auto",
         whisper_device: str = "auto",
+        whisper_engine: str = "auto",
         llm_model: str = "qwen3:1.7b",
         sample_rate: int = 16000,
         silence_threshold: float = 0.015,
@@ -63,8 +64,11 @@ class VoiceAssistant:
         Initialize the voice assistant.
 
         Args:
-            whisper_model: Whisper model size (tiny, base, small, medium, large)
-            whisper_device: Device for Whisper (cpu, cuda, or auto)
+            whisper_model: Whisper model size, or "auto" for the best one the
+                hardware decodes quickly (large-v3-turbo on a GPU, small on CPU)
+            whisper_device: Device for faster-whisper (cpu, cuda, or auto)
+            whisper_engine: "auto" (MLX on Apple Silicon, else faster-whisper),
+                "mlx" or "faster-whisper"
             llm_model: Ollama model name (primary model, should be fast)
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
@@ -129,7 +133,9 @@ class VoiceAssistant:
         audio_filter = get_filter(self.persona.audio_filter) if self.persona.audio_filter else None
         self.player = AudioPlayer(audio_filter=audio_filter)
 
-        self.transcriber = WhisperTranscriber(whisper_model, whisper_device, quiet=quiet)
+        self.transcriber = WhisperTranscriber(
+            whisper_model, whisper_device, quiet=quiet, engine=whisper_engine
+        )
 
         # Initialize TTS with persona's voice and speed
         self.tts_generator = KokoroGenerator(tts_voice, self.persona.speed, quiet=quiet)
@@ -215,6 +221,7 @@ class VoiceAssistant:
             "llm_model": self.conversation.model,
             "whisper_model": self.transcriber.model_name,
             "whisper_device": self.transcriber.device,
+            "whisper_engine": self.transcriber.engine,
             "tts_voice": self.tts_generator.voice,
             "input_device": self.recorder.current_device_name(),
             "speak_replies": self.speak_replies,
