@@ -7,14 +7,17 @@ while StatusManager.status_lock is held.
 
 Event types:
     state        {"state": "idle"|"starting"|"listening"|"understanding"|"thinking"|
-                  "speaking"|"looking"|"capturing_screen"|"searching"|"browsing"}
+                  "speaking"|"looking"|"capturing_screen"|"searching"|"browsing"|
+                  "paused"|"muted"|"typing"}    paused: whole conversation;
+                                                     muted: mic off
     flags        {"flags": {flag_name: bool, ...}}   raw StatusManager snapshot
     audio.level  {"rms": float}                      mic input level 0.0-1.0
-    chat.user    {"text": str, "language": str}
+    chat.user    {"text": str, "language": str, "source": "voice"|"text", "id": str}
+                                                     id only for typed turns
     chat.chunk   {"text": str}                       streaming LLM token chunk
     chat.done    {"text": str, "interrupted": bool}
     tool.use     {"tool": str, "detail": str}
-    error        {"message": str}
+    error        {"message": str, "kind": str}         kind is optional
 """
 
 import threading

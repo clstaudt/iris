@@ -257,7 +257,7 @@ iris --enable-screen-capture
 
 An experimental desktop UI lives in `ui/`: an Electron shell (Svelte 5 + Vite + Tailwind) that wraps the Python core. The assistant logic stays in Python; Electron is a thin presentation layer talking to it over newline-delimited JSON-RPC on stdio (`python -m iris.rpc_server`, also installed as the `iris-gui` entry point).
 
-The window shows a terminal-style chat transcript that grows upward, anchored at the bottom by a large graphical status zone. At rest the status zone is a soft white circle. It turns red and pulses with your voice as it listens, becomes a slowly rotating purple spinner while transcribing and a cyan one while thinking, opens a camera aperture while looking through the camera or capturing the screen, and pulses yellow with the speech it is playing back — state is conveyed purely by color, glow, and motion, readable from across the room.
+The window is a chat: your messages and Iris's replies appear as bubbles, replies render markdown, and each of your messages is marked as spoken or typed. Below the message box sits the orb, which shows what Iris is doing through color and motion: it swells softly with your voice while listening and with its own voice while speaking, turns into a slowly rotating spinner while transcribing or thinking, and opens a camera aperture while looking through the camera or at the screen. While the models load at startup, an iris flower unfolds and then turns into the orb.
 
 **Run it:**
 
@@ -268,13 +268,21 @@ npm install             # once
 npm run dev             # starts Vite + Electron + the Python core
 ```
 
-The assistant starts listening as soon as the window opens (model loading takes a moment on first launch) — just speak, like in the terminal app. Use ⏸ to pause listening (models stay loaded, so resume is instant), ⏭ to interrupt speech (barge-in), or type a message in the input field.
+Iris starts listening as soon as the models are loaded. Speaking and typing share one conversation:
 
-Unlike the CLI, which gates them behind flags, the desktop UI enables the camera, screen capture and web search tools by default; each one degrades to a warning if its optional dependencies are missing. Image prompts are routed to an installed vision model when there is one, otherwise they stay on the primary model.
+- Typed and spoken messages are answered one at a time, in order. A message sent while Iris is still answering waits as a queued bubble.
+- While you type, the microphone stays closed, so keyboard noise never becomes a spoken turn. Typing anywhere in the window goes to the message box.
+- **Pause** (or a click on the orb) holds the whole conversation: speech stops mid-sentence, the reply stops streaming, the microphone closes, and queued messages wait. **Resume** picks up where it stopped.
+- **Mic** switches listening off while still answering typed messages; **Voice** switches spoken replies off for a text-only chat; **Stop** cancels the current reply.
 
-The control bar also lets you switch the persona, the Ollama model, and the microphone while the app runs. The model menu lists what Ollama has installed (embedding-only models are hidden, and models without tool-calling support are marked); switching keeps the conversation history. If the configured model is missing, Iris says so at startup instead of failing on the first reply.
+The settings panel (top right) holds the persona, the Ollama server, the language model, switches for the camera, screen capture and web search tools, and the microphone. All choices are remembered between launches.
 
-The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `assistant.start/stop/interrupt/pause/resume`, `chat.send_text`, `persona.list/set`, `llm.list/set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `chat.user/chunk/done`, `tool.use`, `error`).
+- **Personas:** besides the built-in ones, YAML files in `~/.iris/personas` appear in the menu. Each persona speaks with its own voice, except in languages that voice cannot speak.
+- **Ollama server:** empty uses `OLLAMA_HOST` (or `http://localhost:11434`). An OpenAI-style URL ending in `/v1` works too. The server is checked before Iris switches to it.
+- **Models:** the menu lists what the server has installed; switching keeps the conversation history.
+- **Tools:** unlike the CLI, which gates them behind flags, the desktop UI enables the camera, screen capture and web search tools by default. A tool whose optional dependencies are missing is shown as not installed. Image prompts are routed to a vision model when the server has one.
+
+The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `voice.set_output`, `chat.send_text/history`, `persona.list/set`, `llm.list/set/set_host`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `error`).
 
 > **Note for Cursor/VSCode terminals:** if Electron exits immediately with `Cannot set properties of undefined`, your terminal exports `ELECTRON_RUN_AS_NODE=1`. The `dev` script already clears it; when launching `electron .` manually, prefix it with `ELECTRON_RUN_AS_NODE=`.
 

@@ -1,5 +1,6 @@
 """LLM conversation management using Ollama."""
 
+import os
 import re
 import warnings
 from typing import Optional
@@ -12,6 +13,36 @@ from iris.personas import Persona, get_persona
 
 warnings.filterwarnings("ignore")
 
+# Fallback shown when neither a server URL nor OLLAMA_HOST is configured
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
+
+
+def normalize_host(url: Optional[str]) -> Optional[str]:
+    """Clean up a server URL as people copy it around.
+
+    The OpenAI-compatible endpoint (".../v1") is what most tools ask for, but
+    the native client appends its own /api paths and must get the bare server.
+    Returns None for an empty value, meaning "use the default".
+    """
+    url = (url or "").strip().rstrip("/")
+    for suffix in ("/v1", "/api"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+    return url or None
+
+
+def ollama_client(host: Optional[str] = None, **kwargs):
+    """A client for the given server, or the ollama module itself — whose
+    default client follows OLLAMA_HOST — when no server is configured."""
+    if not host and not kwargs:
+        return ollama
+    return ollama.Client(host=normalize_host(host), **kwargs)
+
+
+def effective_host(host: Optional[str]) -> str:
+    """The server URL actually in use, for display."""
+    return normalize_host(host) or os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_URL
+
 
 class ConversationManager:
     """Manages LLM conversations with context and summarization."""
@@ -23,6 +54,7 @@ class ConversationManager:
         tools=None,
         vision_model: Optional[str] = None,
         quiet: bool = True,
+        host: Optional[str] = None,
     ):
         """
         Initialize conversation manager.
@@ -33,7 +65,10 @@ class ConversationManager:
             tools: Optional Tools instance for function calling
             vision_model: Optional vision model to switch to when using vision tools
             quiet: If True, suppress verbose output (setup wizard handles this)
+            host: Ollama server URL; None follows OLLAMA_HOST
         """
+        self.host = normalize_host(host)
+        self.client = ollama_client(self.host)
         self.model = model
         self.vision_model = vision_model
         self.conversation_history = []
@@ -46,7 +81,7 @@ class ConversationManager:
         if not quiet:
             print(f"Testing Ollama connection with model '{model}'...")
         try:
-            ollama.list()
+            self.client.list()
             if not quiet:
                 print("Ollama connected")
         except Exception as e:
@@ -58,18 +93,19 @@ class ConversationManager:
             print(f"Model context length: {self.max_context_tokens:,} tokens")
 
     @staticmethod
-    def list_available_models() -> list[dict]:
+    def list_available_models(host: Optional[str] = None) -> list[dict]:
         """List Ollama models that can hold a conversation.
 
         Embedding-only models are excluded. Each entry reports whether the
         model supports tool calling, which Iris needs for vision/search tools.
         """
+        client = ollama_client(host)
         try:
             models = []
-            for entry in ollama.list().models:
+            for entry in client.list().models:
                 name = entry.model
                 try:
-                    capabilities = list(ollama.show(name).capabilities or [])
+                    capabilities = list(client.show(name).capabilities or [])
                 except Exception:
                     capabilities = []
                 if "embedding" in capabilities:
@@ -85,6 +121,12 @@ class ConversationManager:
         except Exception:
             return []
 
+    def set_host(self, host: Optional[str]):
+        """Switch to another Ollama server, keeping the conversation history."""
+        self.host = normalize_host(host)
+        self.client = ollama_client(self.host)
+        self.max_context_tokens = self._get_model_context_length()
+
     def set_model(self, model: str):
         """Switch the primary model, keeping conversation history intact."""
         self.model = model
@@ -99,7 +141,7 @@ class ConversationManager:
             Maximum context tokens to use (80% of model's limit)
         """
         try:
-            model_info = ollama.show(self.model)
+            model_info = self.client.show(self.model)
             modelinfo = model_info.modelinfo
 
             # Look for context length in model info
@@ -209,7 +251,7 @@ class ConversationManager:
         )
 
         try:
-            summary_response = ollama.chat(
+            summary_response = self.client.chat(
                 model=self.model,
                 messages=[
                     {
@@ -377,7 +419,7 @@ class ConversationManager:
         # If tools available, let LLM decide if it needs them
         if self.tools and self.tools.has_tools():
             # Use streaming even for tool check - only buffer if we see tool calls
-            stream = ollama.chat(
+            stream = self.client.chat(
                 model=self.model, messages=messages, tools=self.tools.get_schemas(), stream=True
             )
 
@@ -461,7 +503,7 @@ class ConversationManager:
                 )
 
                 # Now get final response with tool results (streaming)
-                stream = ollama.chat(model=response_model, messages=messages, stream=True)
+                stream = self.client.chat(model=response_model, messages=messages, stream=True)
 
                 full_response = []
                 for chunk in stream:
@@ -486,7 +528,7 @@ class ConversationManager:
                 return
 
         # No tools - standard streaming
-        stream = ollama.chat(model=self.model, messages=messages, stream=True)
+        stream = self.client.chat(model=self.model, messages=messages, stream=True)
 
         full_response = []
         for chunk in stream:

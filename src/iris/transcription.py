@@ -9,6 +9,9 @@ from faster_whisper import WhisperModel
 
 warnings.filterwarnings("ignore")
 
+# Segments Whisper itself rates as more likely silence than speech are dropped
+NO_SPEECH_THRESHOLD = 0.6
+
 
 class WhisperTranscriber:
     """Transcribes audio to text using Whisper model."""
@@ -69,9 +72,16 @@ class WhisperTranscriber:
                 audio_path,
                 beam_size=5,
                 language=None,  # Auto-detect language
+                # Whisper invents words for noise ("You", "Thank you.") — the VAD
+                # cuts non-speech before decoding so it never gets the chance
+                vad_filter=True,
             )
 
-            text = " ".join(segment.text for segment in segments).strip()
+            text = " ".join(
+                segment.text
+                for segment in segments
+                if segment.no_speech_prob < NO_SPEECH_THRESHOLD
+            ).strip()
             return text, info.language
 
     def transcribe_streaming(

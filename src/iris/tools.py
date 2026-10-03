@@ -43,6 +43,14 @@ except ImportError:
     HAS_SEARCH = False
 
 
+# User-facing switches and the tools behind each of them
+TOOL_GROUPS = {
+    "camera": ("look",),
+    "screen": ("capture_screen",),
+    "web": ("search", "browse"),
+}
+
+
 class Tools:
     """Simple container for LLM tools."""
 
@@ -426,6 +434,39 @@ class Tools:
             return {"success": False, "message": f"Unknown tool: {tool_name}"}
 
         return self._enabled_tools[tool_name]["function"](**kwargs)
+
+    def set_group(self, group: str, enabled: bool) -> bool:
+        """Switch a tool group on or off at runtime.
+
+        The schemas and the system prompt are rebuilt from the enabled tools
+        on every turn, so the change applies from the next message.
+
+        Returns:
+            False if the group is unknown or its dependencies are missing
+        """
+        if group not in TOOL_GROUPS:
+            return False
+        if not enabled:
+            for name in TOOL_GROUPS[group]:
+                self._enabled_tools.pop(name, None)
+            return True
+        enable = {
+            "camera": self.enable_camera,
+            "screen": self.enable_screen_capture,
+            "web": self.enable_web_search,
+        }[group]
+        return enable()
+
+    def group_states(self) -> dict:
+        """Report each tool group as {"enabled": bool, "available": bool}."""
+        available = {"camera": HAS_CAMERA, "screen": HAS_SCREEN, "web": HAS_SEARCH}
+        return {
+            group: {
+                "enabled": all(name in self._enabled_tools for name in names),
+                "available": available[group],
+            }
+            for group, names in TOOL_GROUPS.items()
+        }
 
     def has_tools(self) -> bool:
         """

@@ -22,7 +22,6 @@ import traceback
 
 from iris.controller import AssistantController
 from iris.events import EventBus
-from iris.personas import list_personas
 
 
 def _coerce(obj):
@@ -107,10 +106,21 @@ def main():
         "audio.set_input": lambda params: controller.set_input_device(params.get("index")),
         "llm.list": lambda params: controller.list_models(),
         "llm.set": lambda params: controller.set_model(params.get("name", "")),
+        "llm.set_host": lambda params: controller.set_ollama_host(params.get("url", "")),
         "chat.send_text": lambda params: controller.send_text(params.get("text", "")),
-        "persona.list": lambda params: {"personas": list_personas()},
+        "chat.history": lambda params: controller.history(),
+        "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
+        "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
+        "voice.set_output": lambda params: controller.set_voice_output(
+            bool(params.get("enabled", True))
+        ),
+        "tools.set": lambda params: controller.set_tool(
+            params.get("name", ""), bool(params.get("enabled", True))
+        ),
+        "persona.list": lambda params: controller.list_personas(),
         "persona.set": lambda params: controller.set_persona(params.get("name", "")),
         "debug.emit": debug_emit,
+        "debug.inject_audio": lambda params: controller.inject_audio(params.get("path", "")),
     }
 
     _start_parent_watchdog()

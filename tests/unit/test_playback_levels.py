@@ -45,3 +45,53 @@ def test_emit_levels_handles_audio_shorter_than_one_frame():
         np.zeros(10, dtype=np.float32), 16000, levels.append, threading.Event()
     )
     assert levels == []
+
+
+def test_paused_playback_resumes_where_it_was_cut(monkeypatch):
+    """A pause stops the device; resume plays the rest, slightly rewound."""
+    import time as time_module
+
+    from iris import audio as audio_module
+
+    sample_rate = 16000
+    audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)  # 2 s, a ramp
+    played = []
+
+    class FakeStream:
+        latency = 0.0
+
+        def __init__(self):
+            self.active = True
+
+    stream = FakeStream()
+
+    def fake_play(segment, rate, **kwargs):
+        played.append(segment.copy())
+        stream.active = True
+
+    def fake_stop():
+        stream.active = False
+
+    monkeypatch.setattr(audio_module.sd, "play", fake_play)
+    monkeypatch.setattr(audio_module.sd, "stop", fake_stop)
+    monkeypatch.setattr(audio_module.sd, "get_stream", lambda: stream)
+
+    player = AudioPlayer()
+    worker = threading.Thread(target=player._play_resumable, args=(audio, sample_rate, None))
+    worker.start()
+    time_module.sleep(0.8)  # ~0.8 s "heard"
+    player.pause()
+    time_module.sleep(0.2)
+    assert len(played) == 1 and player.paused
+
+    player.resume()
+    time_module.sleep(0.2)
+    stream.active = False  # the remainder finishes
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert len(played) == 2
+    resumed_at = len(audio) - len(played[1])
+    heard = 0.8 - audio_module.RESUME_REWIND
+    # Restarted a little before the cut, never after it
+    assert abs(resumed_at / sample_rate - heard) < 0.15

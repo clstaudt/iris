@@ -3,14 +3,16 @@ exposes commands (start/stop/interrupt/send_text) and a single effective
 state stream for external UIs such as the Electron shell."""
 
 import importlib.metadata
+import itertools
+import queue
 import threading
 import time
 
 from iris.assistant import VoiceAssistant
 from iris.audio import AudioRecorder, get_filter
 from iris.events import EventBus
-from iris.llm import ConversationManager
-from iris.personas import get_persona, list_personas
+from iris.llm import ConversationManager, normalize_host, ollama_client
+from iris.personas import get_persona, list_personas, reload_personas
 
 # When several status flags are set simultaneously, the earliest match wins.
 # Tool activity comes first: "thinking" stays set while a tool runs, and the
@@ -29,6 +31,12 @@ FLAG_STATE_PRIORITY = (
 # How long "speaking" survives a gap in playback, in seconds.
 SPEAKING_HOLD = 0.6
 
+# Events that make up the visible conversation. Kept here so a UI that
+# reloads (or attaches late) can rebuild its transcript; streaming chunks are
+# left out because chat.done carries the full reply.
+TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "tool.use", "error")
+TRANSCRIPT_LIMIT = 500
+
 
 class AssistantController:
     """Owns a VoiceAssistant instance and translates it into bus events.
@@ -44,7 +52,14 @@ class AssistantController:
 
         self._loop_thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
-        self._chat_lock = threading.Lock()
+
+        # Typed turns. Owned here rather than by the assistant so messages sent
+        # while the models are still loading are answered once they are ready.
+        self._turns: queue.Queue = queue.Queue()
+        self._turn_ids = itertools.count(1)
+
+        # Ollama server chosen in the UI; None follows OLLAMA_HOST
+        self._ollama_host: str | None = None
 
         self._flags: dict = {}
         self._state_lock = threading.Lock()
@@ -58,6 +73,9 @@ class AssistantController:
         self._zero_level_since: float | None = None
         self._silence_warned = False
 
+        self._transcript: list[dict] = []
+        self._transcript_lock = threading.Lock()
+
         bus.subscribe(self._on_bus_event)
 
     # ------------------------------------------------------------------
@@ -65,6 +83,10 @@ class AssistantController:
     # ------------------------------------------------------------------
 
     def _on_bus_event(self, event_type: str, data: dict):
+        if event_type in TRANSCRIPT_EVENTS:
+            with self._transcript_lock:
+                self._transcript.append({"type": event_type, "data": dict(data)})
+                del self._transcript[:-TRANSCRIPT_LIMIT]
         if event_type == "flags":
             with self._state_lock:
                 self._flags = data.get("flags", {})
@@ -123,12 +145,20 @@ class AssistantController:
                 if self.assistant.speech_pipeline.is_active:
                     self._speaking_until = now + SPEAKING_HOLD
 
-                if self.assistant.pause_event.is_set():
+                if self.assistant.suspend_event.is_set():
+                    # Everything holds while the conversation is paused
                     state = "paused"
                 elif now < self._speaking_until:
                     state = "speaking"
                 else:
                     state = self._flag_state()
+                # A closed mic only explains an otherwise idle assistant: typed
+                # turns are still answered with the mic off, and that work shows
+                if state == "idle":
+                    if self.assistant.pause_event.is_set():
+                        state = "muted"
+                    elif self.assistant.hold_event.is_set():
+                        state = "typing"
                 self._publish_state(state)
             self._poller_stop.wait(0.1)
 
@@ -142,6 +172,7 @@ class AssistantController:
             if self._loop_thread and self._loop_thread.is_alive():
                 return {"ok": True, "already_running": True}
             self._poller_stop.clear()
+            self._ollama_host = normalize_host((options or {}).get("ollama_host"))
             self._publish_state("starting")
             self._loop_thread = threading.Thread(
                 target=self._run, args=(options or {},), daemon=True
@@ -157,7 +188,7 @@ class AssistantController:
         the conversation on the primary model instead of switching to one that
         is not installed.
         """
-        installed = ConversationManager.list_available_models()
+        installed = ConversationManager.list_available_models(self._ollama_host)
         names = {m["name"] for m in installed}
         if preferred in names:
             return preferred
@@ -168,7 +199,10 @@ class AssistantController:
 
     def _run(self, options: dict):
         kwargs = dict(options)
+        kwargs["ollama_host"] = self._ollama_host
         persona_name = kwargs.pop("persona", "iris")
+        # {group: enabled} chosen in the UI; applied once the tools exist
+        tool_choices = kwargs.pop("tools", {}) or {}
 
         # The GUI has no CLI flags, so tools are on by default; each one
         # degrades to a warning if its optional dependencies are missing.
@@ -182,8 +216,12 @@ class AssistantController:
             self.assistant = VoiceAssistant(
                 persona=get_persona(persona_name),
                 event_bus=self.bus,
+                turn_queue=self._turns,
                 **kwargs,
             )
+            if self.assistant.tools is not None:
+                for group, enabled in tool_choices.items():
+                    self.assistant.tools.set_group(group, bool(enabled))
             self.bus.emit("config", self.assistant.config_info())
         except Exception as e:
             self.bus.emit("error", {"message": f"Failed to start assistant: {e}"})
@@ -221,46 +259,90 @@ class AssistantController:
         return {"ok": True}
 
     def pause(self) -> dict:
-        """Pause listening. Aborts an in-progress recording within ~50 ms;
-        models stay loaded so resume is instant."""
+        """Pause the conversation: the mic closes, speech holds mid-sentence,
+        the reply stops streaming and queued turns wait. Models stay loaded."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
-        self.assistant.pause_event.set()
+        self.assistant.suspend_event.set()
+        self.assistant.speech_pipeline.pause()
         self._publish_state("paused")
+        self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
     def resume(self) -> dict:
-        """Resume listening after a pause."""
+        """Continue the conversation where pause() held it."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
-        self.assistant.pause_event.clear()
+        self.assistant.suspend_event.clear()
+        self.assistant.speech_pipeline.resume()
+        self.bus.emit("config", self.assistant.config_info())
+        return {"ok": True}
+
+    def set_mic(self, on: bool) -> dict:
+        """Switch the microphone. Off still answers typed messages."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        if on:
+            self.assistant.pause_event.clear()
+        else:
+            self.assistant.pause_event.set()
+            self._publish_state("muted")
+        self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
     def send_text(self, text: str) -> dict:
-        """Send a typed message through the same chat path as voice input."""
+        """Queue a typed message as the next turn of the conversation.
+
+        Typed and spoken turns are taken one at a time by the assistant's loop,
+        so a message sent mid-reply waits for that reply to finish. Its
+        chat.user event (carrying the returned id) is emitted when it starts.
+        """
         text = (text or "").strip()
         if not text:
             return {"ok": False, "error": "Empty message"}
+        turn_id = f"t{next(self._turn_ids)}"
+        self._turns.put({"text": text, "id": turn_id})
+        return {"ok": True, "id": turn_id}
+
+    def hold_listening(self, on: bool) -> dict:
+        """Close the mic while the user types; reopen it when they stop."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
+        if on:
+            self.assistant.hold_event.set()
+        else:
+            self.assistant.hold_event.clear()
+        return {"ok": True}
 
-        self.bus.emit(
-            "chat.user",
-            {"text": text, "language": self.assistant.conversation_language},
-        )
+    def set_voice_output(self, enabled: bool) -> dict:
+        """Switch spoken replies on or off. Switching off cuts current speech."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        self.assistant.speak_replies = bool(enabled)
+        if not enabled:
+            self.assistant.speech_pipeline.stop()
+        self.bus.emit("config", self.assistant.config_info())
+        return {"ok": True}
 
-        def work():
-            with self._chat_lock:
-                self.assistant.chat(
-                    text, response_language=self.assistant.conversation_language
-                )
+    def set_tool(self, group: str, enabled: bool) -> dict:
+        """Switch a tool group (camera, screen, web) on or off."""
+        if self.assistant is None or self.assistant.tools is None:
+            return {"ok": False, "error": "Assistant not running"}
+        if not self.assistant.tools.set_group(group, bool(enabled)):
+            return {"ok": False, "error": f"Tool '{group}' is not available"}
+        self.bus.emit("config", self.assistant.config_info())
+        return {"ok": True}
 
-        threading.Thread(target=work, daemon=True).start()
+    def inject_audio(self, path: str) -> dict:
+        """Debug: answer a recorded utterance as if the mic had heard it."""
+        self._turns.put({"audio": path})
         return {"ok": True}
 
     def _warn_if_model_missing(self):
         """Report a missing Ollama model up front rather than on first reply."""
-        available = [m["name"] for m in ConversationManager.list_available_models()]
+        available = [
+            m["name"] for m in ConversationManager.list_available_models(self._ollama_host)
+        ]
         model = self.assistant.conversation.model
         if available and model not in available:
             self.bus.emit(
@@ -268,14 +350,43 @@ class AssistantController:
                 {
                     "message": (
                         f"Ollama model '{model}' is not installed. Pick another one "
-                        f"from the model menu, or install it with: ollama pull {model}"
-                    )
+                        f"in Settings, or install it with: ollama pull {model}"
+                    ),
+                    # Lets the UI retract the warning once another model is chosen
+                    "kind": "model_missing",
                 },
             )
 
     def list_models(self) -> dict:
         """List Ollama models usable for conversation."""
-        return {"models": ConversationManager.list_available_models()}
+        return {"models": ConversationManager.list_available_models(self._ollama_host)}
+
+    def set_ollama_host(self, url: str) -> dict:
+        """Point the assistant at another Ollama server ("" = default).
+
+        The server is asked for its models first, so an unreachable URL is
+        reported instead of breaking the next reply.
+        """
+        host = normalize_host(url)
+        try:
+            ollama_client(host, timeout=8).list()
+        except Exception as e:
+            where = host or "the default server"
+            return {"ok": False, "error": f"Cannot reach Ollama at {where}: {e}"}
+        self._ollama_host = host
+        if self.assistant is not None:
+            self.assistant.conversation.set_host(host)
+            if self.assistant.conversation.vision_model:
+                conversation = self.assistant.conversation
+                conversation.vision_model = (
+                    self._pick_vision_model("qwen3-vl:8b") or conversation.vision_model
+                )
+            self.bus.emit("config", self.assistant.config_info())
+            try:
+                self._warn_if_model_missing()
+            except Exception:
+                pass
+        return {"ok": True, "host": host or ""}
 
     def set_model(self, name: str) -> dict:
         """Switch the LLM model. Conversation history is preserved."""
@@ -287,6 +398,11 @@ class AssistantController:
             self.assistant.conversation.set_model(name)
         except Exception as e:
             return {"ok": False, "error": str(e)}
+        # The UI retracts its missing-model warning; keep history consistent
+        with self._transcript_lock:
+            self._transcript = [
+                e for e in self._transcript if e["data"].get("kind") != "model_missing"
+            ]
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True, "model": name}
 
@@ -302,6 +418,11 @@ class AssistantController:
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True, "input_device": self.assistant.recorder.current_device_name()}
 
+    def list_personas(self) -> dict:
+        """Built-in and user personas, re-scanned so new files appear."""
+        names = reload_personas()
+        return {"personas": list(names), "names": names}
+
     def set_persona(self, name: str) -> dict:
         """Hot-swap the persona (prompt, voice, speed, audio filter)."""
         if self.assistant is None:
@@ -311,8 +432,22 @@ class AssistantController:
 
         persona = get_persona(name)
         assistant = self.assistant
+        previous = assistant.persona.name
         assistant.persona = persona
         assistant.conversation.persona = persona
+        # The history still holds the old persona's replies, which small
+        # models happily continue; tell the model the voice has changed hands
+        if assistant.conversation.conversation_history and previous != persona.name:
+            assistant.conversation.conversation_history.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are now {persona.name}. Earlier replies in this "
+                        f"conversation were given by {previous}; do not continue "
+                        f"{previous}'s name or manner."
+                    ),
+                }
+            )
         assistant.tts_generator.voice = persona.voice
         assistant.tts_generator.speed = persona.speed
         assistant.player.audio_filter = (
@@ -321,6 +456,11 @@ class AssistantController:
         self.bus.emit("config", assistant.config_info())
         return {"ok": True, "persona": name}
 
+    def history(self) -> dict:
+        """The conversation so far, as the events that built it."""
+        with self._transcript_lock:
+            return {"events": list(self._transcript)}
+
     def info(self) -> dict:
         try:
             version = importlib.metadata.version("iris")
@@ -328,9 +468,11 @@ class AssistantController:
             version = "dev"
         with self._state_lock:
             state = self._last_state
+        names = reload_personas()
         result = {
             "version": version,
-            "personas": list_personas(),
+            "personas": list(names),
+            "persona_names": names,
             "state": state,
             "running": bool(self._loop_thread and self._loop_thread.is_alive()),
         }

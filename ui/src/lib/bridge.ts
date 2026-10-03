@@ -21,6 +21,7 @@ declare global {
 export interface AppInfo {
   version: string;
   personas: string[];
+  persona_names?: Record<string, string>;
   state: string;
   running: boolean;
   config?: {
@@ -30,6 +31,7 @@ export interface AppInfo {
     whisper_device: string;
     tts_voice: string;
     input_device: string;
+    speak_replies?: boolean;
   };
 }
 

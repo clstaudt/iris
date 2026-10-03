@@ -449,6 +449,11 @@ class AudioRecorder:
         return temp_file.name
 
 
+# On resume, playback restarts this far before the point where it was cut,
+# so the listener hears the interrupted word again rather than half of it
+RESUME_REWIND = 0.35
+
+
 class AudioPlayer:
     """Plays audio files with normalization and fade effects."""
 
@@ -460,10 +465,25 @@ class AudioPlayer:
             audio_filter: Optional AudioFilter instance to apply to audio
         """
         self.audio_filter = audio_filter
+        self._paused = threading.Event()
+        self._stopped = threading.Event()
 
     def stop(self):
         """Stop any currently playing audio."""
+        self._stopped.set()
         sd.stop()
+
+    def pause(self):
+        """Pause playback; play() holds its place until resume()."""
+        self._paused.set()
+
+    def resume(self):
+        """Continue playback from where pause() cut it."""
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
 
     @staticmethod
     def _emit_levels(
@@ -501,6 +521,78 @@ class AudioPlayer:
                 return
             on_level(float(envelope[index]))
             stop.wait(1 / rate)
+
+    def _play_resumable(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        on_level: Callable[[float], None] | None,
+    ):
+        """Play a buffer, honoring pause() and stop() while it plays.
+
+        sounddevice cannot pause a stream, so a pause stops it, estimates how
+        far playback got, and the remainder is played on resume.
+        """
+        self._stopped.clear()
+        position = 0
+        while position < len(audio):
+            while self._paused.is_set() and not self._stopped.is_set():
+                time.sleep(0.05)
+            if self._stopped.is_set():
+                return
+
+            segment = np.ascontiguousarray(audio[position:])
+            if position > 0:
+                # Fade the restart in, like the start of every clip
+                fade = min(len(segment), int(sample_rate * 0.01))
+                ramp = np.linspace(0, 1, fade)
+                segment[:fade] *= ramp if segment.ndim == 1 else ramp[:, np.newaxis]
+
+            # Play with maximum buffer size and latency for ultra-smooth playback
+            # Extra large buffer (32768 samples = ~740ms) prevents any underruns
+            sd.play(segment, sample_rate, blocksize=32768, latency="high")
+            started = time.monotonic()
+            try:
+                latency = float(sd.get_stream().latency)
+            except Exception:
+                latency = 0.0
+
+            level_thread = None
+            level_stop = threading.Event()
+            if on_level:
+                level_thread = threading.Thread(
+                    target=self._emit_levels,
+                    args=(segment, sample_rate, on_level, level_stop),
+                    daemon=True,
+                )
+                level_thread.start()
+
+            # Until the clip ends, or a pause or stop cuts it
+            duration = len(segment) / sample_rate + latency
+            while time.monotonic() - started < duration + 0.5:
+                if self._paused.is_set() or self._stopped.is_set():
+                    break
+                try:
+                    if not sd.get_stream().active:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.02)
+            elapsed = time.monotonic() - started
+            cut_by_pause = self._paused.is_set() and not self._stopped.is_set()
+            if cut_by_pause:
+                sd.stop()
+
+            if level_thread:
+                level_stop.set()
+                level_thread.join(timeout=0.5)
+                on_level(0.0)
+
+            if not cut_by_pause:
+                return
+            # What was heard is the wall time minus the output latency
+            heard = max(0.0, elapsed - latency - RESUME_REWIND)
+            position += int(heard * sample_rate)
 
     def play(self, audio_file: str, on_level: Callable[[float], None] | None = None):
         """
@@ -544,29 +636,7 @@ class AudioPlayer:
                 else:
                     audio[-fade_samples:] *= fade_out[:, np.newaxis]
 
-            # Ensure audio is contiguous in memory for efficient playback
-            audio = np.ascontiguousarray(audio)
-
-            # Play with maximum buffer size and latency for ultra-smooth playback
-            # Extra large buffer (32768 samples = ~740ms) prevents any underruns
-            sd.play(audio, sample_rate, blocksize=32768, latency="high")
-
-            level_thread = None
-            level_stop = threading.Event()
-            if on_level:
-                level_thread = threading.Thread(
-                    target=self._emit_levels,
-                    args=(audio, sample_rate, on_level, level_stop),
-                    daemon=True,
-                )
-                level_thread.start()
-
-            sd.wait()
-
-            if level_thread:
-                level_stop.set()
-                level_thread.join(timeout=0.5)
-                on_level(0.0)
+            self._play_resumable(np.ascontiguousarray(audio), sample_rate, on_level)
 
         except Exception as e:
             print(f"Error playing audio: {e}")

@@ -1,5 +1,6 @@
 """Voice assistant coordinator that orchestrates all components."""
 
+import queue
 import sys
 import threading
 import time
@@ -14,7 +15,7 @@ from rich.text import Text
 
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
 from iris.events import EventBus
-from iris.llm import ConversationManager
+from iris.llm import ConversationManager, effective_host
 from iris.personas import Persona, get_persona
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
@@ -44,6 +45,9 @@ class VoiceAssistant:
         enable_screen_capture: bool = False,
         enable_web_search: bool = False,
         event_bus: Optional[EventBus] = None,
+        turn_queue: Optional[queue.Queue] = None,
+        speak_replies: bool = True,
+        ollama_host: Optional[str] = None,
     ):
         """
         Initialize the voice assistant.
@@ -64,6 +68,11 @@ class VoiceAssistant:
             enable_screen_capture: Enable screen capture tool
             enable_web_search: Enable web search tool
             event_bus: Optional EventBus for streaming activity to an external UI
+            turn_queue: Optional queue of typed turns from an external UI. They
+                are taken in run_loop, between listens, so typed and spoken
+                turns share one conversation and never overlap.
+            speak_replies: If False, replies are streamed as text only
+            ollama_host: Ollama server URL; None follows OLLAMA_HOST
         """
         # Initialize console
         self.console = Console()
@@ -74,7 +83,18 @@ class VoiceAssistant:
         # Cooperative control signals for external UIs
         self.interrupt_event = threading.Event()  # barge-in: cancel current turn
         self.stop_event = threading.Event()  # request run_loop shutdown
-        self.pause_event = threading.Event()  # pause listening (models stay loaded)
+        self.pause_event = threading.Event()  # mic off (models stay loaded)
+        self.hold_event = threading.Event()  # user is typing: keep the mic closed
+        # Conversation paused: no listening, no new turns, the reply and its
+        # speech hold where they are until resumed
+        self.suspend_event = threading.Event()
+
+        # Turns submitted by an external UI: {"text": str, "id": str} for typed
+        # messages, {"audio": path} for recorded speech
+        self.turn_queue = turn_queue if turn_queue is not None else queue.Queue()
+
+        # Voice output toggle; False turns the assistant into a text chat
+        self.speak_replies = speak_replies
 
         # Track current conversation language for continuity
         self.conversation_language = "en"
@@ -153,6 +173,7 @@ class VoiceAssistant:
             tools=self.tools,
             vision_model=vision_model if (enable_vision or enable_screen_capture) else None,
             quiet=quiet,
+            host=ollama_host,
         )
 
     def config_info(self) -> dict:
@@ -164,7 +185,76 @@ class VoiceAssistant:
             "whisper_device": self.transcriber.device,
             "tts_voice": self.tts_generator.voice,
             "input_device": self.recorder.current_device_name(),
+            "speak_replies": self.speak_replies,
+            "ollama_host": self.conversation.host or "",
+            "ollama_url": effective_host(self.conversation.host),
+            "mic_on": not self.pause_event.is_set(),
+            "paused": self.suspend_event.is_set(),
+            "tools": self.tools.group_states() if self.tools else {},
         }
+
+    def _speak(self, text: str):
+        """Queue reply text for speech, unless voice output is switched off."""
+        if not self.speak_replies:
+            return
+        clean_text = self.conversation.clean_markdown(text)
+        if clean_text.strip():
+            self.speech_pipeline.queue_speech(clean_text)
+
+    def _take_turn(self) -> dict | None:
+        """Return the next turn submitted by an external UI, if any."""
+        try:
+            return self.turn_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _run_text_turn(self, turn: dict):
+        """Answer a typed message, exactly as if it had been spoken."""
+        text = turn["text"]
+        self.display_manager.show_user_message(text)
+        if self.event_bus:
+            self.event_bus.emit(
+                "chat.user",
+                {
+                    "text": text,
+                    "language": self.conversation_language,
+                    "source": "text",
+                    "id": turn.get("id"),
+                },
+            )
+        self.chat(text, response_language=self.conversation_language)
+
+    def _run_voice_turn(self, audio_path: str):
+        """Transcribe recorded speech and answer it."""
+        with self.status_manager.status_lock:
+            self.status_manager.status_understanding = True
+        self.status_manager.update_status_bar(self.speech_pipeline)
+
+        text, detected_language = self.transcriber.transcribe(audio_path)
+
+        with self.status_manager.status_lock:
+            self.status_manager.status_understanding = False
+        self.status_manager.update_status_bar(self.speech_pipeline)
+
+        if not text:
+            return
+
+        # Determine response language: use detected if TTS supports it,
+        # otherwise keep the current conversation language.
+        if is_language_supported(detected_language):
+            self.conversation_language = detected_language
+        response_language = self.conversation_language
+
+        # Display user message
+        self.display_manager.show_user_message(text)
+        if self.event_bus:
+            self.event_bus.emit(
+                "chat.user",
+                {"text": text, "language": response_language, "source": "voice"},
+            )
+
+        # Send to LLM (streams response and speaks it)
+        self.chat(text, response_language=response_language)
 
     def chat(self, prompt: str, response_language: str = "en") -> str:
         """
@@ -199,6 +289,10 @@ class VoiceAssistant:
             interrupted = False
             try:
                 for chunk_text in self.conversation.chat_stream(prompt, response_language=response_language, on_tool_use=on_tool_use):
+                    # Paused: stop consuming the reply until resumed (or stopped)
+                    while self.suspend_event.is_set() and not self.interrupt_event.is_set():
+                        time.sleep(0.05)
+
                     # Barge-in: cancel the rest of this turn
                     if self.interrupt_event.is_set():
                         interrupted = True
@@ -252,9 +346,7 @@ class VoiceAssistant:
 
                     # Speak the chunk (queue it for sequential playback)
                     if should_speak and text_to_speak:
-                        clean_text = self.conversation.clean_markdown(text_to_speak)
-                        if clean_text.strip():
-                            self.speech_pipeline.queue_speech(clean_text)
+                        self._speak(text_to_speak)
 
                 # Clear thinking status now that LLM is done
                 with self.status_manager.status_lock:
@@ -285,9 +377,7 @@ class VoiceAssistant:
 
             # Speak any remaining text that wasn't spoken yet
             if text_buffer.strip():
-                clean_text = self.conversation.clean_markdown(text_buffer)
-                if clean_text.strip():
-                    self.speech_pipeline.queue_speech(clean_text)
+                self._speak(text_buffer)
 
             # Wait for all speech to complete
             self.speech_pipeline.wait_for_speech()
@@ -359,17 +449,38 @@ class VoiceAssistant:
                 if self.stop_event.is_set():
                     break
 
-                # Paused: wait without touching the microphone (models stay loaded)
-                if self.pause_event.is_set():
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                    time.sleep(0.1)
-                    continue
-
-                # External UI requested barge-in while between turns
+                # Stale barge-in from a turn that already ended
                 if self.interrupt_event.is_set():
                     self.interrupt_event.clear()
                     self.speech_pipeline.stop()
+
+                # Paused conversation: nothing starts until it is resumed
+                if self.suspend_event.is_set():
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_listening = False
+                    time.sleep(0.05)
+                    continue
+
+                # Turns from an external UI come first, whether or not the mic
+                # is live, so a typed message never waits for the user to speak
+                turn = self._take_turn()
+                if turn is not None:
+                    try:
+                        if "audio" in turn:
+                            self._run_voice_turn(turn["audio"])
+                        else:
+                            self._run_text_turn(turn)
+                    except Exception as e:
+                        self.console.print(f"[red]Error:[/red] Error in turn: {e}")
+                    continue
+
+                # Paused, or the user is typing: keep the microphone closed
+                # (models stay loaded) and keep watching for typed turns
+                if self.pause_event.is_set() or self.hold_event.is_set():
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_listening = False
+                    time.sleep(0.05)
+                    continue
 
                 try:
                     # 1. Listen for voice input with level visualization
@@ -392,7 +503,10 @@ class VoiceAssistant:
                     audio_path = self.recorder.listen(
                         on_level=on_audio_level,
                         should_stop=lambda: self.pause_event.is_set()
-                        or self.stop_event.is_set(),
+                        or self.suspend_event.is_set()
+                        or self.hold_event.is_set()
+                        or self.stop_event.is_set()
+                        or not self.turn_queue.empty(),
                     )
 
                     with self.status_manager.status_lock:
@@ -417,35 +531,8 @@ class VoiceAssistant:
                     if not audio_path:
                         continue
 
-                    # 2. Transcribe with Whisper
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_understanding = True
-                    self.status_manager.update_status_bar(self.speech_pipeline)
-
-                    text, detected_language = self.transcriber.transcribe(audio_path)
-
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_understanding = False
-                    self.status_manager.update_status_bar(self.speech_pipeline)
-
-                    if not text:
-                        continue
-
-                    # Determine response language: use detected if TTS supports it,
-                    # otherwise keep the current conversation language.
-                    if is_language_supported(detected_language):
-                        self.conversation_language = detected_language
-                    response_language = self.conversation_language
-
-                    # Display user message
-                    self.display_manager.show_user_message(text)
-                    if self.event_bus:
-                        self.event_bus.emit(
-                            "chat.user", {"text": text, "language": response_language}
-                        )
-
-                    # 3. Send to LLM (streams response and speaks it)
-                    self.chat(text, response_language=response_language)
+                    # 2. Transcribe, then 3. answer (streams and speaks the reply)
+                    self._run_voice_turn(audio_path)
 
                     # Cleanup
                     Path(audio_path).unlink(missing_ok=True)
