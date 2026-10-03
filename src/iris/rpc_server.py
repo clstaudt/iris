@@ -1,0 +1,155 @@
+"""JSON-RPC 2.0 stdin/stdout transport for the Electron UI shell.
+
+Reads newline-delimited JSON-RPC requests from stdin and writes responses to
+stdout. Assistant activity (state changes, chat chunks, mic levels) is pushed
+as JSON-RPC notifications: ``{"jsonrpc": "2.0", "method": "event",
+"params": {"type": ..., "data": ...}}``.
+
+Stdout carries RPC frames only — sys.stdout is redirected to stderr so stray
+prints from the assistant pipeline cannot corrupt the framing.
+
+Usage::
+
+    python -m iris.rpc_server
+"""
+
+import json
+import os
+import signal
+import sys
+import threading
+import traceback
+
+from iris.controller import AssistantController
+from iris.events import EventBus
+from iris.personas import list_personas
+
+
+def _coerce(obj):
+    """Last resort for values json cannot encode, notably numpy scalars.
+
+    Audio levels arrive as numpy floats; without this an unserializable value
+    silently kills the event, since EventBus swallows subscriber exceptions.
+    """
+    try:
+        return float(obj)
+    except (TypeError, ValueError):
+        return str(obj)
+
+
+def encode_frame(frame: dict) -> str:
+    """Serialize one JSON-RPC frame to a single line of JSON."""
+    return json.dumps(frame, default=_coerce)
+
+
+def _start_parent_watchdog(interval: float = 2.0):
+    """Exit if the parent process (Electron) disappears.
+
+    Polls os.getppid(); when it changes to 1 (re-parented to init/launchd)
+    the parent has died and we must not linger as an orphan.
+    """
+    parent_pid = os.getppid()
+
+    def _watch():
+        while True:
+            if os.getppid() != parent_pid:
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            threading.Event().wait(interval)
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+
+def main():
+    # Stdout purity: redirect prints/tracebacks to stderr and keep the real
+    # stdout exclusively for RPC frames.
+    rpc_out = sys.stdout
+    sys.stdout = sys.stderr
+
+    bus = EventBus()
+    controller = AssistantController(bus)
+
+    write_lock = threading.Lock()
+
+    def write_frame(frame: dict):
+        try:
+            encoded = encode_frame(frame)
+        except (TypeError, ValueError) as exc:
+            print(f"[rpc] dropped unserializable frame: {exc}", file=sys.stderr)
+            return
+        with write_lock:
+            rpc_out.write(encoded + "\n")
+            rpc_out.flush()
+
+    def forward_event(event_type: str, data: dict):
+        write_frame(
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {"type": event_type, "data": data},
+            }
+        )
+
+    bus.subscribe(forward_event)
+
+    def debug_emit(params: dict) -> dict:
+        bus.emit(params.get("type", "debug"), params.get("data", {}))
+        return {"ok": True}
+
+    methods = {
+        "app.info": lambda params: controller.info(),
+        "assistant.start": lambda params: controller.start(params),
+        "assistant.stop": lambda params: controller.stop(),
+        "assistant.interrupt": lambda params: controller.interrupt(),
+        "assistant.pause": lambda params: controller.pause(),
+        "assistant.resume": lambda params: controller.resume(),
+        "audio.list_inputs": lambda params: controller.list_input_devices(),
+        "audio.set_input": lambda params: controller.set_input_device(params.get("index")),
+        "llm.list": lambda params: controller.list_models(),
+        "llm.set": lambda params: controller.set_model(params.get("name", "")),
+        "chat.send_text": lambda params: controller.send_text(params.get("text", "")),
+        "persona.list": lambda params: {"personas": list_personas()},
+        "persona.set": lambda params: controller.set_persona(params.get("name", "")),
+        "debug.emit": debug_emit,
+    }
+
+    _start_parent_watchdog()
+
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break  # stdin closed — parent is gone
+        line = line.strip()
+        if not line:
+            continue
+
+        req_id = None
+        try:
+            request = json.loads(line)
+            req_id = request.get("id")
+            method = request.get("method", "")
+            params = request.get("params", {})
+
+            handler = methods.get(method)
+            if handler is None:
+                raise ValueError(f"Unknown method: {method}")
+
+            result = handler(params)
+            write_frame({"jsonrpc": "2.0", "id": req_id, "result": result})
+        except Exception as exc:
+            traceback.print_exc()
+            write_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32603,
+                        "message": str(exc),
+                        "data": traceback.format_exc(),
+                    },
+                }
+            )
+
+
+if __name__ == "__main__":
+    main()

@@ -11,7 +11,20 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
+from iris.events import EventBus
+
 warnings.filterwarnings("ignore")
+
+STATUS_FLAG_NAMES = (
+    "listening",
+    "looking",
+    "capturing_screen",
+    "searching",
+    "browsing",
+    "understanding",
+    "thinking",
+    "summarizing",
+)
 
 
 class DynamicStatusBar:
@@ -45,19 +58,21 @@ class StatusManager:
         """
         self.console = console
 
-        # Status flags
-        self.status_listening = False
-        self.status_looking = False
-        self.status_capturing_screen = False
-        self.status_understanding = False
-        self.status_thinking = False
-        self.status_summarizing = False
+        # Status flags (backing fields; accessed through properties below so
+        # that an attached EventBus is notified on every change)
+        for _flag in STATUS_FLAG_NAMES:
+            setattr(self, f"_status_{_flag}", False)
         self.status_lock = threading.Lock()
+
+        # Optional event bus (attached by the GUI controller; None in CLI mode)
+        self.event_bus: EventBus | None = None
 
         # Create persistent spinners (reused across updates for animation)
         self.spinner_listening = Spinner("dots", text="Listening", style="red")
         self.spinner_looking = Spinner("dots", text="Looking", style="bright_magenta")
         self.spinner_capturing_screen = Spinner("dots", text="Capturing Screen", style="bright_magenta")
+        self.spinner_searching = Spinner("dots", text="Searching", style="bright_cyan")
+        self.spinner_browsing = Spinner("dots", text="Browsing", style="bright_cyan")
         self.spinner_understanding = Spinner("dots", text="Understanding", style="magenta")
         self.spinner_thinking = Spinner("dots", text="Thinking", style="cyan")
         self.spinner_speaking = Spinner("dots", text="Speaking", style="yellow")
@@ -86,6 +101,10 @@ class StatusManager:
                 status_parts.append(self.spinner_looking)
             if self.status_capturing_screen:
                 status_parts.append(self.spinner_capturing_screen)
+            if self.status_searching:
+                status_parts.append(self.spinner_searching)
+            if self.status_browsing:
+                status_parts.append(self.spinner_browsing)
             if self.status_understanding:
                 status_parts.append(self.spinner_understanding)
             if self.status_summarizing:
@@ -196,6 +215,41 @@ class StatusManager:
             self.status_bar_live.stop()
             self.status_bar_active = False
 
+    def flags_snapshot(self) -> dict:
+        """Return a {flag_name: bool} snapshot of all status flags."""
+        with self.status_lock:
+            return {flag: getattr(self, f"_status_{flag}") for flag in STATUS_FLAG_NAMES}
+
+    def _notify_flags_changed(self):
+        """Emit a flags event on the bus. Callers may hold status_lock, so this
+        must not acquire it (single-threaded flag mutation makes the unlocked
+        read a benign race)."""
+        bus = self.event_bus
+        if bus is not None:
+            snapshot = {flag: getattr(self, f"_status_{flag}") for flag in STATUS_FLAG_NAMES}
+            bus.emit("flags", {"flags": snapshot})
+
+
+def _make_status_property(flag: str) -> property:
+    """Create a property for a status flag that notifies the bus on change."""
+
+    def getter(self):
+        return getattr(self, f"_status_{flag}")
+
+    def setter(self, value):
+        value = bool(value)
+        if getattr(self, f"_status_{flag}") == value:
+            return
+        setattr(self, f"_status_{flag}", value)
+        self._notify_flags_changed()
+
+    return property(getter, setter)
+
+
+for _flag in STATUS_FLAG_NAMES:
+    setattr(StatusManager, f"status_{_flag}", _make_status_property(_flag))
+del _flag
+
 
 class DisplayManager:
     """Manages message display panels and streaming updates."""
@@ -241,6 +295,35 @@ class DisplayManager:
         )
         self.console.print(Align.left(user_panel, pad=False))
         self.console.print()
+
+    def show_tool_activity(self, tool_name: str, detail: str = ""):
+        """
+        Display a compact indicator that a tool was used.
+
+        Args:
+            tool_name: Name of the tool (e.g. "search", "browse")
+            detail: Brief detail string (e.g. query or URL)
+        """
+        labels = {
+            "search": "Searched",
+            "browse": "Browsed",
+            "look": "Looked",
+            "capture_screen": "Captured screen",
+        }
+        label = labels.get(tool_name, tool_name)
+        content = f"{label}: {detail}" if detail else label
+
+        panel = Panel(
+            Text(content, style="dim"),
+            border_style="dim",
+            padding=(0, 1),
+            expand=False,
+        )
+
+        if self.status_manager.status_bar_live and self.status_manager.status_bar_active:
+            self.status_manager.status_bar_live.console.print(Align.center(panel))
+        else:
+            self.console.print(Align.center(panel))
 
     def update_streaming_display(self, message: str, speech_pipeline=None):
         """

@@ -1,0 +1,158 @@
+"""Roundtrip tests for the JSON-RPC stdio server used by the Electron shell."""
+
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from iris.rpc_server import encode_frame
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class RPCClient:
+    """Minimal NDJSON JSON-RPC client over subprocess stdio."""
+
+    def __init__(self):
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(REPO_ROOT / "src")
+        env["PYTHONUNBUFFERED"] = "1"
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "iris.rpc_server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+            cwd=REPO_ROOT,
+        )
+        self.responses = {}
+        self.events = []
+        self._lock = threading.Lock()
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def _read_loop(self):
+        for line in self.proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            frame = json.loads(line)
+            with self._lock:
+                if frame.get("method") == "event":
+                    self.events.append(frame["params"])
+                elif "id" in frame:
+                    self.responses[frame["id"]] = frame
+
+    def call(self, method: str, params: dict | None = None, timeout: float = 10.0) -> dict:
+        req_id = id(method) ^ int(time.monotonic() * 1e6)
+        request = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}
+        self.proc.stdin.write(json.dumps(request) + "\n")
+        self.proc.stdin.flush()
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if req_id in self.responses:
+                    return self.responses.pop(req_id)
+            time.sleep(0.02)
+        raise TimeoutError(f"No response for {method}")
+
+    def wait_for_event(self, event_type: str, timeout: float = 5.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                for event in self.events:
+                    if event["type"] == event_type:
+                        return event
+            time.sleep(0.02)
+        raise TimeoutError(f"No event of type {event_type}")
+
+    def close(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=5)
+
+
+@pytest.fixture
+def client():
+    c = RPCClient()
+    yield c
+    c.close()
+
+
+def test_app_info_roundtrip(client):
+    response = client.call("app.info")
+    assert "error" not in response
+    result = response["result"]
+    assert result["running"] is False
+    assert result["state"] == "idle"
+    assert "iris" in result["personas"]
+    assert "version" in result
+
+
+def test_unknown_method_returns_error(client):
+    response = client.call("no.such.method")
+    assert "error" in response
+    assert "Unknown method" in response["error"]["message"]
+
+
+def test_event_notification_framing(client):
+    client.call("debug.emit", {"type": "state", "data": {"state": "listening"}})
+    event = client.wait_for_event("state")
+    assert event["data"] == {"state": "listening"}
+
+
+def test_encode_frame_handles_numpy_scalars():
+    """Mic levels are numpy floats; plain json.dumps would drop the event."""
+    frame = {"params": {"data": {"rms": np.float32(0.25)}}}
+    assert json.loads(encode_frame(frame))["params"]["data"]["rms"] == pytest.approx(0.25)
+
+
+def test_persona_list(client):
+    response = client.call("persona.list")
+    assert "error" not in response
+    assert isinstance(response["result"]["personas"], list)
+    assert len(response["result"]["personas"]) >= 1
+
+
+def test_pause_resume_require_running_assistant(client):
+    for method in ("assistant.pause", "assistant.resume"):
+        response = client.call(method)
+        assert "error" not in response
+        assert response["result"]["ok"] is False
+
+
+def test_audio_list_inputs(client):
+    response = client.call("audio.list_inputs")
+    assert "error" not in response
+    devices = response["result"]["devices"]
+    assert isinstance(devices, list)
+    for device in devices:
+        assert set(device.keys()) == {"index", "name"}
+
+
+def test_audio_set_input_requires_running_assistant(client):
+    response = client.call("audio.set_input", {"index": 0})
+    assert "error" not in response
+    assert response["result"]["ok"] is False
+
+
+def test_llm_list(client):
+    response = client.call("llm.list", timeout=30)
+    assert "error" not in response
+    models = response["result"]["models"]
+    assert isinstance(models, list)
+    for model in models:
+        assert set(model.keys()) == {"name", "tools", "vision"}
+
+
+def test_llm_set_requires_running_assistant(client):
+    response = client.call("llm.set", {"name": "some-model"})
+    assert "error" not in response
+    assert response["result"]["ok"] is False

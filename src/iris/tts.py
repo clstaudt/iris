@@ -23,6 +23,33 @@ KOKORO_VOICES_URL = (
     "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin"
 )
 
+# Mapping from Whisper language codes to Kokoro TTS language/voice settings.
+# Kokoro supports: en-us, en-gb, fr-fr, it, ja, cmn
+LANGUAGE_VOICE_MAP = {
+    "en": {"code": "en-us", "default_voice": "af_bella"},
+    "fr": {"code": "fr-fr", "default_voice": "ff_siwis"},
+    "it": {"code": "it", "default_voice": "if_sara"},
+    "ja": {"code": "ja", "default_voice": "jf_alpha"},
+    "zh": {"code": "cmn", "default_voice": "zf_xiaoni"},
+}
+
+
+def get_language_info(whisper_lang: str) -> dict | None:
+    """Get Kokoro language info for a Whisper language code.
+
+    Args:
+        whisper_lang: Whisper language code (e.g. 'en', 'fr', 'ja', 'zh')
+
+    Returns:
+        Dict with 'code' and 'default_voice', or None if unsupported.
+    """
+    return LANGUAGE_VOICE_MAP.get(whisper_lang)
+
+
+def is_language_supported(whisper_lang: str) -> bool:
+    """Check if a Whisper language code is supported by Kokoro TTS."""
+    return whisper_lang in LANGUAGE_VOICE_MAP
+
 
 class KokoroGenerator:
     """Generates speech audio using kokoro-onnx."""
@@ -208,16 +235,28 @@ class KokoroGenerator:
                         f.write(chunk)
                         progress.update(task, advance=len(chunk))
 
-    def generate(self, text: str) -> str | None:
+    def generate(self, text: str, language: str = "en") -> str | None:
         """
         Generate audio file from text using kokoro-onnx Python API.
 
         Args:
             text: Text to convert to speech
+            language: Whisper language code (e.g. 'en', 'fr', 'ja').
+                Selects the Kokoro language and an appropriate voice.
+                Falls back to English if unsupported.
 
         Returns:
             Path to generated WAV file, or None if generation failed
         """
+        lang_info = get_language_info(language)
+        if lang_info:
+            kokoro_lang = lang_info["code"]
+            voice = lang_info["default_voice"]
+        else:
+            # Unsupported language – fall back to English with default voice
+            kokoro_lang = "en-us"
+            voice = self.voice
+
         temp_audio = None
         try:
             # Create temporary file for output
@@ -226,7 +265,7 @@ class KokoroGenerator:
 
             # Generate audio using kokoro-onnx Python API
             audio_data, sample_rate = self.kokoro.create(
-                text=text, voice=self.voice, speed=self.speed, lang="en-us"
+                text=text, voice=voice, speed=self.speed, lang=kokoro_lang
             )
 
             # Save audio to file
@@ -270,6 +309,12 @@ class SpeechPipeline:
         self.generator = generator
         self.player = player
 
+        # Current language for TTS (set by assistant on each turn)
+        self.current_language = "en"
+
+        # Optional callback receiving playback level (0.0-1.0) for output meters
+        self.on_output_level = None
+
         # Queues for pipeline
         self.text_queue = queue.Queue()
         self.audio_queue = queue.Queue()
@@ -303,16 +348,19 @@ class SpeechPipeline:
                 pass  # Not available on all systems
 
             while True:
-                text = self.text_queue.get()
-                if text is None:  # Shutdown signal
+                item = self.text_queue.get()
+                if item is None:  # Shutdown signal
                     self.audio_queue.put(None)
                     break
+
+                # Unpack text and language
+                text, language = item
 
                 # Set flag to indicate TTS generation in progress
                 self.is_generating_flag.set()
 
-                # Generate audio file
-                audio_file = self.generator.generate(text)
+                # Generate audio file in the requested language
+                audio_file = self.generator.generate(text, language=language)
 
                 # Clear flag when done generating
                 self.is_generating_flag.clear()
@@ -331,7 +379,7 @@ class SpeechPipeline:
 
                 # Play the audio
                 self.is_speaking_flag.set()
-                self.player.play(audio_file)
+                self.player.play(audio_file, on_level=self.on_output_level)
                 self.is_speaking_flag.clear()
 
                 # Cleanup
@@ -363,10 +411,12 @@ class SpeechPipeline:
         """
         Add text to speech pipeline (non-blocking).
 
+        Uses self.current_language for the TTS language code.
+
         Args:
             text: Text to speak
         """
-        self.text_queue.put(text)
+        self.text_queue.put((text, self.current_language))
 
     def wait_for_speech(self):
         """Wait for all speech generation and playback to finish."""

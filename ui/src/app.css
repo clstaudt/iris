@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  font-family:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: none;
+}
+
+input,
+select {
+  user-select: text;
+}
+
+/* Slim dark scrollbar for the transcript */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #262626;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #404040;
+}

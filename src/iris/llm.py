@@ -57,6 +57,39 @@ class ConversationManager:
         if not quiet:
             print(f"Model context length: {self.max_context_tokens:,} tokens")
 
+    @staticmethod
+    def list_available_models() -> list[dict]:
+        """List Ollama models that can hold a conversation.
+
+        Embedding-only models are excluded. Each entry reports whether the
+        model supports tool calling, which Iris needs for vision/search tools.
+        """
+        try:
+            models = []
+            for entry in ollama.list().models:
+                name = entry.model
+                try:
+                    capabilities = list(ollama.show(name).capabilities or [])
+                except Exception:
+                    capabilities = []
+                if "embedding" in capabilities:
+                    continue
+                models.append(
+                    {
+                        "name": name,
+                        "tools": "tools" in capabilities,
+                        "vision": "vision" in capabilities,
+                    }
+                )
+            return sorted(models, key=lambda m: m["name"])
+        except Exception:
+            return []
+
+    def set_model(self, model: str):
+        """Switch the primary model, keeping conversation history intact."""
+        self.model = model
+        self.max_context_tokens = self._get_model_context_length()
+
     def _get_model_context_length(self) -> int:
         """
         Get the model's context length from Ollama.
@@ -228,15 +261,28 @@ class ConversationManager:
 
             if "capture_screen" in tool_names:
                 tool_instructions += (
-                    "- 'capture_screen' function: Your ONLY way to see the COMPUTER SCREEN.\n"
-                    "  * YOU MUST call this function for ANY question about the screen, windows, or applications\n"
-                    "  * NEVER describe what's on screen without calling this function first\n"
-                    "  * If asked about 'screen', 'monitor', 'display', 'window', 'application' - USE THIS TOOL\n"
-                    "  * Do NOT guess or make up what's on screen - you CANNOT see it without this function\n"
+                    "- 'capture_screen' function: Screenshot of the user's PHYSICAL computer screen.\n"
+                    "  * ONLY use when they ask about what is on their screen, desktop, or open applications\n"
+                    "  * NEVER use this to read websites - use 'browse' for websites\n"
+                    "  * 'page', 'article', 'headline', 'website' refer to the WEB, not the screen\n"
                 )
 
             if "search" in tool_names:
-                tool_instructions += "- 'search' function: Use this to find current information, news, or facts you don't know.\n"
+                tool_instructions += (
+                    "- 'search' function: Search the web for CURRENT information.\n"
+                    "  * YOU MUST call this for questions about current events, news, weather, prices, or recent facts\n"
+                    "  * Use when the user asks about something you're unsure of or that changes over time\n"
+                    "  * NEVER guess at current facts - search first\n"
+                )
+
+            if "browse" in tool_names:
+                tool_instructions += (
+                    "- 'browse' function: Fetch and read the contents of a specific webpage.\n"
+                    "  * When the user names a website (e.g. 'The Guardian', 'BBC News'), infer its URL and call this\n"
+                    "  * Use to read, scan, or check any web page, article, or headline\n"
+                    "  * Use to read full article content from URLs found via 'search'\n"
+                    "  * Provide the full URL including https://\n"
+                )
 
             tool_instructions += "\nIMPORTANT: You MUST use these functions when appropriate. NEVER make up or guess what you see."
 
@@ -294,19 +340,36 @@ class ConversationManager:
 
         return managed_messages
 
-    def chat_stream(self, prompt: str):
+    def chat_stream(self, prompt: str, response_language: str = "en", on_tool_use=None):
         """
         Send prompt to LLM and stream response with tool support.
         Automatically switches to vision model when vision tools are used.
 
         Args:
             prompt: User prompt text
+            response_language: Language the assistant should respond in
+                (Whisper ISO 639-1 code, e.g. 'en', 'fr', 'ja')
+            on_tool_use: Optional callback(tool_name, tool_args) called before each tool executes
 
         Yields:
             Chunks of response text
         """
+        # Language names for the LLM instruction
+        _lang_names = {
+            "en": "English", "fr": "French", "it": "Italian",
+            "ja": "Japanese", "zh": "Chinese (Mandarin)",
+        }
+
         # Get managed conversation context
         messages = self.manage_context()
+
+        # Inject a language instruction so the LLM replies in the right language
+        if response_language != "en":
+            lang_name = _lang_names.get(response_language, response_language)
+            messages.append({
+                "role": "system",
+                "content": f"The user is speaking in {lang_name}. Respond in {lang_name}.",
+            })
 
         # Add current user message
         messages.append({"role": "user", "content": prompt})
@@ -362,6 +425,9 @@ class ConversationManager:
                         if self.tools.status_manager:
                             with self.tools.status_manager.status_lock:
                                 self.tools.status_manager.status_capturing_screen = True
+
+                    if on_tool_use:
+                        on_tool_use(tool_name, tool_args)
 
                     # Execute the tool
                     result = self.tools.execute(tool_name, **tool_args)

@@ -47,35 +47,38 @@ class WhisperTranscriber:
             device=device,
             compute_type="float16" if device == "cuda" else "int8",
         )
+        self.model_name = model
         self.device = device
         self._transcription_lock = threading.Lock()
         if not quiet:
             print("Whisper model loaded")
 
-    def transcribe(self, audio_path: str) -> str:
+    def transcribe(self, audio_path: str) -> tuple[str, str]:
         """
-        Transcribe audio file using Whisper.
+        Transcribe audio file using Whisper with automatic language detection.
 
         Args:
             audio_path: Path to audio file
 
         Returns:
-            Transcribed text
+            Tuple of (transcribed_text, detected_language_code).
+            The language code is an ISO 639-1 code such as 'en', 'fr', 'ja'.
         """
         with self._transcription_lock:
             segments, info = self.whisper.transcribe(
                 audio_path,
                 beam_size=5,
-                language="en",  # Change to None for auto-detection
+                language=None,  # Auto-detect language
             )
 
-            return " ".join(segment.text for segment in segments).strip()
+            text = " ".join(segment.text for segment in segments).strip()
+            return text, info.language
 
     def transcribe_streaming(
         self,
         audio_path: str,
         on_partial: Callable[[str], None],
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         Transcribe audio with streaming partial results.
 
@@ -87,13 +90,13 @@ class WhisperTranscriber:
             on_partial: Callback called with accumulated text after each segment
 
         Returns:
-            Final complete transcribed text
+            Tuple of (final_transcribed_text, detected_language_code)
         """
         with self._transcription_lock:
             segments, info = self.whisper.transcribe(
                 audio_path,
                 beam_size=5,
-                language="en",
+                language=None,  # Auto-detect language
             )
 
             # Stream segments as they're processed
@@ -103,7 +106,7 @@ class WhisperTranscriber:
                 current_text = " ".join(accumulated_text).strip()
                 on_partial(current_text)
 
-            return " ".join(accumulated_text).strip()
+            return " ".join(accumulated_text).strip(), info.language
 
 
 class StreamingTranscriber:
