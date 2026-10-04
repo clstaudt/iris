@@ -8,9 +8,10 @@ while StatusManager.status_lock is held.
 Event types:
     state        {"state": "idle"|"starting"|"listening"|"understanding"|"thinking"|
                   "speaking"|"looking"|"capturing_screen"|"searching"|"browsing"|
-                  "paused"|"muted"|"typing"|"dormant"}  dormant: waiting
-                                                     for the wake word    paused: whole conversation;
-                                                     muted: mic off
+                  "paused"|"muted"|"typing"|"dormant"}
+                                                     paused: whole conversation;
+                                                     muted: mic off;
+                                                     dormant: waiting for the wake word
     flags        {"flags": {flag_name: bool, ...}}   raw StatusManager snapshot
     audio.level  {"rms": float}                      mic input level 0.0-1.0
     chat.user    {"text": str, "language": str, "source": "voice"|"text", "id": str}
