@@ -33,5 +33,6 @@ class TestWhisperTranscriber:
 
     def test_device_detected(self, transcriber):
         """Device is set after initialization."""
-        assert transcriber.device in ("cpu", "cuda")
+        # MLX (Apple Silicon) decodes on the GPU; faster-whisper on CPU or CUDA
+        assert transcriber.device in ("cpu", "cuda", "gpu")
 

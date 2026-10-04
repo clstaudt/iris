@@ -16,7 +16,8 @@ export type AssistantState =
   | "summarizing"
   | "paused"
   | "muted"
-  | "typing";
+  | "typing"
+  | "dormant";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "tool" | "error" | "system";
@@ -73,6 +74,7 @@ export const STATE_COLORS: Record<string, string> = {
   paused: "#62666e",
   muted: "#8d919b",
   typing: "#a9b1c9",
+  dormant: "#5f6377",
 };
 
 export const STATE_LABELS: Record<string, string> = {
@@ -115,9 +117,11 @@ export interface AssistantConfig {
   llm_model: string;
   whisper_model: string;
   whisper_device: string;
+  whisper_engine?: string;
   tts_voice: string;
   input_device: string;
   speak_replies?: boolean;
+  wake_word?: string;
   ollama_host?: string;
   ollama_url?: string;
   mic_on?: boolean;
@@ -136,6 +140,8 @@ interface SavedSettings {
   tools?: Record<string, boolean>;
   ollama_host?: string;
   amnesia?: boolean;
+  /** "" means the wake word is off */
+  wake_word?: string;
 }
 
 const SETTINGS_KEY = "iris.settings";
@@ -375,6 +381,12 @@ class IrisStore {
     await this.loadMemory();
   }
 
+  /** Listen only for this word until addressed; "" listens to everything. */
+  async setWakeWord(word: string) {
+    saveSettings({ wake_word: word });
+    await rpc("wake.set", { word });
+  }
+
   async setTool(name: string, enabled: boolean) {
     saveSettings({ tools: { ...loadSettings().tools, [name]: enabled } });
     await rpc("tools.set", { name, enabled });
@@ -473,6 +485,7 @@ class IrisStore {
         if (saved.tools) options.tools = saved.tools;
         if (saved.ollama_host) options.ollama_host = saved.ollama_host;
         if (saved.amnesia) options.amnesia = true;
+        if (saved.wake_word) options.wake_word = saved.wake_word;
         this.speakReplies = saved.speak_replies ?? true;
         await rpc("assistant.start", options);
       }

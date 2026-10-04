@@ -4,6 +4,7 @@ import os
 import urllib.request
 from pathlib import Path
 
+from huggingface_hub import snapshot_download
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
@@ -15,6 +16,8 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 from rich.table import Table
+
+from iris.transcription import model_repo, resolve_device, resolve_engine, resolve_model
 
 # Kokoro model download URLs
 KOKORO_MODEL_URL = (
@@ -32,16 +35,25 @@ KOKORO_MODELS_DIR = Path.home() / ".iris" / "models"
 class SetupWizard:
     """Handles first-run setup and dependency checking."""
 
-    def __init__(self, whisper_model: str = "small", llm_model: str = "qwen3:1.7b"):
+    def __init__(
+        self,
+        whisper_model: str = "auto",
+        llm_model: str = "qwen3:1.7b",
+        whisper_engine: str = "auto",
+    ):
         """
         Initialize setup wizard.
 
         Args:
-            whisper_model: Whisper model size to use
+            whisper_model: Whisper model size to use ("auto" picks per engine)
             llm_model: Ollama model name to use
+            whisper_engine: "auto", "mlx" or "faster-whisper"
         """
         self.console = Console()
-        self.whisper_model = whisper_model
+        engine = resolve_engine(whisper_engine)
+        self.whisper_model = resolve_model(whisper_model, engine, resolve_device(engine))
+        # MLX and faster-whisper keep their weights in different repos
+        self.whisper_repo = model_repo(self.whisper_model, engine)
         self.llm_model = llm_model
 
     def run(self) -> bool:
@@ -235,10 +247,9 @@ class SetupWizard:
 
     def _check_whisper_model(self) -> str:
         """Check if Whisper model is cached."""
-        # faster-whisper uses huggingface_hub for downloads
-        # Models are stored in ~/.cache/huggingface/hub/
-        # The model name pattern is: models--Systran--faster-whisper-{size}
-        model_dir_name = f"models--Systran--faster-whisper-{self.whisper_model}"
+        # Both engines download through huggingface_hub into
+        # ~/.cache/huggingface/hub/models--{org}--{name}
+        model_dir_name = "models--" + self.whisper_repo.replace("/", "--")
         model_path = WHISPER_CACHE_DIR / model_dir_name
 
         try:
@@ -323,11 +334,7 @@ class SetupWizard:
         self.console.print()
 
         try:
-            # Import faster_whisper which will trigger the download
-            # We'll use huggingface_hub directly for better progress control
-            from huggingface_hub import snapshot_download
-
-            model_name = f"Systran/faster-whisper-{self.whisper_model}"
+            model_name = self.whisper_repo
 
             with Progress(
                 SpinnerColumn(),
@@ -467,16 +474,21 @@ class SetupWizard:
             raise e
 
 
-def run_setup(whisper_model: str = "small", llm_model: str = "qwen3:1.7b") -> bool:
+def run_setup(
+    whisper_model: str = "auto", llm_model: str = "qwen3:1.7b", whisper_engine: str = "auto"
+) -> bool:
     """
     Run setup wizard.
 
     Args:
         whisper_model: Whisper model size
         llm_model: Ollama model name
+        whisper_engine: "auto", "mlx" or "faster-whisper"
 
     Returns:
         True if setup succeeded, False otherwise
     """
-    wizard = SetupWizard(whisper_model=whisper_model, llm_model=llm_model)
+    wizard = SetupWizard(
+        whisper_model=whisper_model, llm_model=llm_model, whisper_engine=whisper_engine
+    )
     return wizard.run()

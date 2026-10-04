@@ -9,6 +9,9 @@ import warnings
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+import sounddevice as sd
+from faster_whisper.audio import decode_audio
 from rich.align import Align
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -23,8 +26,27 @@ from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
 from iris.tts import KokoroGenerator, SpeechPipeline, is_language_supported
 from iris.ui import DisplayManager, StatusManager
+from iris.wakeword import WakeWordDetector
 
 warnings.filterwarnings("ignore")
+
+# With a wake word set: how long the assistant keeps listening after a turn
+# before it waits for its name again
+WAKE_WINDOW = 30.0
+# While dormant an utterance ends after this much silence, so the wake word
+# is recognized promptly instead of after the conversational pause
+DORMANT_SILENCE = 0.8
+
+
+def _wake_chime() -> np.ndarray:
+    """Two soft rising tones that say "I'm listening" across the room."""
+    rate = 24000
+    tones = []
+    for freq in (660.0, 990.0):
+        t = np.arange(int(rate * 0.09)) / rate
+        envelope = np.sin(np.pi * t / t[-1]) ** 2
+        tones.append(0.12 * envelope * np.sin(2 * np.pi * freq * t))
+    return np.concatenate(tones).astype(np.float32)
 
 
 def _as_int(value) -> int:
@@ -39,8 +61,9 @@ class VoiceAssistant:
 
     def __init__(
         self,
-        whisper_model: str = "small",
+        whisper_model: str = "auto",
         whisper_device: str = "auto",
+        whisper_engine: str = "auto",
         llm_model: str = "qwen3:1.7b",
         sample_rate: int = 16000,
         silence_threshold: float = 0.015,
@@ -58,13 +81,17 @@ class VoiceAssistant:
         speak_replies: bool = True,
         ollama_host: Optional[str] = None,
         memory: bool = True,
+        wake_word: Optional[str] = None,
     ):
         """
         Initialize the voice assistant.
 
         Args:
-            whisper_model: Whisper model size (tiny, base, small, medium, large)
-            whisper_device: Device for Whisper (cpu, cuda, or auto)
+            whisper_model: Whisper model size, or "auto" for the best one the
+                hardware decodes quickly (large-v3-turbo on a GPU, small on CPU)
+            whisper_device: Device for faster-whisper (cpu, cuda, or auto)
+            whisper_engine: "auto" (MLX on Apple Silicon, else faster-whisper),
+                "mlx" or "faster-whisper"
             llm_model: Ollama model name (primary model, should be fast)
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
@@ -85,6 +112,8 @@ class VoiceAssistant:
             ollama_host: Ollama server URL; None follows OLLAMA_HOST
             memory: Keep one continuous conversation in long-term memory
                 (~/.iris/memory.db, or IRIS_MEMORY_DB), remembered by topic
+            wake_word: If set, listen only for this word until addressed, and
+                fall dormant again after WAKE_WINDOW seconds without a turn
         """
         # Initialize console
         self.console = Console()
@@ -111,6 +140,11 @@ class VoiceAssistant:
         # Voice output toggle; False turns the assistant into a text chat
         self.speak_replies = speak_replies
 
+        # Wake word mode: off when None; awake_until is when it falls dormant
+        self.wake_word: Optional[str] = None
+        self.wake_detector: Optional[WakeWordDetector] = None
+        self.awake_until = 0.0
+
         # Track current conversation language for continuity
         self.conversation_language = "en"
 
@@ -129,7 +163,9 @@ class VoiceAssistant:
         audio_filter = get_filter(self.persona.audio_filter) if self.persona.audio_filter else None
         self.player = AudioPlayer(audio_filter=audio_filter)
 
-        self.transcriber = WhisperTranscriber(whisper_model, whisper_device, quiet=quiet)
+        self.transcriber = WhisperTranscriber(
+            whisper_model, whisper_device, quiet=quiet, engine=whisper_engine
+        )
 
         # Initialize TTS with persona's voice and speed
         self.tts_generator = KokoroGenerator(tts_voice, self.persona.speed, quiet=quiet)
@@ -194,6 +230,8 @@ class VoiceAssistant:
                         "[yellow]⚠ Web search dependencies not installed (requests)[/yellow]"
                     )
 
+        self.set_wake_word(wake_word, engine=whisper_engine)
+
         # Initialize conversation manager with tools
         # If vision OR screen capture is enabled, pass the vision model for automatic switching
         self.conversation = ConversationManager(
@@ -215,6 +253,7 @@ class VoiceAssistant:
             "llm_model": self.conversation.model,
             "whisper_model": self.transcriber.model_name,
             "whisper_device": self.transcriber.device,
+            "whisper_engine": self.transcriber.engine,
             "tts_voice": self.tts_generator.voice,
             "input_device": self.recorder.current_device_name(),
             "speak_replies": self.speak_replies,
@@ -222,10 +261,57 @@ class VoiceAssistant:
             "ollama_url": effective_host(self.conversation.host),
             "memory": self.memory is not None,
             "amnesia": self.conversation.amnesia,
+            "wake_word": self.wake_word or "",
             "mic_on": not self.pause_event.is_set(),
             "paused": self.suspend_event.is_set(),
             "tools": self.tools.group_states() if self.tools else {},
         }
+
+    def set_wake_word(self, word: Optional[str], engine: str = "auto"):
+        """Listen only for this word from now on (None or "" listens to all).
+
+        The tiny detector model is loaded the first time it is needed.
+        """
+        word = (word or "").strip() or None
+        if word and self.wake_detector is None:
+            engine = self.transcriber.engine if engine == "auto" else engine
+            self.wake_detector = WakeWordDetector(engine)
+        self.wake_word = word
+        self.awake_until = 0.0  # a new word starts dormant
+
+    @property
+    def dormant(self) -> bool:
+        """Waiting to be addressed by the wake word."""
+        return bool(self.wake_word) and time.monotonic() >= self.awake_until
+
+    def _stay_awake(self):
+        self.awake_until = time.monotonic() + WAKE_WINDOW
+
+    def _chime(self):
+        """Acknowledge the wake word when no request came with it."""
+        if self.speak_replies:
+            sd.play(_wake_chime(), 24000)
+
+    def _handle_heard(self, audio_path: str, dormant: bool):
+        """Answer an utterance, or while dormant, check it for the wake word.
+
+        "Iris, what time is it?" wakes and is answered in one go, transcribed
+        by the conversation model; a bare "Iris" chimes and waits.
+        """
+        if dormant:
+            audio = decode_audio(audio_path, sampling_rate=16000)
+            woken, remainder = self.wake_detector.heard(audio, self.wake_word)
+            if not woken:
+                return
+            self._stay_awake()
+            if self.event_bus:
+                self.event_bus.emit("wake", {"word": self.wake_word})
+            if len(remainder.split()) < 2:
+                self._chime()
+                return
+        self._run_voice_turn(audio_path)
+        if self.wake_word:
+            self._stay_awake()
 
     def _speak(self, text: str):
         """Queue reply text for speech, unless voice output is switched off."""
@@ -276,6 +362,8 @@ class VoiceAssistant:
                 },
             )
         self.chat(text, response_language=self.conversation_language, source="text")
+        if self.wake_word:
+            self._stay_awake()
 
     def _run_voice_turn(self, audio_path: str):
         """Transcribe recorded speech and answer it."""
@@ -539,7 +627,7 @@ class VoiceAssistant:
                 if turn is not None:
                     try:
                         if "audio" in turn:
-                            self._run_voice_turn(turn["audio"])
+                            self._handle_heard(turn["audio"], self.dormant)
                         else:
                             self._run_text_turn(turn)
                     except Exception as e:
@@ -555,17 +643,25 @@ class VoiceAssistant:
                     continue
 
                 try:
-                    # 1. Listen for voice input with level visualization
+                    # 1. Listen for voice input with level visualization;
+                    # with a wake word set and no recent turn, only for that
+                    dormant = self.dormant
                     with self.status_manager.status_lock:
-                        self.status_manager.status_listening = True
+                        self.status_manager.status_listening = not dormant
+                        self.status_manager.status_dormant = dormant
                     self.status_manager.update_status_bar(self.speech_pipeline)
 
                     last_level_emit = [0.0]
+                    heard_speech = [False]
 
                     def on_audio_level(level: float):
                         """Update audio level display."""
                         if level * 0.15 > self.recorder.silence_threshold:
-                            self._last_voice = time.monotonic()
+                            heard_speech[0] = True
+                            # Talk Iris is not part of (while dormant) is not
+                            # conversation: memory filing may use the time
+                            if not dormant:
+                                self._last_voice = time.monotonic()
                         self.display_manager.update_audio_level_display(level, self.speech_pipeline)
                         # Throttle level events to ~15 Hz for external UIs
                         if self.event_bus:
@@ -580,11 +676,15 @@ class VoiceAssistant:
                         or self.suspend_event.is_set()
                         or self.hold_event.is_set()
                         or self.stop_event.is_set()
-                        or not self.turn_queue.empty(),
+                        or not self.turn_queue.empty()
+                        # The awake window ran out with nobody speaking
+                        or (not dormant and not heard_speech[0] and self.dormant),
+                        silence_duration=DORMANT_SILENCE if dormant else None,
                     )
 
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
+                        self.status_manager.status_dormant = False
                     self.status_manager.update_status_bar(self.speech_pipeline)
 
                     # Check if we had a device error
@@ -606,7 +706,7 @@ class VoiceAssistant:
                         continue
 
                     # 2. Transcribe, then 3. answer (streams and speaks the reply)
-                    self._run_voice_turn(audio_path)
+                    self._handle_heard(audio_path, dormant)
 
                     # Cleanup
                     Path(audio_path).unlink(missing_ok=True)

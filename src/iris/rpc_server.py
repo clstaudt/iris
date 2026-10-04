@@ -115,6 +115,7 @@ def main():
         "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
+        "wake.set": lambda params: controller.set_wake_word(params.get("word", "")),
         "voice.set_output": lambda params: controller.set_voice_output(
             bool(params.get("enabled", True))
         ),

@@ -26,6 +26,7 @@ FLAG_STATE_PRIORITY = (
     "understanding",
     "thinking",
     "listening",
+    "dormant",
 )
 
 # How long "speaking" survives a gap in playback, in seconds.
@@ -333,6 +334,17 @@ class AssistantController:
             return {"ok": False, "error": "Assistant not running"}
         if not self.assistant.tools.set_group(group, bool(enabled)):
             return {"ok": False, "error": f"Tool '{group}' is not available"}
+        self.bus.emit("config", self.assistant.config_info())
+        return {"ok": True}
+
+    def set_wake_word(self, word: str) -> dict:
+        """Listen only for this word until addressed ("" listens to everything)."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        try:
+            self.assistant.set_wake_word(word)
+        except Exception as e:
+            return {"ok": False, "error": f"Wake word detection unavailable: {e}"}
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 

@@ -253,6 +253,7 @@ class AudioRecorder:
         self,
         on_level: Callable[[float], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
+        silence_duration: float | None = None,
     ) -> str | None:
         """
         Record audio from microphone until silence is detected.
@@ -262,6 +263,8 @@ class AudioRecorder:
             on_level: Optional callback called with audio level (0.0-1.0) for visualization
             should_stop: Optional callable; recording aborts (returning None) as soon
                 as it returns True. Checked every 50 ms.
+            silence_duration: Seconds of silence that end the recording; defaults
+                to the recorder's setting
 
         Returns:
             Path to temporary audio file, or None if recording failed or was aborted
@@ -269,7 +272,8 @@ class AudioRecorder:
         audio_chunks = []
         silent_chunks = 0
         has_audio = False
-        max_silent_chunks = int(self.silence_duration * self.sample_rate / 1024)
+        silence = self.silence_duration if silence_duration is None else silence_duration
+        max_silent_chunks = int(silence * self.sample_rate / 1024)
 
         def audio_callback(indata, frames, time_info, status):
             """Callback for audio stream."""

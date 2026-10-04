@@ -40,9 +40,20 @@ def main():
     )
     parser.add_argument(
         "--whisper-model",
-        default="small",
-        choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
-        help="Whisper model size (default: small)",
+        default="auto",
+        choices=["auto", "tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"],
+        help="Whisper model size (default: auto, large-v3-turbo on a GPU, small on a CPU)",
+    )
+    parser.add_argument(
+        "--wake-word",
+        default=None,
+        help="Listen only for this word until addressed, e.g. --wake-word Iris",
+    )
+    parser.add_argument(
+        "--whisper-engine",
+        default="auto",
+        choices=["auto", "mlx", "faster-whisper"],
+        help="Speech recognition engine (default: auto, MLX on Apple Silicon)",
     )
     parser.add_argument(
         "--llm-model",
@@ -104,6 +115,7 @@ def main():
             if not run_setup(
                 whisper_model=args.whisper_model,
                 llm_model=args.llm_model,
+                whisper_engine=args.whisper_engine,
             ):
                 sys.exit(1)
 
@@ -117,6 +129,8 @@ def main():
         assistant = VoiceAssistant(
             whisper_model=args.whisper_model,
             whisper_device=args.device,
+            whisper_engine=args.whisper_engine,
+            wake_word=args.wake_word,
             llm_model=args.llm_model,
             persona=persona,
             enable_vision=args.enable_vision,

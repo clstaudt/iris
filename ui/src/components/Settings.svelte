@@ -19,6 +19,20 @@
     store.models.find((m) => m.name === store.config?.llm_model)?.tools ?? true
   );
 
+  // Wake word: the word stays in the field when switched off, so switching
+  // back on restores it
+  const DEFAULT_WAKE_WORD = "Iris";
+  let wakeDraft = $state<string | null>(null);
+  const wakeOn = $derived(!!store.config?.wake_word);
+  const wakeValue = $derived(wakeDraft ?? (store.config?.wake_word || DEFAULT_WAKE_WORD));
+
+  function applyWakeWord(on: boolean) {
+    const word = wakeValue.trim() || DEFAULT_WAKE_WORD;
+    store.setWakeWord(on ? word : "").catch((err) =>
+      console.error("[settings] wake.set failed:", err)
+    );
+  }
+
   // Ollama server: edited as a draft, applied on Enter or Connect
   let hostDraft = $state<string | null>(null);
   let hostError = $state("");
@@ -167,6 +181,21 @@
     </section>
 
     <section class="flex flex-col gap-2">
+      <h3 class="section">Wake word</h3>
+      <div class="flex items-center gap-3">
+        <input
+          value={wakeValue}
+          oninput={(e) => (wakeDraft = (e.target as HTMLInputElement).value)}
+          onkeydown={(e) => e.key === "Enter" && wakeOn && applyWakeWord(true)}
+          onblur={() => wakeOn && wakeDraft !== null && applyWakeWord(true)}
+          spellcheck="false"
+          class="field min-w-0 flex-1 !pr-3"
+        />
+        <Switch label="Wake word" checked={wakeOn} onchange={(on) => applyWakeWord(on)} />
+      </div>
+    </section>
+
+    <section class="flex flex-col gap-2">
       <h3 class="section">Microphone</h3>
       <div class="relative">
         <select value={selectedMic} onchange={onMicChange} class="field">
@@ -184,7 +213,8 @@
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
           <dt class="text-ink-3">Recognition</dt>
           <dd class="text-ink-2">
-            Whisper {store.config.whisper_model} · {store.config.whisper_device}
+            Whisper {store.config.whisper_model} ·
+            {store.config.whisper_engine === "mlx" ? "MLX" : store.config.whisper_device}
           </dd>
           <dt class="text-ink-3">Voice</dt>
           <dd class="text-ink-2">{store.config.tts_voice}</dd>
