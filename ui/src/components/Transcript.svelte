@@ -9,6 +9,8 @@
     browse: { icon: "globe", label: "Read a web page" },
     look: { icon: "camera", label: "Looked through the camera" },
     capture_screen: { icon: "monitor", label: "Looked at your screen" },
+    recall: { icon: "brain", label: "Recalled" },
+    search_memory: { icon: "search", label: "Searched memory" },
   };
 
   // Whole emoji sequences (ZWJ families, flags, skin tones) plus the space

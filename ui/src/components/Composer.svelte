@@ -101,6 +101,19 @@
           <Icon name={store.speakReplies ? "volume" : "volume-off"} />
           <span>{store.speakReplies ? "Voice" : "Voice off"}</span>
         </button>
+        {#if store.config?.memory}
+          <button
+            onclick={() => store.toggleAmnesia()}
+            disabled={store.state === "starting"}
+            class="toggle {store.amnesia ? 'resume' : ''}"
+            title={store.amnesia
+              ? "Amnesia mode is on: nothing is remembered"
+              : "Amnesia mode: remember nothing of this conversation"}
+          >
+            <Icon name="brain-off" size={15} />
+            <span>Amnesia</span>
+          </button>
+        {/if}
       </div>
 
       <div class="flex items-center gap-1.5">

@@ -449,6 +449,9 @@ class AudioRecorder:
         return temp_file.name
 
 
+# Frames per playback buffer: large, so generation never starves playback
+PLAYBACK_BLOCK = 32768
+
 # On resume, playback restarts this far before the point where it was cut,
 # so the listener hears the interrupted word again rather than half of it
 RESUME_REWIND = 0.35
@@ -550,7 +553,7 @@ class AudioPlayer:
 
             # Play with maximum buffer size and latency for ultra-smooth playback
             # Extra large buffer (32768 samples = ~740ms) prevents any underruns
-            sd.play(segment, sample_rate, blocksize=32768, latency="high")
+            sd.play(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
             started = time.monotonic()
             try:
                 latency = float(sd.get_stream().latency)
@@ -567,9 +570,14 @@ class AudioPlayer:
                 )
                 level_thread.start()
 
-            # Until the clip ends, or a pause or stop cuts it
-            duration = len(segment) / sample_rate + latency
-            while time.monotonic() - started < duration + 0.5:
+            # Until the stream has played its last buffer (PortAudio only then
+            # reports it inactive), or a pause or stop cuts it. The stream
+            # outlives the clip by up to a block plus the device latency; giving
+            # up earlier let the next clip's sd.play() cut off the last words.
+            # The deadline is only a safety net against a hung device.
+            buffered = latency + 2 * PLAYBACK_BLOCK / sample_rate
+            deadline = len(segment) / sample_rate + buffered + 2.0
+            while time.monotonic() - started < deadline:
                 if self._paused.is_set() or self._stopped.is_set():
                     break
                 try:

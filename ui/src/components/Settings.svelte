@@ -73,7 +73,7 @@
   <div class="flex h-12 shrink-0 items-center justify-between pl-5 pr-2.5">
     <h2 class="text-[13px] font-semibold text-ink">Settings</h2>
     <button
-      onclick={() => (store.settingsOpen = false)}
+      onclick={() => (store.panel = null)}
       class="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-hover hover:text-ink"
       title="Close settings"
     >

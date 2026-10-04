@@ -38,6 +38,7 @@ def _bare_assistant():
     assistant.hold_event = threading.Event()
     assistant.speak_replies = True
     assistant.conversation_language = "en"
+    assistant._turn_active = threading.Event()
     assistant.event_bus = EventBus()
     return assistant
 
@@ -67,7 +68,9 @@ def test_text_turn_is_announced_as_typed_and_answered():
     events = []
     assistant.event_bus.subscribe(lambda event_type, data: events.append((event_type, data)))
     answered = []
-    assistant.chat = lambda text, response_language: answered.append((text, response_language))
+    assistant.chat = lambda text, response_language, source=None: answered.append(
+        (text, response_language, source)
+    )
 
     assistant.conversation_language = "fr"
     assistant._run_text_turn({"text": "bonjour", "id": "t7"})
@@ -75,4 +78,16 @@ def test_text_turn_is_announced_as_typed_and_answered():
     assert events == [
         ("chat.user", {"text": "bonjour", "language": "fr", "source": "text", "id": "t7"})
     ]
-    assert answered == [("bonjour", "fr")]
+    assert answered == [("bonjour", "fr", "text")]
+
+
+def test_a_turn_marks_the_conversation_busy():
+    """Background memory filing must see a typed turn as conversation."""
+    assistant = _bare_assistant()
+    seen = []
+    assistant.chat = lambda text, response_language, source=None: seen.append(
+        assistant._turn_active.is_set()
+    )
+    assistant._run_text_turn({"text": "hi", "id": "t1"})
+    assert seen == [True]
+    assert not assistant._turn_active.is_set()

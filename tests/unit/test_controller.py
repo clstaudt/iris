@@ -24,6 +24,10 @@ class FakePipeline:
 
 class FakeConversation:
     model = "fake-llm"
+    amnesia = False
+
+    def set_amnesia(self, on):
+        self.amnesia = on
 
     def set_model(self, name):
         self.model = name
@@ -230,5 +234,19 @@ def test_work_shows_through_a_paused_mic(monkeypatch):
 
         controller._flags = {}
         assert _wait_for(lambda: states[-1] == "muted")
+    finally:
+        controller.stop()
+
+
+def test_amnesia_is_switched_on_the_conversation(monkeypatch):
+    monkeypatch.setattr("iris.controller.VoiceAssistant", FakeAssistant)
+
+    controller = AssistantController(EventBus())
+    try:
+        controller.start({"amnesia": True})
+        assert _wait_for(lambda: controller.assistant is not None)
+        assert _wait_for(lambda: controller.assistant.conversation.amnesia is True)
+        controller.set_amnesia(False)
+        assert controller.assistant.conversation.amnesia is False
     finally:
         controller.stop()

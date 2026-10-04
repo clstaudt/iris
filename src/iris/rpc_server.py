@@ -109,6 +109,10 @@ def main():
         "llm.set_host": lambda params: controller.set_ollama_host(params.get("url", "")),
         "chat.send_text": lambda params: controller.send_text(params.get("text", "")),
         "chat.history": lambda params: controller.history(),
+        "memory.topics": lambda params: controller.memory_topics(),
+        "memory.topic": lambda params: controller.memory_topic(params.get("id", -1)),
+        "memory.forget": lambda params: controller.memory_forget(params.get("id", -1)),
+        "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
         "voice.set_output": lambda params: controller.set_voice_output(

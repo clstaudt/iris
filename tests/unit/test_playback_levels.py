@@ -95,3 +95,34 @@ def test_paused_playback_resumes_where_it_was_cut(monkeypatch):
     heard = 0.8 - audio_module.RESUME_REWIND
     # Restarted a little before the cut, never after it
     assert abs(resumed_at / sample_rate - heard) < 0.15
+
+
+def test_playback_waits_until_the_stream_has_really_finished(monkeypatch):
+    """The stream outlives the clip by its buffers; returning before it is
+    inactive let the next clip's sd.play() cut off the last words."""
+    import time as time_module
+
+    from iris import audio as audio_module
+
+    sample_rate = 16000
+    audio = np.zeros(sample_rate // 10, dtype=np.float32)  # a 0.1 s clip
+    started = []
+
+    class SlowStream:
+        latency = 0.0
+
+        @property
+        def active(self):
+            # Still draining its buffers a second after the clip's own length
+            return time_module.monotonic() - started[0] < 1.0
+
+    stream = SlowStream()
+    def fake_play(*args, **kwargs):
+        started.append(time_module.monotonic())
+
+    monkeypatch.setattr(audio_module.sd, "play", fake_play)
+    monkeypatch.setattr(audio_module.sd, "stop", lambda: None)
+    monkeypatch.setattr(audio_module.sd, "get_stream", lambda: stream)
+
+    AudioPlayer()._play_resumable(audio, sample_rate, None)
+    assert time_module.monotonic() - started[0] >= 1.0
