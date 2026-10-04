@@ -9,6 +9,8 @@ export interface IrisApi {
   rpc: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
   onEvent: (callback: (type: string, data: IrisEventPayload["data"]) => void) => () => void;
   micStatus: () => Promise<string>;
+  isPackaged: () => Promise<boolean>;
+  chooseFolder: (title: string) => Promise<string | null>;
   platform: string;
 }
 

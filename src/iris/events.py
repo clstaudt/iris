@@ -25,6 +25,9 @@ Event types:
     sleep        {}                                  it fell asleep (window over,
                                                      or the sleep word)
     error        {"message": str, "kind": str}         kind is optional
+    setup.progress {"model": str, "label": str,      model download at first start
+                    "done": int, "total": int}       (model: stt, wake or tts);
+                                                     an empty label when done
     memory.updated {}                                topics were filed or forgotten
 """
 

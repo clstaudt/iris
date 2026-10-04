@@ -96,6 +96,7 @@ class VoiceAssistant:
         wake_word: Optional[str] = None,
         wake_window: float = DEFAULT_WAKE_WINDOW,
         sleep_word: Optional[str] = DEFAULT_SLEEP_WORD,
+        tts_models_dir: Optional[str] = None,
     ):
         """
         Initialize the voice assistant.
@@ -130,6 +131,8 @@ class VoiceAssistant:
                 fall dormant again after wake_window seconds without a turn
             wake_window: Seconds the assistant stays awake after a turn
             sleep_word: Said while awake, puts the assistant back to sleep
+            tts_models_dir: Folder holding the Kokoro voice model; None looks
+                in the usual places
         """
         # Initialize console
         self.console = Console()
@@ -188,7 +191,9 @@ class VoiceAssistant:
         )
 
         # Initialize TTS with persona's voice and speed
-        self.tts_generator = KokoroGenerator(tts_voice, self.persona.speed, quiet=quiet)
+        self.tts_generator = KokoroGenerator(
+            tts_voice, self.persona.speed, quiet=quiet, models_dir=tts_models_dir
+        )
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
 
         if self.event_bus:
@@ -274,6 +279,8 @@ class VoiceAssistant:
             "whisper_model": self.transcriber.model_name,
             "whisper_device": self.transcriber.device,
             "whisper_engine": self.transcriber.engine,
+            "stt_model_path": str(self.transcriber.model_path or ""),
+            "tts_models_dir": str(self.tts_generator.models_dir or ""),
             "tts_voice": self.tts_generator.voice,
             "input_device": self.recorder.current_device_name(),
             "speak_replies": self.speak_replies,

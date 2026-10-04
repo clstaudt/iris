@@ -75,6 +75,16 @@ def resolve_model(model: str, engine: str, device: str) -> str:
     return "large-v3-turbo" if engine == "mlx" or device == "cuda" else "small"
 
 
+def folder_engine(folder: Path) -> str | None:
+    """Which engine a local Whisper model folder is for: CTranslate2 models
+    (faster-whisper) have a model.bin, MLX conversions their weights."""
+    if (folder / "model.bin").exists():
+        return "faster-whisper"
+    if (folder / "weights.safetensors").exists() or (folder / "weights.npz").exists():
+        return "mlx"
+    return None
+
+
 def model_repo(model: str, engine: str) -> str:
     """The Hugging Face repo holding this model for this engine."""
     if engine == "mlx":
@@ -103,15 +113,33 @@ class WhisperTranscriber:
             engine: "auto", "mlx" or "faster-whisper"; MLX needs Apple Silicon
                 and falls back to faster-whisper elsewhere
         """
+        # A local model folder instead of a size: its contents pick the engine
+        self.model_path: Path | None = None
+        candidate = Path(model).expanduser()
+        if model != "auto" and candidate.is_dir():
+            engine = folder_engine(candidate)
+            if engine is None:
+                raise ValueError(
+                    f"{candidate} holds no Whisper model "
+                    "(expected MLX weights or a faster-whisper model.bin)"
+                )
+            if engine == "mlx" and resolve_engine("mlx") != "mlx":
+                raise ValueError("MLX models need an Apple Silicon Mac with mlx-whisper")
+            self.model_path = candidate
+
         self.engine = resolve_engine(engine)
         self.device = resolve_device(self.engine, device)
-        self.model_name = resolve_model(model, self.engine, self.device)
+        if self.model_path:
+            self.model_name = self.model_path.name
+        else:
+            self.model_name = resolve_model(model, self.engine, self.device)
         self._transcription_lock = threading.Lock()
 
         if not quiet:
             print(f"Loading Whisper {self.model_name} ({self.engine}, {self.device})...")
         if self.engine == "mlx":
-            self.repo = model_repo(self.model_name, "mlx")
+            local = str(self.model_path) if self.model_path else None
+            self.repo = local or model_repo(self.model_name, "mlx")
             self.whisper = None
             # Download and load the weights now rather than on the first turn
             silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
@@ -119,7 +147,7 @@ class WhisperTranscriber:
         else:
             self.repo = model_repo(self.model_name, "faster-whisper")
             self.whisper = WhisperModel(
-                self.model_name,
+                str(self.model_path) if self.model_path else self.model_name,
                 device=self.device,
                 compute_type="float16" if self.device == "cuda" else "int8",
             )

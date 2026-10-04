@@ -5,8 +5,8 @@ stdout. Assistant activity (state changes, chat chunks, mic levels) is pushed
 as JSON-RPC notifications: ``{"jsonrpc": "2.0", "method": "event",
 "params": {"type": ..., "data": ...}}``.
 
-Stdout carries RPC frames only — sys.stdout is redirected to stderr so stray
-prints from the assistant pipeline cannot corrupt the framing.
+Stdout carries RPC frames only — prints, and native libraries writing to
+file descriptor 1, go to stderr so they cannot corrupt the framing.
 
 Usage::
 
@@ -60,9 +60,12 @@ def _start_parent_watchdog(interval: float = 2.0):
 
 
 def main():
-    # Stdout purity: redirect prints/tracebacks to stderr and keep the real
-    # stdout exclusively for RPC frames.
-    rpc_out = sys.stdout
+    # Stdout purity: RPC frames get a private copy of the real stdout, and
+    # file descriptor 1 is pointed at stderr. That catches native libraries
+    # writing to fd 1 as well as Python prints, so nothing splits a frame.
+    sys.stdout.flush()
+    rpc_out = os.fdopen(os.dup(1), "w", encoding="utf-8")
+    os.dup2(2, 1)
     sys.stdout = sys.stderr
 
     bus = EventBus()
@@ -116,6 +119,13 @@ def main():
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
         "wake.set": lambda params: controller.set_wake_word(params.get("word", "")),
+        "setup.info": lambda params: controller.setup_info(),
+        "models.check": lambda params: controller.check_model_paths(
+            params.get("stt_path"), params.get("tts_dir")
+        ),
+        "models.set": lambda params: controller.set_model_paths(
+            params.get("stt_path"), params.get("tts_dir")
+        ),
         "wake.options": lambda params: controller.set_wake_options(
             params.get("window"), params.get("sleep_word")
         ),

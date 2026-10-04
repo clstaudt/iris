@@ -95,3 +95,6 @@ models/*.bin
 
 
 
+
+# The desktop app built by ui/scripts/package-mac.sh
+/ui/release/

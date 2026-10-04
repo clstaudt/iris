@@ -53,6 +53,23 @@
     );
   }
 
+  // Advanced: model folders the user already has, instead of downloads
+  let advancedOpen = $state(false);
+  let modelError = $state("");
+
+  async function chooseModelFolder(kind: "stt" | "tts") {
+    const title = kind === "stt" ? "Speech recognition model folder" : "Voice model folder";
+    const folder = await window.iris.chooseFolder(title);
+    if (!folder) return;
+    modelError =
+      (await store.setModelPaths(kind === "stt" ? { stt_path: folder } : { tts_dir: folder })) ?? "";
+  }
+
+  async function useDownloaded(kind: "stt" | "tts") {
+    modelError =
+      (await store.setModelPaths(kind === "stt" ? { stt_path: "" } : { tts_dir: "" })) ?? "";
+  }
+
   // Ollama server: edited as a draft, applied on Enter or Connect
   let hostDraft = $state<string | null>(null);
   let hostError = $state("");
@@ -268,6 +285,37 @@
           <dd class="text-ink-2">{store.config.tts_voice}</dd>
         </dl>
       </section>
+
+      <section class="flex flex-col gap-2">
+        <button
+          onclick={() => (advancedOpen = !advancedOpen)}
+          class="flex items-center gap-1.5 self-start text-[12.5px] text-ink-3 transition-colors hover:text-ink-2"
+        >
+          <Icon name="chevron" size={13} class={advancedOpen ? "" : "-rotate-90"} />
+          Advanced
+        </button>
+        {#if advancedOpen}
+          <h3 class="section pt-1">Model folders</h3>
+          {#each [{ kind: "stt" as const, label: "Recognition", path: store.config.stt_model_path }, { kind: "tts" as const, label: "Voice", path: store.config.tts_models_dir }] as row}
+            <div class="flex items-center gap-2">
+              <span class="w-[5.5rem] shrink-0 text-[12.5px] text-ink-2">{row.label}</span>
+              <span
+                class="min-w-0 flex-1 truncate text-[12px] {row.path ? 'text-ink' : 'text-ink-3'}"
+                title={row.path}
+              >
+                {row.path || "Downloaded"}
+              </span>
+              <button class="small" onclick={() => chooseModelFolder(row.kind)}>Choose…</button>
+              {#if row.path}
+                <button class="small" onclick={() => useDownloaded(row.kind)}>Download</button>
+              {/if}
+            </div>
+          {/each}
+          {#if modelError}
+            <p class="hint !text-danger">{modelError}</p>
+          {/if}
+        {/if}
+      </section>
     {/if}
   </div>
 </aside>
@@ -279,6 +327,20 @@
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--color-ink-3);
+  }
+  .small {
+    height: 1.9rem;
+    flex-shrink: 0;
+    border-radius: 0.45rem;
+    border: 1px solid var(--color-line);
+    padding: 0 0.6rem;
+    font-size: 12px;
+    color: var(--color-ink-2);
+    transition: background-color 150ms;
+  }
+  .small:hover {
+    background: var(--color-hover);
+    color: var(--color-ink);
   }
   .hint {
     font-size: 11.5px;

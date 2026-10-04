@@ -30,14 +30,22 @@ export class PythonBridge {
   private projectRoot: string;
   private isPackaged: boolean;
   private resourcesPath: string;
+  /** Added to the core's environment (the setup test's own folders) */
+  private extraEnv: NodeJS.ProcessEnv;
 
   /** Called for every server-push event; set once the window exists. */
   onEvent: IrisEventHandler | null = null;
 
-  constructor(projectRoot: string, isPackaged: boolean, resourcesPath: string) {
+  constructor(
+    projectRoot: string,
+    isPackaged: boolean,
+    resourcesPath: string,
+    extraEnv: NodeJS.ProcessEnv = {}
+  ) {
     this.projectRoot = projectRoot;
     this.isPackaged = isPackaged;
     this.resourcesPath = resourcesPath;
+    this.extraEnv = extraEnv;
     this.spawn();
   }
 
@@ -53,7 +61,7 @@ export class PythonBridge {
       cmd = path.join(this.resourcesPath, "iris-rpc", exeName);
       args = [];
       cwd = path.join(this.resourcesPath, "iris-rpc");
-      env = { ...process.env, PYTHONUNBUFFERED: "1" };
+      env = { ...process.env, ...this.extraEnv, PYTHONUNBUFFERED: "1" };
       console.log(`[python-bridge] production mode, spawning: ${cmd}`);
     } else {
       const venvBin = process.platform === "win32" ? "Scripts" : "bin";
@@ -63,6 +71,7 @@ export class PythonBridge {
       cwd = this.projectRoot;
       env = {
         ...process.env,
+        ...this.extraEnv,
         PYTHONPATH: path.join(this.projectRoot, "src"),
         PYTHONUNBUFFERED: "1",
       };

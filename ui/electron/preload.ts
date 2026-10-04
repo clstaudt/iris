@@ -17,5 +17,10 @@ contextBridge.exposeInMainWorld("iris", {
 
   micStatus: () => ipcRenderer.invoke("mic-status"),
 
+  isPackaged: () => ipcRenderer.invoke("is-packaged"),
+
+  /** The system's folder picker; resolves to the chosen path, or null */
+  chooseFolder: (title: string) => ipcRenderer.invoke("choose-folder", title),
+
   platform: process.platform,
 });
