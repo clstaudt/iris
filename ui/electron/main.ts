@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, systemPreferences } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage, shell, systemPreferences } from "electron";
 import path from "node:path";
 import { PythonBridge } from "./python-bridge";
 
@@ -6,6 +6,9 @@ import { PythonBridge } from "./python-bridge";
 declare const __dirname: string;
 
 let mainWindow: BrowserWindow | null = null;
+
+// The iris icon, rendered by `npm run icon` (scripts/icon) into ui/build
+const ICON_PATH = path.join(__dirname, "../build/icon.png");
 let pythonBridge: PythonBridge | null = null;
 
 function createWindow() {
@@ -19,6 +22,7 @@ function createWindow() {
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 16 },
     backgroundColor: "#121316",
+    icon: ICON_PATH, // Windows and Linux; macOS takes the Dock icon below
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -81,6 +85,11 @@ async function ensureMicrophoneAccess(): Promise<string> {
 }
 
 app.whenReady().then(async () => {
+  // A packaged app gets its icon from the bundle; in development the Dock
+  // would otherwise show Electron's default
+  const icon = nativeImage.createFromPath(ICON_PATH);
+  if (process.platform === "darwin" && !icon.isEmpty()) app.dock?.setIcon(icon);
+
   const micStatus = await ensureMicrophoneAccess();
   const isPackaged = app.isPackaged;
   const projectRoot = isPackaged

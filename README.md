@@ -273,6 +273,8 @@ npm install             # once
 npm run dev             # starts Vite + Electron + the Python core
 ```
 
+The app icon is the fully open iris of that startup animation, drawn by the same code (`ui/src/lib/iris.ts`). `npm run icon` re-renders `ui/build/icon.png` and, on macOS, `icon.icns`.
+
 Iris starts listening as soon as the models are loaded. Speaking and typing share one conversation:
 
 - Typed and spoken messages are answered one at a time, in order. A message sent while Iris is still answering waits as a queued bubble.
