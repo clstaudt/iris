@@ -19,7 +19,7 @@ from rich.text import Text
 
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
 from iris.events import EventBus
-from iris.llm import ConversationManager, effective_host
+from iris.llm import ConversationManager, effective_host, speech_break
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.tools import Tools
@@ -561,18 +561,14 @@ class VoiceAssistant:
                         text_buffer = parts[1] if len(parts) > 1 else ""
                         should_speak = True
 
-                    # Otherwise check if we have enough text with sentence ending
+                    # Otherwise check if we have enough text with sentence
+                    # ending or line break (a list item ends at its line)
                     elif len(text_buffer) > min_length:
-                        search_text = text_buffer[:search_length]
-                        last_period = max(
-                            search_text.rfind(". "),
-                            search_text.rfind("! "),
-                            search_text.rfind("? "),
-                        )
+                        cut = speech_break(text_buffer, min_sentence_pos, search_length)
 
-                        if last_period > min_sentence_pos:
-                            text_to_speak = text_buffer[: last_period + 1].strip()
-                            text_buffer = text_buffer[last_period + 2 :]
+                        if cut > 0:
+                            text_to_speak = text_buffer[:cut].strip()
+                            text_buffer = text_buffer[cut:]
                             should_speak = True
 
                     # Speak the chunk (queue it for sequential playback)
