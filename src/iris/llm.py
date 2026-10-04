@@ -16,6 +16,8 @@ warnings.filterwarnings("ignore")
 
 # Fallback shown when neither a server URL nor OLLAMA_HOST is configured
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
+# Rounds of tool calls one reply may take, e.g. a search, then reading a page
+MAX_TOOL_ROUNDS = 3
 
 
 def normalize_host(url: Optional[str]) -> Optional[str]:
@@ -43,6 +45,108 @@ def ollama_client(host: Optional[str] = None, **kwargs):
 def effective_host(host: Optional[str]) -> str:
     """The server URL actually in use, for display."""
     return normalize_host(host) or os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_URL
+
+
+# Markup some models write into a reply that is never meant to be spoken:
+# their reasoning, and tool calls typed out as text instead of made
+UNSPOKEN_TAGS = ("think", "tool_call")
+
+
+class UnspokenFilter:
+    """Drops <think>...</think> and <tool_call>...</tool_call> from streamed
+    text. A tag can be split across chunks, so text that might start one is
+    held back until the next chunk shows whether it does."""
+
+    def __init__(self):
+        self.held = ""
+        self.closing = None  # the closing tag being waited for
+
+    def feed(self, text: str) -> str:
+        self.held += text
+        out = []
+        while self.held:
+            if self.closing:
+                end = self.held.find(self.closing)
+                if end < 0:
+                    # Keep only what could be the start of the closing tag
+                    self.held = self.held[-(len(self.closing) - 1) :]
+                    break
+                self.held = self.held[end + len(self.closing) :]
+                self.closing = None
+                continue
+            start = self.held.find("<")
+            if start < 0:
+                out.append(self.held)
+                self.held = ""
+                break
+            out.append(self.held[:start])
+            self.held = self.held[start:]
+            tag = next((t for t in UNSPOKEN_TAGS if self.held.startswith(f"<{t}>")), None)
+            if tag:
+                self.held = self.held[len(tag) + 2 :]
+                self.closing = f"</{tag}>"
+            elif any(f"<{t}>".startswith(self.held) for t in UNSPOKEN_TAGS):
+                break  # may still become a tag
+            else:
+                out.append("<")
+                self.held = self.held[1:]
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Text held back at the end; an unclosed tag is dropped."""
+        rest = "" if self.closing else self.held
+        self.held, self.closing = "", None
+        return rest
+
+
+def strip_unspoken(text: str) -> str:
+    unspoken = UnspokenFilter()
+    return (unspoken.feed(text) + unspoken.flush()).strip()
+
+
+# A bullet or numbered list marker at the start of a line
+LIST_ITEM = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
+# A line already ending in punctuation that makes the voice pause, perhaps
+# followed by closing quotes or brackets
+PAUSED_END = re.compile(r"[.!?…:;,][\"'”’)\]]*$")
+# Where streamed text may be cut for speech: after a sentence or at a line
+SPEECH_BREAK = re.compile(r"[.!?](?= )|\n")
+# The number of a numbered list item, which looks like a sentence end
+LIST_NUMBER = re.compile(r"(?:^|\n)\s*\d+\.$")
+
+
+def separate_lists(text: str) -> str:
+    """Put a blank line before each list, which markdown needs to see one;
+    models often start a list right under the line introducing it."""
+    lines = text.split("\n")
+    for i in range(len(lines) - 1, 0, -1):
+        above = lines[i - 1]
+        if LIST_ITEM.match(lines[i]) and above.strip() and not LIST_ITEM.match(above):
+            lines.insert(i, "")
+    return "\n".join(lines)
+
+
+def pause_at_line_ends(text: str) -> str:
+    """End every line with punctuation the voice pauses at.
+
+    The voice reads a line break as a space, so list items, headings and
+    paragraphs without closing punctuation would run into one sentence.
+    """
+    lines = [line.rstrip() for line in text.split("\n")]
+    return "\n".join(
+        line + "." if line.strip() and not PAUSED_END.search(line) else line
+        for line in lines
+    )
+
+
+def speech_break(text: str, start: int, end: int) -> int:
+    """Index after the last sentence end or line break in text[start:end],
+    where the text can be cut for speech, or -1 if there is none."""
+    cut = -1
+    for match in SPEECH_BREAK.finditer(text, start, end):
+        if not LIST_NUMBER.search(text, 0, match.end()):
+            cut = match.end()
+    return cut
 
 
 class ConversationManager:
@@ -231,7 +335,7 @@ class ConversationManager:
             Clean text suitable for speech
         """
         # First convert markdown to plain text
-        html = markdown.markdown(text)
+        html = markdown.markdown(separate_lists(text))
         clean_text = BeautifulSoup(html, "html.parser").get_text()
 
         # Remove emojis using regex (matches all emoji characters)
@@ -248,7 +352,7 @@ class ConversationManager:
         )
         clean_text = emoji_pattern.sub("", clean_text)
 
-        return clean_text.strip()
+        return pause_at_line_ends(clean_text).strip()
 
     def summarize_old_messages(self, messages: list) -> str:
         """
@@ -322,6 +426,9 @@ class ConversationManager:
 
     def _record(self, prompt: str, answer: str, source: Optional[str]):
         """Keep the exchange: in memory when there is one, else in history."""
+        # Only what was said: a tool call typed out as text, left in the
+        # history, would be imitated in later replies
+        answer = strip_unspoken(answer)
         if self.memory is not None and self.amnesia:
             self.unremembered.append({"role": "user", "content": prompt})
             self.unremembered.append({"role": "assistant", "content": answer})
@@ -482,8 +589,18 @@ class ConversationManager:
             on_tool_use: Optional callback(tool_name, tool_args) called before each tool executes
 
         Yields:
-            Chunks of response text
+            Chunks of response text, without reasoning or tool calls a model
+            wrote out as text
         """
+        unspoken = UnspokenFilter()
+        for chunk in self._reply_stream(prompt, response_language, on_tool_use, source):
+            if text := unspoken.feed(chunk):
+                yield text
+        if rest := unspoken.flush():
+            yield rest
+
+    def _reply_stream(self, prompt: str, response_language: str, on_tool_use, source):
+        """The model's reply as it streams in, tool rounds included."""
         # Language names for the LLM instruction
         _lang_names = {
             "en": "English", "fr": "French", "it": "Italian",
@@ -531,81 +648,107 @@ class ConversationManager:
 
             # If LLM wants to use tools, execute them and get new response
             if tool_calls:
-                # Build message with tool call
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": "".join(full_response),
-                        "tool_calls": tool_calls,
-                    }
-                )
+                spoken = []
+                rounds = 0
+                while tool_calls:
+                    rounds += 1
+                    # Build message with tool call
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": "".join(full_response),
+                            "tool_calls": tool_calls,
+                        }
+                    )
 
-                # Check if any tool is a vision tool (look/camera)
-                uses_vision = False
-                for tool_call in tool_calls:
-                    tool_name = tool_call["function"]["name"]
-                    tool_args = tool_call["function"].get("arguments", {})
+                    # Check if any tool is a vision tool (look/camera)
+                    uses_vision = False
+                    for tool_call in tool_calls:
+                        tool_name = tool_call["function"]["name"]
+                        tool_args = tool_call["function"].get("arguments", {})
 
-                    # Check if this is a vision tool and set status BEFORE executing
-                    if tool_name == "look":
-                        uses_vision = True
-                        # Set looking status immediately when we know LLM wants to look
-                        if self.tools.status_manager:
-                            with self.tools.status_manager.status_lock:
-                                self.tools.status_manager.status_looking = True
-                    elif tool_name == "capture_screen":
-                        uses_vision = True
-                        if self.tools.status_manager:
-                            with self.tools.status_manager.status_lock:
-                                self.tools.status_manager.status_capturing_screen = True
+                        # Check if this is a vision tool and set status BEFORE executing
+                        if tool_name == "look":
+                            uses_vision = True
+                            # Set looking status immediately when we know LLM wants to look
+                            if self.tools.status_manager:
+                                with self.tools.status_manager.status_lock:
+                                    self.tools.status_manager.status_looking = True
+                        elif tool_name == "capture_screen":
+                            uses_vision = True
+                            if self.tools.status_manager:
+                                with self.tools.status_manager.status_lock:
+                                    self.tools.status_manager.status_capturing_screen = True
 
-                    if on_tool_use:
-                        on_tool_use(tool_name, tool_args)
+                        if on_tool_use:
+                            on_tool_use(tool_name, tool_args)
 
-                    # Execute the tool
-                    result = self.tools.execute(tool_name, **tool_args)
-                    if tool_name == "recall" and result.get("success"):
-                        self.pinned[result["topic_id"]] = PIN_TURNS
+                        # Execute the tool
+                        result = self.tools.execute(tool_name, **tool_args)
+                        if tool_name == "recall" and result.get("success"):
+                            self.pinned[result["topic_id"]] = PIN_TURNS
 
-                    # Format tool response for LLM
-                    tool_msg = {"role": "tool", "content": ""}
+                        # Format tool response for LLM
+                        tool_msg = {"role": "tool", "content": ""}
 
-                    # Check if tool execution failed
-                    if not result.get("success"):
-                        # Tool failed - tell LLM about the error
-                        tool_msg["content"] = (
-                            f"Error: {result.get('message', 'Tool execution failed')}"
-                        )
+                        # Check if tool execution failed
+                        if not result.get("success"):
+                            # Tool failed - tell LLM about the error
+                            tool_msg["content"] = (
+                                f"Error: {result.get('message', 'Tool execution failed')}"
+                            )
+                            messages.append(tool_msg)
+                            continue
+
+                        # If tool returned an image, include it
+                        if result.get("image"):
+                            tool_msg["images"] = [result["image"]]
+                            tool_msg["content"] = result.get("message", "Image captured")
+                        elif result.get("result"):
+                            tool_msg["content"] = str(result["result"])
+                        else:
+                            tool_msg["content"] = result.get("message", "Tool executed")
+
                         messages.append(tool_msg)
-                        continue
 
-                    # If tool returned an image, include it
-                    if result.get("image"):
-                        tool_msg["images"] = [result["image"]]
-                        tool_msg["content"] = result.get("message", "Image captured")
-                    elif result.get("result"):
-                        tool_msg["content"] = str(result["result"])
-                    else:
-                        tool_msg["content"] = result.get("message", "Tool executed")
+                    # Choose model: use vision model if vision was used, otherwise primary model
+                    response_model = (
+                        self.vision_model if (uses_vision and self.vision_model) else self.model
+                    )
 
-                    messages.append(tool_msg)
+                    # Tools stay on offer, so a search can be followed by reading
+                    # a page: without them a model writes its next call out as
+                    # text, which would be shown and spoken. A separate vision
+                    # model, and the last round, answer without tools.
+                    offer_tools = rounds < MAX_TOOL_ROUNDS and response_model == self.model
+                    extra = {"tools": self.tools.get_schemas()} if offer_tools else {}
+                    if not offer_tools:
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": "Answer the user now from what you have. "
+                                "No more tools can be used.",
+                            }
+                        )
+                    stream = self.client.chat(
+                        model=response_model, messages=messages, stream=True, **extra
+                    )
 
-                # Choose model: use vision model if vision was used, otherwise primary model
-                response_model = (
-                    self.vision_model if (uses_vision and self.vision_model) else self.model
-                )
-
-                # Now get final response with tool results (streaming)
-                stream = self.client.chat(model=response_model, messages=messages, stream=True)
-
-                full_response = []
-                for chunk in stream:
-                    chunk_text = chunk["message"]["content"]
-                    full_response.append(chunk_text)
-                    yield chunk_text
+                    # Stream the answer as it comes; a round may end in more
+                    # tool calls instead
+                    full_response, tool_calls = [], None
+                    for chunk in stream:
+                        message_chunk = chunk.get("message", {})
+                        chunk_text = message_chunk.get("content") or ""
+                        if chunk_text:
+                            full_response.append(chunk_text)
+                            spoken.append(chunk_text)
+                            yield chunk_text
+                        if message_chunk.get("tool_calls"):
+                            tool_calls = message_chunk["tool_calls"]
 
                 # Store in history
-                answer = "".join(full_response)
+                answer = "".join(spoken)
                 self._record(prompt, answer, source)
                 return
             else:

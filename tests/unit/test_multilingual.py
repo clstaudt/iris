@@ -268,7 +268,7 @@ class TestLLMLanguageInstruction:
         call_args = mock_ollama.chat.call_args
         messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
         system_msgs = [m for m in messages if m["role"] == "system"]
-        lang_instructions = [m for m in system_msgs if "French" in m.get("content", "")]
+        lang_instructions = [m for m in system_msgs if "Respond in French" in m.get("content", "")]
         assert len(lang_instructions) == 1
 
     @patch("iris.llm.ollama")
