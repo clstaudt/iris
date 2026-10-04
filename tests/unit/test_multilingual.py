@@ -188,7 +188,8 @@ class TestSpeechPipelineLanguage:
         pipeline.current_language = "ja"
         pipeline.text_queue = MagicMock()
         pipeline.queue_speech("テスト")
-        pipeline.text_queue.put.assert_called_once_with(("テスト", "ja"))
+        # (text, language, the speech epoch it was queued in)
+        pipeline.text_queue.put.assert_called_once_with(("テスト", "ja", 0))
         pipeline.stop()
 
 

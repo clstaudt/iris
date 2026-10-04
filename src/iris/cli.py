@@ -56,6 +56,11 @@ def main():
         help="Device for Whisper (default: auto)",
     )
     parser.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Do not keep the conversation in long-term memory (~/.iris/memory.db)",
+    )
+    parser.add_argument(
         "--skip-setup",
         action="store_true",
         help="Skip the setup wizard (assume all dependencies are ready)",
@@ -118,6 +123,7 @@ def main():
             vision_model=args.vision_model,
             enable_screen_capture=args.enable_screen_capture,
             enable_web_search=args.enable_web_search,
+            memory=not args.no_memory,
         )
 
         assistant.run_loop()

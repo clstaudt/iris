@@ -18,6 +18,7 @@ Event types:
     chat.done    {"text": str, "interrupted": bool}
     tool.use     {"tool": str, "detail": str}
     error        {"message": str, "kind": str}         kind is optional
+    memory.updated {}                                topics were filed or forgotten
 """
 
 import threading

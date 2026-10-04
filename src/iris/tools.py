@@ -10,6 +10,8 @@ from io import BytesIO
 
 import numpy as np
 
+from iris.memory import RECALL_TOKENS, MemoryStore, estimate_tokens, relative_day
+
 logger = logging.getLogger(__name__)
 
 # Suppress OpenCV/AVCapture warnings
@@ -65,6 +67,7 @@ class Tools:
         self.console = console
         self.status_manager = status_manager
         self._camera = None
+        self._memory: MemoryStore | None = None
         self._enabled_tools = {}
 
     def enable_camera(self):
@@ -409,6 +412,89 @@ class Tools:
             if self.status_manager:
                 with self.status_manager.status_lock:
                     self.status_manager.status_capturing_screen = False
+
+    def enable_memory(self, store: MemoryStore):
+        """Enable recall and search_memory over long-term memory.
+
+        The topic index in the system prompt tells the model what it
+        remembers; these tools are how it fetches the details.
+        """
+        self._memory = store
+        self._enabled_tools["recall"] = {
+            "function": self._recall,
+            "schema": {
+                "type": "function",
+                "function": {
+                    "name": "recall",
+                    "description": (
+                        "Load an earlier conversation from memory by its topic number"
+                        " (#id in the memory index). Use it whenever the user refers to"
+                        " something discussed before that is not in the recent messages."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "topic_id": {"type": "integer", "description": "Topic number"}
+                        },
+                        "required": ["topic_id"],
+                    },
+                },
+            },
+        }
+        self._enabled_tools["search_memory"] = {
+            "function": self._search_memory,
+            "schema": {
+                "type": "function",
+                "function": {
+                    "name": "search_memory",
+                    "description": (
+                        "Search everything ever said in earlier conversations for words,"
+                        " names or details that the memory index does not show."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Words to look for"}
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+        }
+        return True
+
+    def _recall(self, topic_id=None, **kwargs) -> dict:
+        try:
+            topic = self._memory.topic(int(topic_id))
+        except (TypeError, ValueError):
+            topic = None
+        if topic is None:
+            return {"success": False, "message": f"No topic #{topic_id} in memory"}
+        # The summary, then as many of the latest exchanges as fit
+        excerpts, used = [], 0
+        for turn in reversed(topic.turns):
+            line = f"{turn['role'].capitalize()} ({relative_day(turn['ts'])}): {turn['text']}"
+            if used + estimate_tokens(line) > RECALL_TOKENS:
+                break
+            excerpts.append(line)
+            used += estimate_tokens(line)
+        text = (
+            f"Memory #{topic.id} {topic.title}\nSummary: {topic.summary}\n\n"
+            "Latest exchanges:\n" + "\n".join(reversed(excerpts))
+        )
+        return {"success": True, "result": text, "topic_id": topic.id, "title": topic.title}
+
+    def _search_memory(self, query: str = "", **kwargs) -> dict:
+        hits = self._memory.search(query)
+        if not hits:
+            return {"success": True, "result": f"Nothing in memory matches '{query}'."}
+        lines = [
+            f"- {relative_day(h['ts'])}, "
+            f"{'#' + str(h['topic_id']) + ' ' + h['title'] if h['topic_id'] else 'no topic'}: "
+            f"{h['snippet']}"
+            for h in hits
+        ]
+        return {"success": True, "result": f"Memory matches for '{query}':\n" + "\n".join(lines)}
 
     def get_schemas(self) -> list[dict]:
         """

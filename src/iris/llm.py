@@ -9,6 +9,7 @@ import markdown
 import ollama
 from bs4 import BeautifulSoup
 
+from iris.memory import LIVE_TOKENS, PIN_TURNS, PINNED_TOKENS, MemoryKeeper, estimate_tokens
 from iris.personas import Persona, get_persona
 
 warnings.filterwarnings("ignore")
@@ -55,6 +56,7 @@ class ConversationManager:
         vision_model: Optional[str] = None,
         quiet: bool = True,
         host: Optional[str] = None,
+        memory: Optional[MemoryKeeper] = None,
     ):
         """
         Initialize conversation manager.
@@ -66,9 +68,18 @@ class ConversationManager:
             vision_model: Optional vision model to switch to when using vision tools
             quiet: If True, suppress verbose output (setup wizard handles this)
             host: Ollama server URL; None follows OLLAMA_HOST
+            memory: Long-term memory; when given, the conversation is stored
+                and the context is built from it (see iris.memory)
         """
         self.host = normalize_host(host)
         self.client = ollama_client(self.host)
+        self.memory = memory
+        # Recalled topics stay in context for a few turns: {topic_id: turns left}
+        self.pinned: dict[int, int] = {}
+        # Amnesia mode: the conversation goes on, but nothing of it is
+        # written to memory; its turns live here and vanish when it ends
+        self.amnesia = False
+        self.unremembered: list[dict] = []
         self.model = model
         self.vision_model = vision_model
         self.conversation_history = []
@@ -273,6 +284,61 @@ class ConversationManager:
             # Fallback: just take first message of each type
             return "Previous conversation context."
 
+    def _memory_context(self) -> str:
+        """The memory part of the system prompt: what Iris remembers (the
+        topic index) and the topics it recalled in the last few turns."""
+        store = self.memory.store
+        lines = store.index_lines()
+        text = (
+            "\n\nYou remember earlier conversations with the user. They are listed below "
+            "by topic. When the user refers to something from before that is not in the "
+            "recent messages, call 'recall' with the topic number before you answer, and "
+            "use 'search_memory' for details the list does not show. Never pretend to "
+            "remember what you have not recalled.\n\nMemory index:\n"
+            + ("\n".join(lines) if lines else "(nothing yet)")
+        )
+        used = 0
+        for topic_id in list(self.pinned):
+            topic = store.topic(topic_id)
+            if topic is None:
+                del self.pinned[topic_id]
+                continue
+            block = f"\n\nRecalled #{topic.id} {topic.title}: {topic.summary}"
+            if used + estimate_tokens(block) > PINNED_TOKENS:
+                break
+            text += block
+            used += estimate_tokens(block)
+        return text
+
+    def set_amnesia(self, on: bool):
+        """Stop (or resume) writing the conversation to memory. Turns spoken
+        in amnesia mode are forgotten entirely once it ends."""
+        self.amnesia = bool(on)
+        self.unremembered = []
+
+    def _record(self, prompt: str, answer: str, source: Optional[str]):
+        """Keep the exchange: in memory when there is one, else in history."""
+        if self.memory is not None and self.amnesia:
+            self.unremembered.append({"role": "user", "content": prompt})
+            self.unremembered.append({"role": "assistant", "content": answer})
+            return
+        if self.memory is None:
+            self.conversation_history.append({"role": "user", "content": prompt})
+            self.conversation_history.append({"role": "assistant", "content": answer})
+            return
+        self.memory.store.add_turn("user", prompt, source)
+        self.memory.store.add_turn("assistant", answer)
+        self.memory.note_turn()
+
+    def add_note(self, text: str):
+        """A system note in the conversation, e.g. that the persona changed."""
+        if self.memory is not None and self.amnesia:
+            self.unremembered.append({"role": "system", "content": text})
+        elif self.memory is None:
+            self.conversation_history.append({"role": "system", "content": text})
+        else:
+            self.memory.store.add_turn("system", text)
+
     def manage_context(self) -> list:
         """
         Manage conversation history to fit within context window.
@@ -330,6 +396,22 @@ class ConversationManager:
 
             system_content += tool_instructions
 
+        if self.memory is not None:
+            system_content += self._memory_context()
+            # The live thread: stored turns, then any held back by amnesia
+            # mode, together within the live budget
+            unremembered, used = [], 0
+            for turn in reversed(self.unremembered):
+                used += estimate_tokens(turn["content"])
+                if unremembered and used > LIVE_TOKENS:
+                    break
+                unremembered.insert(0, turn)
+            stored = [
+                {"role": turn["role"], "content": turn["text"]}
+                for turn in self.memory.store.recent_turns(max(0, LIVE_TOKENS - used))
+            ]
+            return [{"role": "system", "content": system_content}] + stored + unremembered
+
         system_prompt = {
             "role": "system",
             "content": system_content,
@@ -382,7 +464,9 @@ class ConversationManager:
 
         return managed_messages
 
-    def chat_stream(self, prompt: str, response_language: str = "en", on_tool_use=None):
+    def chat_stream(
+        self, prompt: str, response_language: str = "en", on_tool_use=None, source=None
+    ):
         """
         Send prompt to LLM and stream response with tool support.
         Automatically switches to vision model when vision tools are used.
@@ -401,6 +485,9 @@ class ConversationManager:
             "en": "English", "fr": "French", "it": "Italian",
             "ja": "Japanese", "zh": "Chinese (Mandarin)",
         }
+
+        # Recalled topics fade from context after a few turns
+        self.pinned = {t: n - 1 for t, n in self.pinned.items() if n > 1}
 
         # Get managed conversation context
         messages = self.manage_context()
@@ -473,6 +560,8 @@ class ConversationManager:
 
                     # Execute the tool
                     result = self.tools.execute(tool_name, **tool_args)
+                    if tool_name == "recall" and result.get("success"):
+                        self.pinned[result["topic_id"]] = PIN_TURNS
 
                     # Format tool response for LLM
                     tool_msg = {"role": "tool", "content": ""}
@@ -513,8 +602,7 @@ class ConversationManager:
 
                 # Store in history
                 answer = "".join(full_response)
-                self.conversation_history.append({"role": "user", "content": prompt})
-                self.conversation_history.append({"role": "assistant", "content": answer})
+                self._record(prompt, answer, source)
                 return
             else:
                 # No tools needed - yield the response we already collected
@@ -523,8 +611,7 @@ class ConversationManager:
                     if chunk_text:
                         yield chunk_text
 
-                self.conversation_history.append({"role": "user", "content": prompt})
-                self.conversation_history.append({"role": "assistant", "content": answer})
+                self._record(prompt, answer, source)
                 return
 
         # No tools - standard streaming
@@ -540,5 +627,4 @@ class ConversationManager:
         answer = "".join(full_response)
         answer_clean = self.clean_markdown(answer)
 
-        self.conversation_history.append({"role": "user", "content": prompt})
-        self.conversation_history.append({"role": "assistant", "content": answer_clean})
+        self._record(prompt, answer_clean, source)

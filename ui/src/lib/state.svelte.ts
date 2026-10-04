@@ -29,6 +29,28 @@ export interface ChatMessage {
   kind?: string;
 }
 
+/** A topic in long-term memory, as listed in the memory panel. */
+export interface MemoryTopic {
+  id: number;
+  title: string;
+  gist: string;
+  updated: number;
+  turns: number;
+}
+
+export interface MemoryTurn {
+  id: number;
+  ts: number;
+  role: "user" | "assistant" | "system";
+  text: string;
+  source: "voice" | "text" | null;
+}
+
+export interface MemoryTopicDetail extends Omit<MemoryTopic, "turns"> {
+  summary: string;
+  turns: MemoryTurn[];
+}
+
 /** A typed message waiting for the current turn to finish. */
 export interface PendingTurn {
   id: string;
@@ -100,6 +122,8 @@ export interface AssistantConfig {
   ollama_url?: string;
   mic_on?: boolean;
   paused?: boolean;
+  memory?: boolean;
+  amnesia?: boolean;
   tools?: Record<string, ToolState>;
 }
 
@@ -111,6 +135,7 @@ interface SavedSettings {
   speak_replies?: boolean;
   tools?: Record<string, boolean>;
   ollama_host?: string;
+  amnesia?: boolean;
 }
 
 const SETTINGS_KEY = "iris.settings";
@@ -144,7 +169,9 @@ class IrisStore {
   messages = $state<ChatMessage[]>([]);
   pending = $state<PendingTurn[]>([]);
   speakReplies = $state(true);
-  settingsOpen = $state(false);
+  /** The side panel beside the conversation, if one is open */
+  panel = $state<"settings" | "memory" | null>(null);
+  memoryTopics = $state<MemoryTopic[]>([]);
 
   /** Mic input level, driving the meter and spinner while listening. */
   level = $state(0);
@@ -167,6 +194,10 @@ class IrisStore {
 
   get paused() {
     return this.state === "paused";
+  }
+
+  get amnesia() {
+    return this.config?.amnesia ?? false;
   }
 
   handleEvent(type: string, data: Record<string, unknown>) {
@@ -240,6 +271,10 @@ class IrisStore {
         break;
       }
 
+      case "memory.updated":
+        if (this.panel === "memory") this.loadMemory();
+        break;
+
       case "tool.use":
         this.messages.push({
           role: "tool",
@@ -291,6 +326,13 @@ class IrisStore {
     await rpc("mic.set", { on: !this.micOn });
   }
 
+  /** While on, nothing of the conversation is written to memory. */
+  async toggleAmnesia() {
+    const on = !this.amnesia;
+    saveSettings({ amnesia: on });
+    await rpc("memory.set_amnesia", { on });
+  }
+
   /** Pause or resume the whole conversation: listening, reply and speech. */
   async togglePause() {
     await rpc(this.paused ? "assistant.resume" : "assistant.pause");
@@ -311,6 +353,26 @@ class IrisStore {
     this.persona = name;
     saveSettings({ persona: name });
     await rpc("persona.set", { name });
+  }
+
+  togglePanel(name: "settings" | "memory") {
+    this.panel = this.panel === name ? null : name;
+    if (this.panel === "memory") this.loadMemory();
+  }
+
+  async loadMemory() {
+    const result = await rpc<{ topics: MemoryTopic[] }>("memory.topics");
+    this.memoryTopics = result.topics;
+  }
+
+  async memoryTopic(id: number): Promise<MemoryTopicDetail | null> {
+    const result = await rpc<MemoryTopicDetail & { ok: boolean }>("memory.topic", { id });
+    return result.ok ? result : null;
+  }
+
+  async forgetTopic(id: number) {
+    await rpc("memory.forget", { id });
+    await this.loadMemory();
   }
 
   async setTool(name: string, enabled: boolean) {
@@ -410,6 +472,7 @@ class IrisStore {
         if (saved.speak_replies !== undefined) options.speak_replies = saved.speak_replies;
         if (saved.tools) options.tools = saved.tools;
         if (saved.ollama_host) options.ollama_host = saved.ollama_host;
+        if (saved.amnesia) options.amnesia = true;
         this.speakReplies = saved.speak_replies ?? true;
         await rpc("assistant.start", options);
       }

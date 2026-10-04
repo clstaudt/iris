@@ -203,6 +203,7 @@ class AssistantController:
         persona_name = kwargs.pop("persona", "iris")
         # {group: enabled} chosen in the UI; applied once the tools exist
         tool_choices = kwargs.pop("tools", {}) or {}
+        amnesia = bool(kwargs.pop("amnesia", False))
 
         # The GUI has no CLI flags, so tools are on by default; each one
         # degrades to a warning if its optional dependencies are missing.
@@ -222,7 +223,9 @@ class AssistantController:
             if self.assistant.tools is not None:
                 for group, enabled in tool_choices.items():
                     self.assistant.tools.set_group(group, bool(enabled))
+            self.assistant.conversation.set_amnesia(amnesia)
             self.bus.emit("config", self.assistant.config_info())
+            self._restore_thread()
         except Exception as e:
             self.bus.emit("error", {"message": f"Failed to start assistant: {e}"})
             self._publish_state("idle")
@@ -338,6 +341,69 @@ class AssistantController:
         self._turns.put({"audio": path})
         return {"ok": True}
 
+    def _restore_thread(self):
+        """Show the recent part of the continuous conversation after a restart."""
+        memory = getattr(self.assistant, "memory", None)
+        if memory is None:
+            return
+        for turn in memory.store.recent_turns():
+            if turn["role"] == "user":
+                self.bus.emit("chat.user", {"text": turn["text"], "source": turn["source"]})
+            elif turn["role"] == "assistant":
+                self.bus.emit("chat.done", {"text": turn["text"], "interrupted": False})
+
+    def memory_topics(self) -> dict:
+        """The topics Iris remembers, most recently discussed first."""
+        memory = getattr(self.assistant, "memory", None)
+        if memory is None:
+            return {"topics": []}
+        counts = memory.store.turn_counts()
+        return {
+            "topics": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "gist": t.gist,
+                    "updated": t.updated,
+                    "turns": counts.get(t.id, 0),
+                }
+                for t in memory.store.topics()
+            ]
+        }
+
+    def memory_topic(self, topic_id: int) -> dict:
+        """One topic with its summary and every turn filed under it."""
+        memory = getattr(self.assistant, "memory", None)
+        topic = memory.store.topic(int(topic_id)) if memory else None
+        if topic is None:
+            return {"ok": False, "error": f"No topic {topic_id}"}
+        return {
+            "ok": True,
+            "id": topic.id,
+            "title": topic.title,
+            "gist": topic.gist,
+            "summary": topic.summary,
+            "updated": topic.updated,
+            "turns": topic.turns,
+        }
+
+    def set_amnesia(self, on: bool) -> dict:
+        """While on, nothing of the conversation is written to memory."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        self.assistant.conversation.set_amnesia(on)
+        self.bus.emit("config", self.assistant.config_info())
+        return {"ok": True}
+
+    def memory_forget(self, topic_id: int) -> dict:
+        """Delete a topic and everything filed under it."""
+        memory = getattr(self.assistant, "memory", None)
+        if memory is None:
+            return {"ok": False, "error": "Memory is off"}
+        memory.store.forget(int(topic_id))
+        self.bus.emit("memory.updated", {})
+        return {"ok": True}
+
     def _warn_if_model_missing(self):
         """Report a missing Ollama model up front rather than on first reply."""
         available = [
@@ -437,16 +503,10 @@ class AssistantController:
         assistant.conversation.persona = persona
         # The history still holds the old persona's replies, which small
         # models happily continue; tell the model the voice has changed hands
-        if assistant.conversation.conversation_history and previous != persona.name:
-            assistant.conversation.conversation_history.append(
-                {
-                    "role": "system",
-                    "content": (
-                        f"You are now {persona.name}. Earlier replies in this "
-                        f"conversation were given by {previous}; do not continue "
-                        f"{previous}'s name or manner."
-                    ),
-                }
+        if previous != persona.name:
+            assistant.conversation.add_note(
+                f"You are now {persona.name}. Earlier replies in this conversation "
+                f"were given by {previous}; do not continue {previous}'s name or manner."
             )
         assistant.tts_generator.voice = persona.voice
         assistant.tts_generator.speed = persona.speed

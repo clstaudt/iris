@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import Composer from "./components/Composer.svelte";
   import Icon from "./components/Icon.svelte";
+  import Memory from "./components/Memory.svelte";
   import Settings from "./components/Settings.svelte";
   import StatusZone from "./components/StatusZone.svelte";
   import Transcript from "./components/Transcript.svelte";
@@ -16,15 +17,28 @@
   <!-- Drag region for the hidden-inset title bar -->
   <header class="drag-region relative flex h-11 shrink-0 items-center justify-center">
     <span class="text-[13px] font-medium tracking-[0.08em] text-ink-3">iris</span>
-    <button
-      onclick={() => (store.settingsOpen = !store.settingsOpen)}
-      class="no-drag absolute right-3 flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink {store.settingsOpen
-        ? 'bg-hover text-ink'
-        : 'text-ink-3'}"
-      title="Settings"
-    >
-      <Icon name="sliders" size={15} />
-    </button>
+    <div class="no-drag absolute right-3 flex items-center gap-1">
+      <button
+        onclick={() => store.togglePanel("memory")}
+        class="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink {store.panel ===
+        'memory'
+          ? 'bg-hover text-ink'
+          : 'text-ink-3'}"
+        title="Memory"
+      >
+        <Icon name="brain" size={15} />
+      </button>
+      <button
+        onclick={() => store.togglePanel("settings")}
+        class="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink {store.panel ===
+        'settings'
+          ? 'bg-hover text-ink'
+          : 'text-ink-3'}"
+        title="Settings"
+      >
+        <Icon name="sliders" size={15} />
+      </button>
+    </div>
   </header>
 
   <div class="flex min-h-0 flex-1 gap-2 px-2 pb-2">
@@ -35,8 +49,10 @@
       <Composer />
       <StatusZone />
     </section>
-    {#if store.settingsOpen}
+    {#if store.panel === "settings"}
       <Settings />
+    {:else if store.panel === "memory"}
+      <Memory />
     {/if}
   </div>
 </main>

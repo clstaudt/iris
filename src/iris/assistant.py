@@ -1,5 +1,6 @@
 """Voice assistant coordinator that orchestrates all components."""
 
+import os
 import queue
 import sys
 import threading
@@ -16,6 +17,7 @@ from rich.text import Text
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
 from iris.events import EventBus
 from iris.llm import ConversationManager, effective_host
+from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
@@ -23,6 +25,13 @@ from iris.tts import KokoroGenerator, SpeechPipeline, is_language_supported
 from iris.ui import DisplayManager, StatusManager
 
 warnings.filterwarnings("ignore")
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
 
 
 class VoiceAssistant:
@@ -48,6 +57,7 @@ class VoiceAssistant:
         turn_queue: Optional[queue.Queue] = None,
         speak_replies: bool = True,
         ollama_host: Optional[str] = None,
+        memory: bool = True,
     ):
         """
         Initialize the voice assistant.
@@ -73,6 +83,8 @@ class VoiceAssistant:
                 turns share one conversation and never overlap.
             speak_replies: If False, replies are streamed as text only
             ollama_host: Ollama server URL; None follows OLLAMA_HOST
+            memory: Keep one continuous conversation in long-term memory
+                (~/.iris/memory.db, or IRIS_MEMORY_DB), remembered by topic
         """
         # Initialize console
         self.console = Console()
@@ -88,6 +100,9 @@ class VoiceAssistant:
         # Conversation paused: no listening, no new turns, the reply and its
         # speech hold where they are until resumed
         self.suspend_event = threading.Event()
+        # Conversation activity, so background work can give way to it
+        self._turn_active = threading.Event()
+        self._last_voice = 0.0
 
         # Turns submitted by an external UI: {"text": str, "id": str} for typed
         # messages, {"audio": path} for recorded speech
@@ -131,9 +146,23 @@ class VoiceAssistant:
         self.display_manager = DisplayManager(self.console, self.status_manager)
 
         # Setup tools (after status_manager is created)
+        # Long-term memory: filed in the background by the conversation's own
+        # model, recalled by it through the memory tools
+        self.memory: Optional[MemoryKeeper] = None
+        if memory:
+            store = MemoryStore(os.environ.get("IRIS_MEMORY_DB") or DEFAULT_PATH)
+            self.memory = MemoryKeeper(
+                store,
+                chat_json(lambda: self.conversation.host, lambda: self.conversation.model),
+                on_change=lambda: self.event_bus and self.event_bus.emit("memory.updated", {}),
+                busy=self._conversation_busy,
+            )
+
         self.tools = None
-        if enable_vision or enable_screen_capture or enable_web_search:
+        if enable_vision or enable_screen_capture or enable_web_search or self.memory:
             self.tools = Tools(console=self.console, status_manager=self.status_manager)
+            if self.memory:
+                self.tools.enable_memory(self.memory.store)
 
             if enable_vision:
                 if self.tools.enable_camera():
@@ -174,7 +203,10 @@ class VoiceAssistant:
             vision_model=vision_model if (enable_vision or enable_screen_capture) else None,
             quiet=quiet,
             host=ollama_host,
+            memory=self.memory,
         )
+        if self.memory:
+            self.memory.start()
 
     def config_info(self) -> dict:
         """Describe the loaded models and audio input for external UIs."""
@@ -188,6 +220,8 @@ class VoiceAssistant:
             "speak_replies": self.speak_replies,
             "ollama_host": self.conversation.host or "",
             "ollama_url": effective_host(self.conversation.host),
+            "memory": self.memory is not None,
+            "amnesia": self.conversation.amnesia,
             "mic_on": not self.pause_event.is_set(),
             "paused": self.suspend_event.is_set(),
             "tools": self.tools.group_states() if self.tools else {},
@@ -208,8 +242,27 @@ class VoiceAssistant:
         except queue.Empty:
             return None
 
+    def _conversation_busy(self) -> bool:
+        """The conversation is using, or about to use, the LLM: a turn is
+        underway, speech plays, a message waits, a draft is being typed, or
+        the user was just heard speaking."""
+        return (
+            self._turn_active.is_set()
+            or self.speech_pipeline.is_active
+            or self.hold_event.is_set()
+            or not self.turn_queue.empty()
+            or time.monotonic() - self._last_voice < 2.0
+        )
+
     def _run_text_turn(self, turn: dict):
         """Answer a typed message, exactly as if it had been spoken."""
+        self._turn_active.set()
+        try:
+            self._answer_typed(turn)
+        finally:
+            self._turn_active.clear()
+
+    def _answer_typed(self, turn: dict):
         text = turn["text"]
         self.display_manager.show_user_message(text)
         if self.event_bus:
@@ -222,10 +275,17 @@ class VoiceAssistant:
                     "id": turn.get("id"),
                 },
             )
-        self.chat(text, response_language=self.conversation_language)
+        self.chat(text, response_language=self.conversation_language, source="text")
 
     def _run_voice_turn(self, audio_path: str):
         """Transcribe recorded speech and answer it."""
+        self._turn_active.set()
+        try:
+            self._answer_spoken(audio_path)
+        finally:
+            self._turn_active.clear()
+
+    def _answer_spoken(self, audio_path: str):
         with self.status_manager.status_lock:
             self.status_manager.status_understanding = True
         self.status_manager.update_status_bar(self.speech_pipeline)
@@ -254,9 +314,9 @@ class VoiceAssistant:
             )
 
         # Send to LLM (streams response and speaks it)
-        self.chat(text, response_language=response_language)
+        self.chat(text, response_language=response_language, source="voice")
 
-    def chat(self, prompt: str, response_language: str = "en") -> str:
+    def chat(self, prompt: str, response_language: str = "en", source: Optional[str] = None) -> str:
         """
         Send prompt to LLM, stream response, and speak it.
 
@@ -282,13 +342,22 @@ class VoiceAssistant:
 
             def on_tool_use(tool_name, tool_args):
                 detail = tool_args.get("query") or tool_args.get("url", "")
+                if tool_name == "recall" and self.memory:
+                    topic = self.memory.store.topic(_as_int(tool_args.get("topic_id")))
+                    detail = topic.title if topic else ""
                 self.display_manager.show_tool_activity(tool_name, detail)
                 if self.event_bus:
                     self.event_bus.emit("tool.use", {"tool": tool_name, "detail": detail})
 
             interrupted = False
             try:
-                for chunk_text in self.conversation.chat_stream(prompt, response_language=response_language, on_tool_use=on_tool_use):
+                stream = self.conversation.chat_stream(
+                    prompt,
+                    response_language=response_language,
+                    on_tool_use=on_tool_use,
+                    source=source,
+                )
+                for chunk_text in stream:
                     # Paused: stop consuming the reply until resumed (or stopped)
                     while self.suspend_event.is_set() and not self.interrupt_event.is_set():
                         time.sleep(0.05)
@@ -356,7 +425,9 @@ class VoiceAssistant:
                 answer = "".join(full_response)
 
                 if interrupted:
-                    # Cancel any queued/pending speech for this turn
+                    # Stop generating (closing the stream ends the request, so
+                    # the model is free at once) and drop all pending speech
+                    stream.close()
                     self.speech_pipeline.stop()
                     text_buffer = ""
 
@@ -375,8 +446,9 @@ class VoiceAssistant:
                 if not self.status_manager.status_bar_active:
                     self.status_manager.start(self.speech_pipeline)
 
-            # Speak any remaining text that wasn't spoken yet
-            if text_buffer.strip():
+            # Speak any remaining text that wasn't spoken yet, unless the
+            # reply was stopped in the meantime
+            if text_buffer.strip() and not self.interrupt_event.is_set():
                 self._speak(text_buffer)
 
             # Wait for all speech to complete
@@ -492,6 +564,8 @@ class VoiceAssistant:
 
                     def on_audio_level(level: float):
                         """Update audio level display."""
+                        if level * 0.15 > self.recorder.silence_threshold:
+                            self._last_voice = time.monotonic()
                         self.display_manager.update_audio_level_display(level, self.speech_pipeline)
                         # Throttle level events to ~15 Hz for external UIs
                         if self.event_bus:
@@ -552,3 +626,5 @@ class VoiceAssistant:
             self.status_manager.stop()
             if self.tools:
                 self.tools.cleanup()
+            if self.memory:
+                self.memory.stop()
