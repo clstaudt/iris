@@ -143,8 +143,8 @@ def test_typed_turns_queue_before_and_after_start(monkeypatch):
         assert second["id"] != first["id"]
 
         queued = controller.assistant.turn_queue
-        assert queued.get_nowait() == {"text": "hello", "id": first["id"]}
-        assert queued.get_nowait() == {"text": "again", "id": second["id"]}
+        assert queued.get_nowait() == {"text": "hello", "id": first["id"], "attachments": []}
+        assert queued.get_nowait() == {"text": "again", "id": second["id"], "attachments": []}
     finally:
         controller.stop()
 

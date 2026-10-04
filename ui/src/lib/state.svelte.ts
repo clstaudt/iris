@@ -19,6 +19,21 @@ export type AssistantState =
   | "typing"
   | "dormant";
 
+/** A file sent with a typed message, as the conversation shows it. */
+export interface AttachmentInfo {
+  name: string;
+  kind: "image" | "document";
+  mime: string;
+  /** An image's picture, as a URL the page can show */
+  preview?: string;
+}
+
+/** A file waiting in the composer, about to be sent. */
+export interface DraftFile {
+  file: File;
+  info: AttachmentInfo;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant" | "tool" | "error" | "system";
   text: string;
@@ -26,6 +41,8 @@ export interface ChatMessage {
   tool?: string;
   /** How a user turn arrived */
   source?: "voice" | "text";
+  /** Files sent with a typed turn */
+  attachments?: AttachmentInfo[];
   /** Error category, so a resolved warning can be retracted */
   kind?: string;
 }
@@ -56,6 +73,7 @@ export interface MemoryTopicDetail extends Omit<MemoryTopic, "turns"> {
 export interface PendingTurn {
   id: string;
   text: string;
+  attachments: AttachmentInfo[];
 }
 
 /** Orb colors: muted tones, so state reads from the hue without glaring. */
@@ -168,6 +186,23 @@ export interface SetupInfo {
 }
 
 const SETTINGS_KEY = "iris.settings";
+
+/** The file's contents as base64, for the trip to the core. */
+function readBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Free the composer's local picture URLs once nothing shows them. */
+export function releasePreviews(attachments: AttachmentInfo[]) {
+  for (const a of attachments) {
+    if (a.preview?.startsWith("blob:")) URL.revokeObjectURL(a.preview);
+  }
+}
 
 function loadSettings(): SavedSettings {
   try {
@@ -291,6 +326,8 @@ class IrisStore {
         const id = data.id as string | undefined;
         if (id) {
           this.startedTurns.add(id);
+          const waiting = this.pending.find((p) => p.id === id);
+          if (waiting) releasePreviews(waiting.attachments);
           this.pending = this.pending.filter((p) => p.id !== id);
         }
         this.streamingIndex = null;
@@ -298,6 +335,7 @@ class IrisStore {
           role: "user",
           text: (data.text as string) ?? "",
           source: (data.source as "voice" | "text") ?? "voice",
+          attachments: data.attachments as AttachmentInfo[] | undefined,
           streaming: false,
         });
         break;
@@ -384,15 +422,39 @@ class IrisStore {
   // Commands
   // ------------------------------------------------------------------
 
-  async send(text: string) {
+  /** Send a typed message with any files. Returns false, and says why in
+   *  the conversation, when it could not be sent. */
+  async send(text: string, files: DraftFile[] = []): Promise<boolean> {
     const value = text.trim();
-    if (!value) return;
-    const result = await rpc<{ ok: boolean; id?: string }>("chat.send_text", {
-      text: value,
-    });
-    if (result.ok && result.id && !this.startedTurns.has(result.id)) {
-      this.pending.push({ id: result.id, text: value });
+    if (!value && files.length === 0) return true;
+    let result: { ok: boolean; id?: string; error?: string };
+    try {
+      const attachments = await Promise.all(
+        files.map(async ({ file, info }) => ({
+          name: info.name,
+          mime: info.mime,
+          data: await readBase64(file),
+        }))
+      );
+      result = await rpc("chat.send_text", { text: value, attachments });
+    } catch (err) {
+      result = { ok: false, error: `The message could not be sent: ${err}` };
     }
+    if (!result.ok) {
+      this.messages.push({
+        role: "error",
+        text: result.error ?? "The message could not be sent",
+        streaming: false,
+      });
+      return false;
+    }
+    const shown = files.map((f) => f.info);
+    if (result.id && !this.startedTurns.has(result.id)) {
+      this.pending.push({ id: result.id, text: value, attachments: shown });
+    } else {
+      releasePreviews(shown);
+    }
+    return true;
   }
 
   /** Close the mic while a draft is being typed; reopen it when it is gone. */

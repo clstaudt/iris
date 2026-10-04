@@ -9,6 +9,7 @@ import markdown
 import ollama
 from bs4 import BeautifulSoup
 
+from iris.attachments import Attachment, recorded_text
 from iris.memory import LIVE_TOKENS, PIN_TURNS, PINNED_TOKENS, MemoryKeeper, estimate_tokens
 from iris.personas import Persona, get_persona
 
@@ -230,6 +231,10 @@ class ConversationManager:
         # written to memory; its turns live here and vanish when it ends
         self.amnesia = False
         self.unremembered: list[dict] = []
+        # Files shared in this conversation, kept for a few turns and never
+        # stored: [(attachment, turns left)], oldest first
+        self.shared: list[tuple[Attachment, int]] = []
+        self._capability_cache: dict[str, set] = {}
         self.model = model
         self.vision_model = vision_model
         self.conversation_history = []
@@ -292,12 +297,53 @@ class ConversationManager:
         self.host = normalize_host(host)
         self.client = ollama_client(self.host)
         self.reachable = True  # set_host is only called for a server that answered
+        self._capability_cache = {}
         self.max_context_tokens = self._get_model_context_length()
 
     def set_model(self, model: str):
         """Switch the primary model, keeping conversation history intact."""
         self.model = model
         self.max_context_tokens = self._get_model_context_length()
+
+    def _capabilities(self, model: str) -> Optional[set]:
+        """What the model can do ("vision", "tools", ...), or None if unknown."""
+        if model not in self._capability_cache:
+            try:
+                self._capability_cache[model] = set(self.client.show(model).capabilities or [])
+            except Exception:
+                return None
+        return self._capability_cache[model]
+
+    def image_model(self) -> Optional[str]:
+        """The model that answers a message with images, or None if no
+        model that can see is at hand."""
+        capabilities = self._capabilities(self.model)
+        if capabilities is None or "vision" in capabilities:
+            return self.model
+        return self.vision_model
+
+    def _files_context(self, new: list[Attachment]) -> str:
+        """The shared documents as text for the model, newest first within
+        a budget, and a line naming the images that go with the message."""
+        budget = max(2000, self.max_context_tokens // 2)
+        blocks = []
+        for attachment, _ in reversed(self.shared):
+            if attachment.kind != "document":
+                continue
+            when = "with this message" if any(attachment is a for a in new) else "earlier"
+            text = attachment.text or ""
+            if estimate_tokens(text) > budget:
+                text = text[: budget * 4] + "\n[The rest of the file did not fit.]"
+            budget -= estimate_tokens(text)
+            blocks.insert(0, f'<file name="{attachment.name}" shared="{when}">\n{text}\n</file>')
+            if budget <= 0:
+                break
+        images = [a.name for a, _ in self.shared if a.kind == "image"]
+        if images:
+            blocks.append("Images the user shared, in order: " + ", ".join(images))
+        if not blocks:
+            return ""
+        return "\n\nFiles the user shared in this conversation:\n\n" + "\n\n".join(blocks)
 
     def _get_model_context_length(self) -> int:
         """
@@ -629,6 +675,7 @@ class ConversationManager:
         response_language: str = "en",
         on_tool_use=None,
         source=None,
+        attachments: Optional[list[Attachment]] = None,
         keep: bool = True,
     ):
         """
@@ -640,6 +687,8 @@ class ConversationManager:
             response_language: Language the assistant should respond in
                 (Whisper ISO 639-1 code, e.g. 'en', 'fr', 'ja')
             on_tool_use: Optional callback(tool_name, tool_args) called before each tool executes
+            attachments: Files sent with the message; they stay in context for
+                a few turns, and only their names are recorded
             keep: Keep the exchange in the conversation once the reply is
                 complete. False leaves that to the caller (keep()), which
                 knows how much of the reply was heard; the complete reply,
@@ -651,20 +700,31 @@ class ConversationManager:
         """
         self.reply = None
         unspoken = UnspokenFilter()
-        for chunk in self._reply_stream(prompt, response_language, on_tool_use, source):
+        for chunk in self._reply_stream(
+            prompt, response_language, on_tool_use, source, attachments or []
+        ):
             if text := unspoken.feed(chunk):
                 yield text
         if rest := unspoken.flush():
             yield rest
         if keep:
-            self._record(prompt, self.reply, source)
+            self._record(recorded_text(prompt, attachments or []), self.reply, source)
 
     def keep(self, prompt: str, answer: str, source: Optional[str] = None):
         """Keep an exchange streamed with keep=False: its reply as far as
-        the user heard it, or self.reply when it was heard to the end."""
+        the user heard it, or self.reply when it was heard to the end. The
+        prompt is recorded as given, so with attachments it is the one
+        recorded_text() makes."""
         self._record(prompt, answer, source)
 
-    def _reply_stream(self, prompt: str, response_language: str, on_tool_use, source):
+    def _reply_stream(
+        self,
+        prompt: str,
+        response_language: str,
+        on_tool_use,
+        source,
+        attachments: list[Attachment],
+    ):
         """The model's reply as it streams in, tool rounds included."""
         # Language names for the LLM instruction
         _lang_names = {
@@ -672,8 +732,10 @@ class ConversationManager:
             "ja": "Japanese", "zh": "Chinese (Mandarin)",
         }
 
-        # Recalled topics fade from context after a few turns
+        # Recalled topics and shared files fade from context after a few turns
         self.pinned = {t: n - 1 for t, n in self.pinned.items() if n > 1}
+        self.shared = [(a, n - 1) for a, n in self.shared if n > 1]
+        self.shared += [(a, PIN_TURNS) for a in attachments]
 
         # Get managed conversation context
         messages = self.manage_context()
@@ -686,13 +748,31 @@ class ConversationManager:
                 "content": f"The user is speaking in {lang_name}. Respond in {lang_name}.",
             })
 
-        # Add current user message
-        messages.append({"role": "user", "content": prompt})
+        # Add current user message, with the files still in context
+        user_message = {"role": "user", "content": prompt + self._files_context(attachments)}
+        model = self.model
+        images = [a.image for a, _ in self.shared if a.image]
+        if images:
+            model = self.image_model()
+            if model:
+                user_message["images"] = images
+            else:
+                model = self.model
+                user_message["content"] += (
+                    "\n\n(The images cannot be shown to you: no model that can see "
+                    "images is installed. Let the user know.)"
+                )
+        messages.append(user_message)
+
+        # A model chosen for its sight may not take tools
+        use_tools = self.tools and self.tools.has_tools()
+        if use_tools and model != self.model:
+            use_tools = "tools" in (self._capabilities(model) or set())
 
         # If tools available, let LLM decide if it needs them
-        if self.tools and self.tools.has_tools():
+        if use_tools:
             stream = self.client.chat(
-                model=self.model, messages=messages, tools=self.tools.get_schemas(), stream=True
+                model=model, messages=messages, tools=self.tools.get_schemas(), stream=True
             )
 
             # The reply streams as it comes, so the voice can start before
@@ -779,14 +859,14 @@ class ConversationManager:
 
                     # Choose model: use vision model if vision was used, otherwise primary model
                     response_model = (
-                        self.vision_model if (uses_vision and self.vision_model) else self.model
+                        self.vision_model if (uses_vision and self.vision_model) else model
                     )
 
                     # Tools stay on offer, so a search can be followed by reading
                     # a page: without them a model writes its next call out as
                     # text, which would be shown and spoken. A separate vision
                     # model, and the last round, answer without tools.
-                    offer_tools = rounds < MAX_TOOL_ROUNDS and response_model == self.model
+                    offer_tools = rounds < MAX_TOOL_ROUNDS and response_model == model
                     extra = {"tools": self.tools.get_schemas()} if offer_tools else {}
                     if not offer_tools:
                         messages.append(
@@ -823,7 +903,7 @@ class ConversationManager:
                 return
 
         # No tools - standard streaming
-        stream = self.client.chat(model=self.model, messages=messages, stream=True)
+        stream = self.client.chat(model=model, messages=messages, stream=True)
 
         full_response = []
         for chunk in stream:

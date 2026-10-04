@@ -11,6 +11,7 @@ from pathlib import Path
 
 from iris import downloads
 from iris.assistant import VoiceAssistant
+from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AudioRecorder, get_filter
 from iris.events import EventBus
 from iris.llm import ConversationManager, effective_host, normalize_host, ollama_client
@@ -337,18 +338,24 @@ class AssistantController:
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
-    def send_text(self, text: str) -> dict:
+    def send_text(self, text: str, attachments: list | None = None) -> dict:
         """Queue a typed message as the next turn of the conversation.
 
         Typed and spoken turns are taken one at a time by the assistant's loop,
         so a message sent mid-reply waits for that reply to finish. Its
         chat.user event (carrying the returned id) is emitted when it starts.
+        Attachments ({name, mime, data: base64}) are read here, so a file iris
+        cannot use is refused before the turn is queued.
         """
         text = (text or "").strip()
-        if not text:
+        try:
+            files = prepare_all(attachments or [])
+        except AttachmentError as e:
+            return {"ok": False, "error": str(e)}
+        if not text and not files:
             return {"ok": False, "error": "Empty message"}
         turn_id = f"t{next(self._turn_ids)}"
-        self._turns.put({"text": text, "id": turn_id})
+        self._turns.put({"text": text, "id": turn_id, "attachments": files})
         return {"ok": True, "id": turn_id}
 
     def hold_listening(self, on: bool) -> dict:

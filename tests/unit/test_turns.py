@@ -69,8 +69,8 @@ def test_text_turn_is_announced_as_typed_and_answered():
     events = []
     assistant.event_bus.subscribe(lambda event_type, data: events.append((event_type, data)))
     answered = []
-    assistant.chat = lambda text, response_language, source=None: answered.append(
-        (text, response_language, source)
+    assistant.chat = lambda text, response_language, source=None, attachments=None: (
+        answered.append((text, response_language, source))
     )
 
     assistant.conversation_language = "fr"
@@ -86,8 +86,8 @@ def test_a_turn_marks_the_conversation_busy():
     """Background memory filing must see a typed turn as conversation."""
     assistant = _bare_assistant()
     seen = []
-    assistant.chat = lambda text, response_language, source=None: seen.append(
-        assistant._turn_active.is_set()
+    assistant.chat = lambda text, response_language, source=None, attachments=None: (
+        seen.append(assistant._turn_active.is_set())
     )
     assistant._run_text_turn({"text": "hi", "id": "t1"})
     assert seen == [True]
