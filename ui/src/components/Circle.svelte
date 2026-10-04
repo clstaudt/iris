@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { BLOOM_STYLE, drawIris } from "../lib/iris";
   import { STATE_COLORS, store, type AssistantState } from "../lib/state.svelte";
 
   interface Props {
@@ -42,18 +43,10 @@
   // Over the last seconds of the awake window the orb drifts toward sleep
   const FALL_ASLEEP = 10;
   const BLOOM_MERGE = 1.6; // seconds for the flower to become the ring
-  const TAU = Math.PI * 2;
-  // The title image's petals: violet to blue, lit edges, a warm beard
-  const PETAL_BASE = hexToRgb("#8d84ee");
-  const PETAL_TIP = hexToRgb("#79a3ee");
-  const PETAL_EDGE = hexToRgb("#b2dcf2");
-  const PETAL_BEARD = hexToRgb("#e6ab7a");
 
   const easeOut = (t: number) => 1 - (1 - t) ** 3;
   const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
   const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-  const rgba = (c: [number, number, number], a: number) =>
-    `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${a})`;
 
   onMount(() => {
     const ctx = canvas.getContext("2d");
@@ -132,89 +125,26 @@
       ctx!.restore();
     }
 
-    /** One petal along -y from the centre: narrow at the base, broad and
-     *  rounded at the tip, translucent with a lit edge and fine veins. */
-    function petal(angle: number, length: number, width: number, alpha: number, beard: boolean) {
-      if (length < 0.5) return;
-      const c = ctx!;
-      c.save();
-      c.translate(cx, cy);
-      c.rotate(angle);
-      c.beginPath();
-      c.moveTo(0, 0);
-      c.bezierCurveTo(width * 0.9, -length * 0.22, width * 1.15, -length * 0.82, 0, -length);
-      c.bezierCurveTo(-width * 1.15, -length * 0.82, -width * 0.9, -length * 0.22, 0, 0);
-      c.closePath();
-
-      const fill = c.createLinearGradient(0, 0, 0, -length);
-      fill.addColorStop(0, rgba(PETAL_BASE, 0.34 * alpha));
-      fill.addColorStop(1, rgba(PETAL_TIP, 0.12 * alpha));
-      c.fillStyle = fill;
-      c.fill();
-
-      c.shadowColor = rgba(PETAL_EDGE, 0.5 * alpha);
-      c.shadowBlur = 6;
-      c.strokeStyle = rgba(PETAL_EDGE, 0.55 * alpha);
-      c.lineWidth = Math.max(0.7, 1.4 * K);
-      c.stroke();
-      c.shadowBlur = 0;
-
-      // Veins fan out from the base
-      c.strokeStyle = rgba(PETAL_EDGE, 0.16 * alpha);
-      c.lineWidth = 0.5;
-      for (const v of [-0.55, -0.25, 0, 0.25, 0.55]) {
-        c.beginPath();
-        c.moveTo(0, -length * 0.06);
-        c.quadraticCurveTo(width * v * 1.2, -length * 0.5, width * v * 0.75, -length * 0.88);
-        c.stroke();
-      }
-
-      if (beard) {
-        c.fillStyle = rgba(PETAL_BEARD, 0.4 * alpha);
-        c.beginPath();
-        c.ellipse(0, -length * 0.26, width * 0.16, length * 0.14, 0, 0, TAU);
-        c.fill();
-      }
-      c.restore();
-    }
-
-    /** The iris: three broad falls opening flat, three standards between
-     *  them staying more upright. Seen from above, a petal tilting open looks
-     *  longer, so its drawn length follows the sine of its tilt. */
+    /** The startup bloom: the iris opening while the models load, then
+     *  merging into the ring. The flower itself is drawn by lib/iris. */
     function drawBloom(time: number, u: number, m: number) {
       const fade = 1 - m;
       if (fade <= 0) return;
-      const c = ctx!;
-      // Fully open while merging; a slow breath while the models still load
-      const open = lerp(u * (0.95 + 0.05 * Math.sin(time * 0.8)), 1, m);
-      const sway = Math.sin(time * 0.6) * 0.03 * fade;
-      const twist = (1 - open) * 0.6 + m * 0.45; // petals turn as they open
-
-      c.save();
-      c.globalCompositeOperation = "lighter"; // overlaps glow, like the photo
-
-      const glow = c.createRadialGradient(cx, cy, 0, cx, cy, SIZE / 2);
-      glow.addColorStop(0, rgba(PETAL_BASE, 0.18 * fade * (0.4 + 0.6 * open)));
-      glow.addColorStop(1, rgba(PETAL_BASE, 0));
-      c.fillStyle = glow;
-      c.fillRect(0, 0, SIZE, SIZE);
-
-      for (let i = 0; i < 3; i++) {
-        const tilt = (0.1 + 0.4 * open) * Math.PI;
-        const length = lerp(R * 1.6, R, m) * Math.sin(tilt);
-        petal((i / 3) * TAU + twist + sway, length, R * (0.3 + 0.28 * open), fade, true);
-      }
-      for (let i = 0; i < 3; i++) {
-        const tilt = (0.06 + 0.26 * open + 0.18 * m) * Math.PI;
-        const length = lerp(R * 1.15, R * 0.92, m) * Math.sin(tilt);
-        petal((i / 3 + 1 / 6) * TAU + twist * 0.7 - sway, length, R * (0.24 + 0.2 * open), fade, false);
-      }
-
-      c.fillStyle = rgba([255, 255, 255], 0.4 * fade);
-      c.beginPath();
-      c.arc(cx, cy, Math.max(1.2, R * 0.07), 0, TAU);
-      c.fill();
-      c.restore();
+      drawIris(
+        ctx!,
+        {
+          cx,
+          cy,
+          R,
+          // Fully open while merging; a slow breath while the models still load
+          open: lerp(u * (0.95 + 0.05 * Math.sin(time * 0.8)), 1, m),
+          merge: m,
+          sway: Math.sin(time * 0.6) * 0.03 * fade,
+          fade,
+          glowRadius: SIZE / 2,
+        },
+        { ...BLOOM_STYLE, edgeWidth: Math.max(0.7, 1.4 * K) }
+      );
     }
 
     function draw(t: number) {

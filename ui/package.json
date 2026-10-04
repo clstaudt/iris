@@ -10,7 +10,8 @@
     "dev:esbuild:watch": "npm run build:electron -- --watch",
     "build:electron": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outdir=dist-electron --out-extension:.js=.cjs",
     "build": "npm run build:electron && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "icon": "esbuild scripts/icon/render.ts --bundle --format=iife --outfile=dist-electron/icon-render.js && ELECTRON_RUN_AS_NODE= electron scripts/icon/make-icon.cjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
