@@ -1,5 +1,6 @@
 """Unit tests for wake word matching, detection and the dormant/awake flow."""
 
+import threading
 import time
 
 import numpy as np
@@ -7,9 +8,9 @@ import pytest
 
 from iris import assistant as assistant_module
 from iris import wakeword
-from iris.assistant import WAKE_WINDOW, VoiceAssistant
+from iris.assistant import DEFAULT_WAKE_WINDOW, VoiceAssistant
 from iris.events import EventBus
-from iris.wakeword import WakeWordDetector, match_wake_word
+from iris.wakeword import WakeWordDetector, match_sleep_word, match_wake_word
 
 
 @pytest.mark.parametrize(
@@ -85,6 +86,12 @@ def _bare_assistant(monkeypatch, detector_result):
     a.wake_word = "Iris"
     a.wake_detector = FakeDetector(detector_result)
     a.awake_until = 0.0
+    a.wake_window = DEFAULT_WAKE_WINDOW
+    a.sleep_word = "That's all"
+    a._was_dormant = True
+    a._last_window_emit = 0.0
+    a.pause_event = threading.Event()
+    a.suspend_event = threading.Event()
     a.event_bus = EventBus()
     a.speak_replies = True
     a.turns = []
@@ -110,7 +117,7 @@ def test_name_with_a_request_wakes_and_answers_at_once(monkeypatch):
     assert a.turns == ["/clip.wav"] and a.chimes == 0
     assert woke == [{"word": "Iris"}]
     assert not a.dormant
-    assert a.awake_until == pytest.approx(time.monotonic() + WAKE_WINDOW, abs=1)
+    assert a.awake_until == pytest.approx(time.monotonic() + DEFAULT_WAKE_WINDOW, abs=1)
 
 
 def test_bare_name_chimes_and_waits_for_the_request(monkeypatch):
@@ -132,3 +139,120 @@ def test_falls_dormant_when_the_window_passes(monkeypatch):
     assert a.dormant
     a.wake_word = None  # without a wake word it is never dormant
     assert not a.dormant
+
+
+
+# -- going back to sleep -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "heard, asleep",
+    [
+        ("That's all, Iris.", True),
+        ("Iris, that's all.", True),
+        ("Okay, that's all, thanks.", True),
+        ("thats all", True),
+        ("That's all I wanted to know about Lisbon.", False),
+        ("Thanks, Iris.", False),
+        ("That's awful, Iris.", False),
+    ],
+)
+def test_only_the_sleep_word_itself_puts_iris_to_sleep(heard, asleep):
+    assert match_sleep_word(heard, "That's all", "Iris") is asleep
+
+
+class Transcribes:
+    def __init__(self, text):
+        self.text = text
+
+    def transcribe(self, path):
+        return self.text, "en"
+
+
+class QuietStatus:
+    status_lock = threading.Lock()
+    status_understanding = False
+
+    def update_status_bar(self, *args):
+        pass
+
+
+class QuietDisplay:
+    def show_user_message(self, text):
+        pass
+
+
+def _awake_assistant(monkeypatch, heard):
+    """Runs the real path from a recorded utterance to the reply."""
+    a = _bare_assistant(monkeypatch, (False, ""))
+    del a._run_voice_turn  # use the real one
+    a._turn_active = threading.Event()
+    a.transcriber = Transcribes(heard)
+    a.status_manager = QuietStatus()
+    a.display_manager = QuietDisplay()
+    a.speech_pipeline = None
+    a.conversation_language = "en"
+    a.replies = []
+    a.chat = lambda text, response_language, source=None: a.replies.append(text)
+    a._stay_awake()
+    return a
+
+
+def test_the_sleep_word_sends_iris_to_sleep_without_a_reply(monkeypatch):
+    a = _awake_assistant(monkeypatch, "That's all, Iris.")
+    a._handle_heard("/clip.wav", dormant=False)
+    assert a.replies == []
+    assert a.dormant  # and the finished turn does not wake it again
+
+
+def test_anything_else_is_answered_and_keeps_iris_awake(monkeypatch):
+    a = _awake_assistant(monkeypatch, "That's all I wanted to know about Lisbon.")
+    a._handle_heard("/clip.wav", dormant=False)
+    assert a.replies == ["That's all I wanted to know about Lisbon."]
+    assert not a.dormant
+
+
+def test_the_window_is_adjustable_and_announced(monkeypatch):
+    a = _bare_assistant(monkeypatch, (False, ""))
+    windows = []
+    def record(event_type, data):
+        if event_type == "wake.window":
+            windows.append(data["remaining"])
+
+    a.event_bus.subscribe(record)
+    a.wake_window = 60.0
+    a._stay_awake()
+    assert windows == [60.0]
+    assert a.awake_until == pytest.approx(time.monotonic() + 60.0, abs=1)
+
+
+def test_speaking_keeps_iris_awake(monkeypatch):
+    a = _bare_assistant(monkeypatch, (False, ""))
+    a.awake_until = time.monotonic() + 1  # about to fall asleep
+    a._keep_awake_while_speaking()
+    assert a.awake_until == pytest.approx(time.monotonic() + DEFAULT_WAKE_WINDOW, abs=1)
+
+
+def test_falling_asleep_chimes_once(monkeypatch):
+    a = _bare_assistant(monkeypatch, (False, ""))
+    played, events = [], []
+    monkeypatch.setattr(assistant_module.sd, "play", lambda data, rate: played.append(len(data)))
+    a.event_bus.subscribe(lambda t, d: events.append(t))
+
+    a._note_dormancy(False)  # awake
+    a._note_dormancy(True)  # the window ran out
+    a._note_dormancy(True)  # still asleep: no second chime
+    assert len(played) == 1
+    assert events.count("sleep") == 1
+
+    a.speak_replies = False  # Voice off: asleep without a sound
+    a._note_dormancy(False)
+    a._note_dormancy(True)
+    assert len(played) == 1
+
+    a.speak_replies = True
+    a.pause_event.set()  # mic off: it was not listening, so no chime either
+    a._note_dormancy(False)
+    a._note_dormancy(True)
+    assert len(played) == 1
+    assert events.count("sleep") == 3  # but the UI always learns it

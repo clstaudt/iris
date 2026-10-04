@@ -92,6 +92,7 @@ export const STATE_LABELS: Record<string, string> = {
   paused: "Paused",
   muted: "Microphone off",
   typing: "Microphone waits while you type",
+  dormant: "Sleeping",
 };
 
 /** States in which a reply is underway and can be stopped. */
@@ -122,6 +123,8 @@ export interface AssistantConfig {
   input_device: string;
   speak_replies?: boolean;
   wake_word?: string;
+  wake_window?: number;
+  sleep_word?: string;
   ollama_host?: string;
   ollama_url?: string;
   mic_on?: boolean;
@@ -142,6 +145,8 @@ interface SavedSettings {
   amnesia?: boolean;
   /** "" means the wake word is off */
   wake_word?: string;
+  wake_window?: number;
+  sleep_word?: string;
 }
 
 const SETTINGS_KEY = "iris.settings";
@@ -178,6 +183,8 @@ class IrisStore {
   /** The side panel beside the conversation, if one is open */
   panel = $state<"settings" | "memory" | null>(null);
   memoryTopics = $state<MemoryTopic[]>([]);
+  /** When Iris falls asleep (performance.now() ms), or null when it isn't awake */
+  awakeUntil = $state<number | null>(null);
 
   /** Mic input level, driving the meter and spinner while listening. */
   level = $state(0);
@@ -276,6 +283,16 @@ class IrisStore {
         this.streamingIndex = null;
         break;
       }
+
+      case "wake.window": {
+        const remaining = (data.remaining as number) ?? 0;
+        this.awakeUntil = remaining > 0 ? performance.now() + remaining * 1000 : null;
+        break;
+      }
+
+      case "sleep":
+        this.awakeUntil = null;
+        break;
 
       case "memory.updated":
         if (this.panel === "memory") this.loadMemory();
@@ -384,7 +401,17 @@ class IrisStore {
   /** Listen only for this word until addressed; "" listens to everything. */
   async setWakeWord(word: string) {
     saveSettings({ wake_word: word });
+    this.awakeUntil = null;
     await rpc("wake.set", { word });
+  }
+
+  /** How long Iris stays awake after a turn, and its sleep word. */
+  async setWakeOptions(options: { window?: number; sleep_word?: string }) {
+    saveSettings({
+      ...(options.window !== undefined ? { wake_window: options.window } : {}),
+      ...(options.sleep_word !== undefined ? { sleep_word: options.sleep_word } : {}),
+    });
+    await rpc("wake.options", options);
   }
 
   async setTool(name: string, enabled: boolean) {
@@ -486,6 +513,8 @@ class IrisStore {
         if (saved.ollama_host) options.ollama_host = saved.ollama_host;
         if (saved.amnesia) options.amnesia = true;
         if (saved.wake_word) options.wake_word = saved.wake_word;
+        if (saved.wake_window) options.wake_window = saved.wake_window;
+        if (saved.sleep_word !== undefined) options.sleep_word = saved.sleep_word;
         this.speakReplies = saved.speak_replies ?? true;
         await rpc("assistant.start", options);
       }

@@ -348,6 +348,14 @@ class AssistantController:
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
+    def set_wake_options(self, window=None, sleep_word=None) -> dict:
+        """How long Iris stays awake after a turn, and its sleep word."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        self.assistant.set_wake_options(window, sleep_word)
+        self.bus.emit("config", self.assistant.config_info())
+        return {"ok": True}
+
     def inject_audio(self, path: str) -> dict:
         """Debug: answer a recorded utterance as if the mic had heard it."""
         self._turns.put({"audio": path})

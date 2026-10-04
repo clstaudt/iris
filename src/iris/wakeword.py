@@ -67,6 +67,42 @@ def match_wake_word(text: str, wake_word: str) -> tuple[bool, str]:
     return False, ""
 
 
+# Words that may come before or after a sleep word without changing it
+# ("Okay, that's all, thanks")
+SLEEP_FILLERS = ("ok", "okay", "so", "well", "alright", "right", "thanks", "thank", "you")
+
+
+def _similar(a: list[str], b: list[str]) -> bool:
+    """Same words, each allowing for a mishearing ("thats" for "that's")."""
+    return len(a) == len(b) and all(
+        difflib.SequenceMatcher(None, x, y).ratio() >= SIMILARITY for x, y in zip(a, b)
+    )
+
+
+def match_sleep_word(text: str, sleep_word: str, wake_word: str = "") -> bool:
+    """Check whether an utterance asks the assistant to go to sleep.
+
+    Only an utterance that is just the sleep word counts, optionally with the
+    wake word ("That's all, Iris") and a filler at either end ("Okay, that's
+    all, thanks"): "that's all I wanted to know about Lisbon" is a request.
+    """
+    heard, sleep, wake = _words(text), _words(sleep_word), _words(wake_word)
+    if not heard or not sleep:
+        return False
+    remaining, n = [], 0
+    while n < len(heard):
+        if wake and _similar(heard[n : n + len(wake)], wake):
+            n += len(wake)
+            continue
+        remaining.append(heard[n])
+        n += 1
+    while len(remaining) > len(sleep) and remaining[0] in SLEEP_FILLERS:
+        remaining.pop(0)
+    while len(remaining) > len(sleep) and remaining[-1] in SLEEP_FILLERS:
+        remaining.pop()
+    return _similar(remaining, sleep)
+
+
 class WakeWordDetector:
     """Listens for the wake word with the smallest Whisper model."""
 

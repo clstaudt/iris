@@ -26,6 +26,26 @@
   const wakeOn = $derived(!!store.config?.wake_word);
   const wakeValue = $derived(wakeDraft ?? (store.config?.wake_word || DEFAULT_WAKE_WORD));
 
+  const DEFAULT_SLEEP_WORD = "That's all";
+  const STAY_AWAKE = [15, 30, 60, 120];
+  let sleepDraft = $state<string | null>(null);
+  const sleepValue = $derived(sleepDraft ?? store.config?.sleep_word ?? DEFAULT_SLEEP_WORD);
+
+  function applySleepWord() {
+    if (sleepDraft === null) return;
+    store.setWakeOptions({ sleep_word: sleepValue.trim() }).catch((err) =>
+      console.error("[settings] wake.options failed:", err)
+    );
+    sleepDraft = null;
+  }
+
+  function onStayAwake(event: Event) {
+    const window = Number((event.target as HTMLSelectElement).value);
+    store.setWakeOptions({ window }).catch((err) =>
+      console.error("[settings] wake.options failed:", err)
+    );
+  }
+
   function applyWakeWord(on: boolean) {
     const word = wakeValue.trim() || DEFAULT_WAKE_WORD;
     store.setWakeWord(on ? word : "").catch((err) =>
@@ -193,6 +213,34 @@
         />
         <Switch label="Wake word" checked={wakeOn} onchange={(on) => applyWakeWord(on)} />
       </div>
+      {#if wakeOn}
+        <div class="grid grid-cols-[5.5rem_1fr] items-center gap-x-3 gap-y-2 pt-1">
+          <label for="sleep-word" class="text-[12.5px] text-ink-2">Sleep word</label>
+          <input
+            id="sleep-word"
+            value={sleepValue}
+            oninput={(e) => (sleepDraft = (e.target as HTMLInputElement).value)}
+            onkeydown={(e) => e.key === "Enter" && applySleepWord()}
+            onblur={applySleepWord}
+            spellcheck="false"
+            class="field !pr-3"
+          />
+          <label for="stay-awake" class="text-[12.5px] text-ink-2">Stay awake</label>
+          <div class="relative">
+            <select
+              id="stay-awake"
+              value={store.config?.wake_window ?? 30}
+              onchange={onStayAwake}
+              class="field"
+            >
+              {#each STAY_AWAKE as seconds}
+                <option value={seconds}>{seconds < 60 ? `${seconds} s` : `${seconds / 60} min`}</option>
+              {/each}
+            </select>
+            <Icon name="chevron" size={14} class="chevron" />
+          </div>
+        </div>
+      {/if}
     </section>
 
     <section class="flex flex-col gap-2">
