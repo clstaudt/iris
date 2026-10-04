@@ -1,4 +1,15 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell, systemPreferences } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  nativeImage,
+  shell,
+  systemPreferences,
+} from "electron";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { PythonBridge } from "./python-bridge";
 
@@ -65,6 +76,46 @@ function createWindow() {
 app.name = "iris";
 
 /**
+ * Developer switch for the first-launch setup, which otherwise shows only
+ * once per settings folder. IRIS_SETUP=1 starts like a first launch, with
+ * settings and memory of its own and the speech models already on this Mac.
+ * IRIS_SETUP=download also gives the core a home folder of its own, so the
+ * models download as on a new Mac. It all lives in one temporary folder,
+ * emptied when a test starts (a crashed run leaves nothing behind for long)
+ * and removed on quit.
+ */
+const SETUP_TEST = process.env.IRIS_SETUP ?? "";
+const coreEnv: NodeJS.ProcessEnv = {};
+if (SETUP_TEST && SETUP_TEST !== "0") {
+  const scratch = path.join(os.tmpdir(), "iris-setup-test");
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.mkdirSync(scratch);
+  app.setPath("userData", path.join(scratch, "userdata"));
+  coreEnv.IRIS_MEMORY_DB = path.join(scratch, "memory.db");
+  if (SETUP_TEST === "download") {
+    const home = path.join(scratch, "home");
+    fs.mkdirSync(home);
+    coreEnv.HOME = home;
+    coreEnv.HF_HOME = path.join(home, ".cache", "huggingface");
+    coreEnv.IRIS_MODELS_DIR = "";
+  }
+  console.log(`[main] setup test (${SETUP_TEST}) in ${scratch}`);
+  // Chromium still writes a few files after will-quit, so a small process
+  // waits for this one to exit and then removes the folder
+  app.on("will-quit", () => {
+    if (process.platform === "win32") {
+      fs.rmSync(scratch, { recursive: true, force: true });
+      return;
+    }
+    const sweep = 'while kill -0 "$0" 2>/dev/null; do sleep 0.2; done; rm -rf "$1"';
+    spawn("/bin/sh", ["-c", sweep, String(process.pid), scratch], {
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+  });
+}
+
+/**
  * The Python child process opens the microphone, but macOS attributes that
  * access to this app. Nothing in Electron itself touches the mic, so the
  * system would never prompt — and an app that never asks does not appear in
@@ -97,7 +148,7 @@ app.whenReady().then(async () => {
     : path.resolve(__dirname, "../..");
   const resourcesPath = isPackaged ? process.resourcesPath : "";
 
-  pythonBridge = new PythonBridge(projectRoot, isPackaged, resourcesPath);
+  pythonBridge = new PythonBridge(projectRoot, isPackaged, resourcesPath, coreEnv);
 
   ipcMain.handle(
     "rpc",
@@ -113,6 +164,14 @@ app.whenReady().then(async () => {
   );
 
   ipcMain.handle("mic-status", () => micStatus);
+  ipcMain.handle("is-packaged", () => app.isPackaged);
+  ipcMain.handle("choose-folder", async (_event, title: string) => {
+    const options = { title, properties: ["openDirectory" as const] };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, options)
+      : await dialog.showOpenDialog(options);
+    return result.canceled ? null : result.filePaths[0];
+  });
 
   createWindow();
 });

@@ -76,7 +76,10 @@
     let spinner = 0; // eases the gap open, so the ring never snaps apart
     let spin = 0; // accumulated rotation of the gap
     let blooming = store.state === "starting";
-    let unfold = 0; // 0 a closed bud, 1 fully open
+    // 0 a closed bud, 1 fully open. After the first-launch setup the flower
+    // is already partly open; the bloom carries on from there.
+    let unfold = 1 - Math.cbrt(1 - store.bloomFrom); // easeOut(unfold) = bloomFrom
+    store.bloomFrom = 0;
     let merge = 0; // 0 the flower, 1 the ring
 
     let last = performance.now();

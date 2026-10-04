@@ -275,6 +275,17 @@ npm run dev             # starts Vite + Electron + the Python core
 
 The app icon is the fully open iris of that startup animation, drawn by the same code (`ui/src/lib/iris.ts`). `npm run icon` re-renders `ui/build/icon.png` and, on macOS, `icon.icns`.
 
+**First launch.** The first time it opens, Iris shows a setup screen before anything starts or downloads. Conversations need a large language model, served by Ollama: setup looks for Ollama on this computer, or on any server you type, and offers its models, preferring `qwen3:1.7b`. It then asks where the speech models come from: downloaded (Whisper for recognition, Kokoro for the voice, about 2 GB together; models already downloaded are reused), or folders you already have. An iris bud at the top opens as setup comes along: a little when the language model is ready, further with each speech model in place, and with the downloads, which show a thin progress bar. When the models are in, the setup screen gives way to the conversation and the flower carries on blooming into the orb.
+
+**Testing the setup.** The setup screen shows only once per settings folder. To go through it again as a new user:
+
+```bash
+IRIS_SETUP=1 npm run dev          # fresh settings and memory; the speech models already on this Mac
+IRIS_SETUP=download npm run dev   # also hides the models, so they download (about 2 GB)
+```
+
+Everything a test run writes, downloaded models included, goes into one temporary folder (`$TMPDIR/iris-setup-test`), which is removed when Iris quits. Your own settings, memory and models are left alone. The built app takes the same switch: `IRIS_SETUP=download /Applications/Iris.app/Contents/MacOS/Iris`.
+
 Iris starts listening as soon as the models are loaded. Speaking and typing share one conversation:
 
 - Typed and spoken messages are answered one at a time, in order. A message sent while Iris is still answering waits as a queued bubble.
@@ -292,8 +303,9 @@ The settings panel (top right) holds the persona, the Ollama server, the languag
 - **Models:** the menu lists what the server has installed; switching keeps the conversation history.
 - **Speech recognition:** on Apple Silicon Macs, Whisper runs on the GPU through MLX with large-v3-turbo, which is several times faster than CPU decoding and leaves the CPU idle. Elsewhere faster-whisper runs, with large-v3-turbo on an NVIDIA GPU and small on a CPU. The CLI accepts `--whisper-engine` and `--whisper-model` to override this.
 - **Tools:** unlike the CLI, which gates them behind flags, the desktop UI enables the camera, screen capture and web search tools by default. A tool whose optional dependencies are missing is shown as not installed. Image prompts are routed to a vision model when the server has one.
+- **Model folders** (under Advanced): point Iris at speech models you already have instead of downloading them. Recognition takes a Whisper folder, either an MLX conversion (`weights.safetensors` or `weights.npz`) or a faster-whisper model (`model.bin`); Voice takes a folder holding `kokoro-v1.0.onnx` and `voices-v1.0.bin`. A folder without them is refused at once. **Download** goes back to the downloaded models.
 
-The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `wake.set/options`, `voice.set_output`, `chat.send_text/history`, `memory.topics/topic/forget/set_amnesia`, `persona.list/set`, `llm.list/set/set_host`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `wake`, `wake.window`, `sleep`, `memory.updated`, `error`).
+The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `setup.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `wake.set/options`, `voice.set_output`, `chat.send_text/history`, `memory.topics/topic/forget/set_amnesia`, `persona.list/set`, `llm.list/set/set_host`, `models.check/set`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `memory.updated`, `error`).
 
 > **Note for Cursor/VSCode terminals:** if Electron exits immediately with `Cannot set properties of undefined`, your terminal exports `ELECTRON_RUN_AS_NODE=1`. The `dev` script already clears it; when launching `electron .` manually, prefix it with `ELECTRON_RUN_AS_NODE=`.
 
@@ -310,6 +322,39 @@ Check what your shell actually captures:
 A working microphone reports a non-zero value (a quiet room still has a noise floor). Exactly `0.0` means capture is being denied. Fix it by enabling the microphone for your launching app under **System Settings > Privacy & Security > Microphone**, then quitting and reopening that app (a reload is not enough). Running `npm run dev` from a terminal that already has the grant — the same one where `iris` works on the CLI — also resolves it.
 
 The app surfaces this itself: a red line appears in the transcript when the microphone delivers only silence for a few seconds.
+
+<p align="right">(<a href="#top">back to top</a>)</p>
+
+<!-- MAC APP -->
+
+## macOS app
+
+The desktop UI also ships as a self-contained app for Apple Silicon Macs (macOS 14 or later), packed into a disk image you can send to someone.
+
+### Building the disk image
+
+```bash
+cd ui
+npm run dist:mac        # -> ui/release/Iris-<version>-macOS-arm64.dmg
+```
+
+`ui/scripts/package-mac.sh` does three things:
+
+1. It freezes the Python core with PyInstaller (`packaging/iris-rpc.spec`) into a standalone `iris-rpc` folder. The core's own Python, from a separate build environment in `packaging/.venv`, comes along, so the recipient needs no Python. `iris-rpc --check` then imports every engine inside the bundle (MLX and CPU speech recognition, voice activity detection, speech synthesis, web search, camera, screen capture, audio) and stops the build if one is missing.
+2. It builds the UI.
+3. It runs electron-builder, which puts the core into the app's `Resources` and writes the `.dmg`.
+
+What is not in the app: the speech models, which are downloaded at first launch (or taken from folders the recipient points to), and Ollama, which the recipient installs.
+
+The app is signed ad hoc, not with a Developer ID, and not notarized. `ui/build/entitlements.mac.plist` holds the entitlements a hardened, notarized build will need.
+
+### Installing it (for the recipient)
+
+1. Install [Ollama](https://ollama.com), start it, and download a model in Terminal: `ollama pull qwen3:1.7b`. Iris can also use Ollama on another computer; the setup screen asks for its address.
+2. Open the disk image and drag **Iris** into **Applications**.
+3. Open Iris. Because the app is not notarized, macOS refuses the first time ("Apple could not verify..."). Click **Done**, then go to **System Settings > Privacy & Security**, scroll down to the message about Iris, click **Open Anyway**, and confirm. This is needed only once. If macOS instead says the app "is damaged", run `xattr -dr com.apple.quarantine /Applications/Iris.app` in Terminal and open it again.
+4. Allow the microphone when asked. The camera and screen recording are asked for the first time Iris uses them.
+5. Follow the setup screen. The speech models download once (about 2 GB) into `~/.cache/huggingface` and `~/.iris/models`.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 

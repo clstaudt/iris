@@ -54,10 +54,40 @@ def is_language_supported(whisper_lang: str) -> bool:
     return whisper_lang in LANGUAGE_VOICE_MAP
 
 
+KOKORO_MODEL_FILE = "kokoro-v1.0.onnx"
+KOKORO_VOICES_FILE = "voices-v1.0.bin"
+# Where Iris keeps the voice model when it downloads it
+DEFAULT_KOKORO_DIR = Path.home() / ".iris" / "models"
+
+
+def kokoro_files_in(folder: Path) -> bool:
+    """Whether a folder holds both Kokoro files."""
+    return (folder / KOKORO_MODEL_FILE).exists() and (folder / KOKORO_VOICES_FILE).exists()
+
+
+def find_kokoro_models() -> Path | None:
+    """The first of the usual places that holds the Kokoro files, if any."""
+    candidates = []
+    if env_dir := os.environ.get("IRIS_MODELS_DIR"):
+        candidates.append(Path(env_dir))
+    candidates += [
+        DEFAULT_KOKORO_DIR,
+        Path.home() / ".local" / "share" / "iris" / "models",
+        Path.cwd() / "models",
+    ]
+    return next((folder for folder in candidates if kokoro_files_in(folder)), None)
+
+
 class KokoroGenerator:
     """Generates speech audio using kokoro-onnx."""
 
-    def __init__(self, voice: str = "af_bella", speed: float = 1.25, quiet: bool = True):
+    def __init__(
+        self,
+        voice: str = "af_bella",
+        speed: float = 1.25,
+        quiet: bool = True,
+        models_dir: str | Path | None = None,
+    ):
         """
         Initialize kokoro TTS generator.
 
@@ -70,8 +100,17 @@ class KokoroGenerator:
         self.speed = speed
         self.quiet = quiet
 
-        # Find model files - check multiple locations
-        self.model_path, self.voices_path = self._locate_models()
+        # A folder chosen by the user, or the usual locations
+        self.models_dir = Path(models_dir).expanduser() if models_dir else None
+        if self.models_dir is not None:
+            if not kokoro_files_in(self.models_dir):
+                raise FileNotFoundError(
+                    f"{self.models_dir} does not hold {KOKORO_MODEL_FILE} and {KOKORO_VOICES_FILE}"
+                )
+            self.model_path = self.models_dir / KOKORO_MODEL_FILE
+            self.voices_path = self.models_dir / KOKORO_VOICES_FILE
+        else:
+            self.model_path, self.voices_path = self._locate_models()
 
         # Initialize Kokoro
         self.kokoro = Kokoro(model_path=str(self.model_path), voices_path=str(self.voices_path))

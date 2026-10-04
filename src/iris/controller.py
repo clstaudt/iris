@@ -7,12 +7,32 @@ import itertools
 import queue
 import threading
 import time
+from pathlib import Path
 
+from iris import downloads
 from iris.assistant import VoiceAssistant
 from iris.audio import AudioRecorder, get_filter
 from iris.events import EventBus
-from iris.llm import ConversationManager, normalize_host, ollama_client
+from iris.llm import ConversationManager, effective_host, normalize_host, ollama_client
 from iris.personas import get_persona, list_personas, reload_personas
+from iris.transcription import (
+    WhisperTranscriber,
+    folder_engine,
+    model_repo,
+    resolve_device,
+    resolve_engine,
+    resolve_model,
+)
+from iris.tts import (
+    DEFAULT_KOKORO_DIR,
+    KOKORO_MODEL_FILE,
+    KOKORO_MODEL_URL,
+    KOKORO_VOICES_FILE,
+    KOKORO_VOICES_URL,
+    KokoroGenerator,
+    find_kokoro_models,
+    kokoro_files_in,
+)
 
 # When several status flags are set simultaneously, the earliest match wins.
 # Tool activity comes first: "thinking" stays set while a tool runs, and the
@@ -31,6 +51,17 @@ FLAG_STATE_PRIORITY = (
 
 # How long "speaking" survives a gap in playback, in seconds.
 SPEAKING_HOLD = 0.6
+
+# Rough download sizes for the first-launch setup, in MB
+APPROX_MODEL_MB = {
+    "tiny": 75,
+    "base": 145,
+    "small": 480,
+    "medium": 1500,
+    "large-v3": 3100,
+    "large-v3-turbo": 1600,
+}
+KOKORO_MB = 335
 
 # Events that make up the visible conversation. Kept here so a UI that
 # reloads (or attaches late) can rebuild its transcript; streaming chunks are
@@ -205,6 +236,11 @@ class AssistantController:
         # {group: enabled} chosen in the UI; applied once the tools exist
         tool_choices = kwargs.pop("tools", {}) or {}
         amnesia = bool(kwargs.pop("amnesia", False))
+        # Model folders chosen in Settings; empty means download as usual
+        if stt_path := kwargs.pop("stt_model_path", ""):
+            kwargs["whisper_model"] = stt_path
+        if tts_dir := kwargs.pop("tts_models_dir", ""):
+            kwargs["tts_models_dir"] = tts_dir
 
         # The GUI has no CLI flags, so tools are on by default; each one
         # degrades to a warning if its optional dependencies are missing.
@@ -213,6 +249,11 @@ class AssistantController:
         kwargs.setdefault("enable_web_search", True)
         if "vision_model" not in kwargs:
             kwargs["vision_model"] = self._pick_vision_model("qwen3-vl:8b")
+
+        try:
+            self._fetch_models(kwargs)
+        except Exception as e:
+            self.bus.emit("error", {"message": f"Could not download the speech models: {e}"})
 
         try:
             self.assistant = VoiceAssistant(
@@ -234,7 +275,8 @@ class AssistantController:
 
         # Diagnostics only — must never prevent the assistant from running
         try:
-            self._warn_if_model_missing()
+            if self._warn_if_ollama_unreachable():
+                self._warn_if_model_missing()
         except Exception:
             pass
 
@@ -424,6 +466,152 @@ class AssistantController:
         self.bus.emit("memory.updated", {})
         return {"ok": True}
 
+    def _progress(self, model: str, label: str):
+        return lambda done, total: self.bus.emit(
+            "setup.progress", {"model": model, "label": label, "done": done, "total": total}
+        )
+
+    def _fetch_stt(self, whisper_model: str, wake_word: str | None = None, **engine):
+        """Download the speech recognition model unless it is cached or a
+        local folder was chosen (used as it is)."""
+        if Path(whisper_model).expanduser().is_dir():
+            return
+        resolved = resolve_engine(engine.get("whisper_engine", "auto"))
+        device = resolve_device(resolved, engine.get("whisper_device", "auto"))
+        repo = model_repo(resolve_model(whisper_model, resolved, device), resolved)
+        if not downloads.is_cached(repo):
+            downloads.download(repo, self._progress("stt", "Downloading speech recognition model"))
+        if wake_word:
+            tiny = model_repo("tiny", resolved)
+            if not downloads.is_cached(tiny):
+                downloads.download(tiny, self._progress("wake", "Downloading wake word model"))
+
+    def _fetch_tts(self, tts_dir: str | None):
+        """Download the voice model unless a folder was chosen or the files
+        are already in one of the usual places."""
+        if tts_dir or find_kokoro_models() is not None:
+            return
+        downloads.download_files(
+            [
+                (KOKORO_MODEL_URL, DEFAULT_KOKORO_DIR / KOKORO_MODEL_FILE),
+                (KOKORO_VOICES_URL, DEFAULT_KOKORO_DIR / KOKORO_VOICES_FILE),
+            ],
+            self._progress("tts", "Downloading voice model"),
+        )
+
+    def _fetch_models(self, kwargs: dict):
+        """Download the speech models that are neither found nor pointed to,
+        with visible progress.
+
+        On a fresh install the first launch fetches large models (1.6 GB for
+        large-v3-turbo, 335 MB for the voice); without this the UI would only
+        say "Loading models". A model folder chosen in Settings is used as it
+        is and never downloaded.
+        """
+        try:
+            self._fetch_stt(
+                kwargs.get("whisper_model", "auto"),
+                kwargs.get("wake_word"),
+                whisper_engine=kwargs.get("whisper_engine", "auto"),
+                whisper_device=kwargs.get("whisper_device", "auto"),
+            )
+            self._fetch_tts(kwargs.get("tts_models_dir"))
+        finally:
+            self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
+
+    def setup_info(self) -> dict:
+        """For the first-launch setup: what would be downloaded, roughly how
+        much, and what is already on this machine."""
+        engine = resolve_engine("auto")
+        model = resolve_model("auto", engine, resolve_device(engine))
+        return {
+            "stt": {
+                "engine": engine,
+                "model": model,
+                "cached": downloads.is_cached(model_repo(model, engine)),
+                "size_mb": APPROX_MODEL_MB.get(model),
+            },
+            "tts": {"found": str(find_kokoro_models() or ""), "size_mb": KOKORO_MB},
+            "ollama_url": effective_host(self._ollama_host),
+        }
+
+    @staticmethod
+    def check_model_paths(stt_path: str | None = None, tts_dir: str | None = None) -> dict:
+        """Whether chosen model folders hold what they should."""
+        if stt_path:
+            folder = Path(stt_path).expanduser()
+            if not folder.is_dir() or folder_engine(folder) is None:
+                return {
+                    "ok": False,
+                    "error": f"{folder} holds no Whisper model "
+                    "(an MLX conversion or a faster-whisper model folder)",
+                }
+        if tts_dir and not kokoro_files_in(Path(tts_dir).expanduser()):
+            return {
+                "ok": False,
+                "error": f"{tts_dir} does not hold {KOKORO_MODEL_FILE} and {KOKORO_VOICES_FILE}",
+            }
+        return {"ok": True}
+
+    def set_model_paths(self, stt_path: str | None = None, tts_dir: str | None = None) -> dict:
+        """Use model folders the user already has ("" = download as usual).
+
+        A folder without the expected files is refused right away; loading
+        the new model takes seconds, so it happens in the background and the
+        running assistant switches over when it is ready.
+        """
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        checked = self.check_model_paths(stt_path, tts_dir)
+        if not checked["ok"]:
+            return checked
+
+        def load():
+            assistant = self.assistant
+            try:
+                if stt_path is not None:
+                    model = stt_path or "auto"
+                    self._fetch_stt(model)
+                    assistant.transcriber = WhisperTranscriber(model, quiet=True)
+                if tts_dir is not None:
+                    self._fetch_tts(tts_dir)
+                    generator = KokoroGenerator(
+                        assistant.tts_generator.voice,
+                        assistant.tts_generator.speed,
+                        quiet=True,
+                        models_dir=tts_dir or None,
+                    )
+                    assistant.tts_generator = generator
+                    assistant.speech_pipeline.generator = generator
+                self.bus.emit("config", assistant.config_info())
+            except Exception as e:
+                self.bus.emit("error", {"message": f"Could not load the model: {e}"})
+            finally:
+                self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
+
+        threading.Thread(target=load, daemon=True).start()
+        return {"ok": True}
+
+    def _warn_if_ollama_unreachable(self) -> bool:
+        """Say plainly what is missing when no Ollama server answers, e.g. on
+        a computer where Ollama is not installed yet. Returns whether one answers."""
+        if getattr(self.assistant.conversation, "reachable", True):
+            return True
+        url = effective_host(self._ollama_host)
+        self.bus.emit(
+            "error",
+            {
+                "message": (
+                    f"Can't reach Ollama at {url}. Install it from ollama.com and start "
+                    f"it, then download a model, e.g.: ollama pull qwen3:1.7b. Or set "
+                    f"another server in Settings."
+                ),
+                # Retracted by the UI once a reachable server is set
+                "kind": "ollama_unreachable",
+            },
+        )
+        return False
+
     def _warn_if_model_missing(self):
         """Report a missing Ollama model up front rather than on first reply."""
         available = [
@@ -460,6 +648,11 @@ class AssistantController:
             where = host or "the default server"
             return {"ok": False, "error": f"Cannot reach Ollama at {where}: {e}"}
         self._ollama_host = host
+        # A server answers now: the "can't reach Ollama" warning no longer holds
+        with self._transcript_lock:
+            self._transcript = [
+                e for e in self._transcript if e["data"].get("kind") != "ollama_unreachable"
+            ]
         if self.assistant is not None:
             self.assistant.conversation.set_host(host)
             if self.assistant.conversation.vision_model:

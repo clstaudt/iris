@@ -91,14 +91,17 @@ class ConversationManager:
         # Test Ollama connection
         if not quiet:
             print(f"Testing Ollama connection with model '{model}'...")
+        # Not fatal: the app starts without a server and says what is missing,
+        # and a server can be set later (set_host)
         try:
             self.client.list()
+            self.reachable = True
             if not quiet:
                 print("Ollama connected")
         except Exception as e:
+            self.reachable = False
             print(f"Ollama connection failed: {e}")
             print("Make sure Ollama is running: brew services start ollama")
-            raise
 
         if not quiet:
             print(f"Model context length: {self.max_context_tokens:,} tokens")
@@ -136,6 +139,7 @@ class ConversationManager:
         """Switch to another Ollama server, keeping the conversation history."""
         self.host = normalize_host(host)
         self.client = ollama_client(self.host)
+        self.reachable = True  # set_host is only called for a server that answered
         self.max_context_tokens = self._get_model_context_length()
 
     def set_model(self, model: str):

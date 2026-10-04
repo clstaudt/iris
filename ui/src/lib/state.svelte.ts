@@ -125,6 +125,8 @@ export interface AssistantConfig {
   wake_word?: string;
   wake_window?: number;
   sleep_word?: string;
+  stt_model_path?: string;
+  tts_models_dir?: string;
   ollama_host?: string;
   ollama_url?: string;
   mic_on?: boolean;
@@ -147,6 +149,18 @@ interface SavedSettings {
   wake_word?: string;
   wake_window?: number;
   sleep_word?: string;
+  /** Model folders chosen by the user; empty means download as usual */
+  stt_model_path?: string;
+  tts_models_dir?: string;
+  /** The first-launch setup has been completed */
+  setup_done?: boolean;
+}
+
+/** What the first-launch setup offers to download. */
+export interface SetupInfo {
+  stt: { engine: string; model: string; cached: boolean; size_mb: number | null };
+  tts: { found: string; size_mb: number };
+  ollama_url: string;
 }
 
 const SETTINGS_KEY = "iris.settings";
@@ -183,6 +197,17 @@ class IrisStore {
   /** The side panel beside the conversation, if one is open */
   panel = $state<"settings" | "memory" | null>(null);
   memoryTopics = $state<MemoryTopic[]>([]);
+  /** First launch: the setup screen is shown and nothing starts until done.
+   *  Shown from the first frame, while the core is still booting. */
+  needsSetup = $state(!loadSettings().setup_done);
+  setupInfo = $state<SetupInfo | null>(null);
+  /** Setup is done and Iris is fetching its models; the setup screen stays
+   *  until they are in */
+  installing = $state(false);
+  /** How far the setup flower had opened, so the orb's bloom carries on */
+  bloomFrom = 0;
+  /** A model download at first start, shown under the orb */
+  setup = $state<{ model: string; label: string; done: number; total: number } | null>(null);
   /** When Iris falls asleep (performance.now() ms), or null when it isn't awake */
   awakeUntil = $state<number | null>(null);
 
@@ -215,13 +240,29 @@ class IrisStore {
 
   handleEvent(type: string, data: Record<string, unknown>) {
     switch (type) {
+      case "setup.progress":
+        this.setup = data.label
+          ? {
+              model: data.model as string,
+              label: data.label as string,
+              done: data.done as number,
+              total: data.total as number,
+            }
+          : null;
+        if (!data.label) this.leaveSetup();
+        break;
+
       case "config": {
         const previous = this.config?.llm_model;
+        const previousServer = this.config?.ollama_url;
         this.config = data as unknown as AssistantConfig;
         this.persona = this.config.persona.toLowerCase();
         this.speakReplies = this.config.speak_replies ?? true;
         if (previous && previous !== this.config.llm_model) {
           this.messages = this.messages.filter((m) => m.kind !== "model_missing");
+        }
+        if (previousServer && previousServer !== this.config.ollama_url) {
+          this.messages = this.messages.filter((m) => m.kind !== "ollama_unreachable");
         }
         this.restoreMic();
         break;
@@ -230,6 +271,8 @@ class IrisStore {
       case "state":
         this.state = (data.state as AssistantState) ?? "idle";
         this.running = this.state !== "idle";
+        // Started, or failed before its models were fetched
+        if (this.state !== "starting") this.leaveSetup();
         break;
 
       case "audio.level":
@@ -414,6 +457,21 @@ class IrisStore {
     await rpc("wake.options", options);
   }
 
+  /** Point Iris at model folders it should use as they are ("" = download).
+   *  Returns an error message, or null when the folder was accepted. */
+  async setModelPaths(paths: { stt_path?: string; tts_dir?: string }): Promise<string | null> {
+    const method = this.needsSetup ? "models.check" : "models.set";
+    const result = await rpc<{ ok: boolean; error?: string }>(method, paths);
+    if (!result.ok) return result.error ?? "Not a model folder";
+    if (!this.needsSetup) {
+      saveSettings({
+        ...(paths.stt_path !== undefined ? { stt_model_path: paths.stt_path } : {}),
+        ...(paths.tts_dir !== undefined ? { tts_models_dir: paths.tts_dir } : {}),
+      });
+    }
+    return null;
+  }
+
   async setTool(name: string, enabled: boolean) {
     saveSettings({ tools: { ...loadSettings().tools, [name]: enabled } });
     await rpc("tools.set", { name, enabled });
@@ -471,12 +529,15 @@ class IrisStore {
 
     const micStatus = await window.iris.micStatus();
     if (micStatus !== "granted") {
+      const packaged = await window.iris.isPackaged();
       this.messages.push({
         role: "error",
-        text:
-          `Microphone access ${micStatus}. Enable it under System Settings > ` +
-          `Privacy & Security > Microphone for the app that launched this dev ` +
-          `server (Cursor, VS Code, Terminal or iTerm), then relaunch it.`,
+        text: packaged
+          ? `Microphone access ${micStatus}. Enable it for Iris under System ` +
+            `Settings > Privacy & Security > Microphone, then reopen Iris.`
+          : `Microphone access ${micStatus}. Enable it under System Settings > ` +
+            `Privacy & Security > Microphone for the app that launched this dev ` +
+            `server (Cursor, VS Code, Terminal or iTerm), then relaunch it.`,
         streaming: false,
       });
     }
@@ -501,24 +562,58 @@ class IrisStore {
         }
       }
 
-      // Start before listing models: listing asks Ollama about each one,
-      // which is slow against a remote server
-      if (!info.running) {
-        const saved = loadSettings();
-        const options: Record<string, unknown> = {};
-        if (saved.llm_model) options.llm_model = saved.llm_model;
-        if (saved.persona) options.persona = saved.persona;
-        if (saved.speak_replies !== undefined) options.speak_replies = saved.speak_replies;
-        if (saved.tools) options.tools = saved.tools;
-        if (saved.ollama_host) options.ollama_host = saved.ollama_host;
-        if (saved.amnesia) options.amnesia = true;
-        if (saved.wake_word) options.wake_word = saved.wake_word;
-        if (saved.wake_window) options.wake_window = saved.wake_window;
-        if (saved.sleep_word !== undefined) options.sleep_word = saved.sleep_word;
-        this.speakReplies = saved.speak_replies ?? true;
-        await rpc("assistant.start", options);
+      // First launch: nothing starts (or downloads) until the user has said
+      // which server, model and speech models to use
+      if (info.running) this.needsSetup = false;
+      if (this.needsSetup) {
+        this.setupInfo = await rpc<SetupInfo>("setup.info");
+        return;
       }
 
+      // Start before listing models: listing asks Ollama about each one,
+      // which is slow against a remote server
+      if (!info.running) await this.startAssistant();
+      this.loadLists();
+    } catch (err) {
+      console.error("[store] init failed:", err);
+    }
+  }
+
+  /** Save the first-launch choices and start Iris with them. The setup
+   *  screen stays while the speech models download. */
+  async finishSetup(choices: SavedSettings) {
+    saveSettings({ ...choices, setup_done: true });
+    this.installing = true;
+    await this.startAssistant();
+    this.loadLists();
+  }
+
+  private leaveSetup() {
+    if (!this.installing) return;
+    this.installing = false;
+    this.needsSetup = false;
+  }
+
+  private async startAssistant() {
+    const saved = loadSettings();
+    const options: Record<string, unknown> = {};
+    if (saved.llm_model) options.llm_model = saved.llm_model;
+    if (saved.persona) options.persona = saved.persona;
+    if (saved.speak_replies !== undefined) options.speak_replies = saved.speak_replies;
+    if (saved.tools) options.tools = saved.tools;
+    if (saved.ollama_host) options.ollama_host = saved.ollama_host;
+    if (saved.amnesia) options.amnesia = true;
+    if (saved.wake_word) options.wake_word = saved.wake_word;
+    if (saved.wake_window) options.wake_window = saved.wake_window;
+    if (saved.sleep_word !== undefined) options.sleep_word = saved.sleep_word;
+    if (saved.stt_model_path) options.stt_model_path = saved.stt_model_path;
+    if (saved.tts_models_dir) options.tts_models_dir = saved.tts_models_dir;
+    this.speakReplies = saved.speak_replies ?? true;
+    await rpc("assistant.start", options);
+  }
+
+  private loadLists() {
+    try {
       rpc<{ devices: { index: number; name: string }[] }>("audio.list_inputs").then(
         (inputs) => {
           this.inputDevices = inputs.devices;
