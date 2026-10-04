@@ -26,27 +26,39 @@ from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
 from iris.tts import KokoroGenerator, SpeechPipeline, is_language_supported
 from iris.ui import DisplayManager, StatusManager
-from iris.wakeword import WakeWordDetector
+from iris.wakeword import WakeWordDetector, match_sleep_word
 
 warnings.filterwarnings("ignore")
 
 # With a wake word set: how long the assistant keeps listening after a turn
-# before it waits for its name again
-WAKE_WINDOW = 30.0
+# (or after the user last spoke) before it goes back to sleep
+DEFAULT_WAKE_WINDOW = 30.0
+# Said while awake, this puts the assistant straight back to sleep
+DEFAULT_SLEEP_WORD = "That's all"
 # While dormant an utterance ends after this much silence, so the wake word
 # is recognized promptly instead of after the conversational pause
 DORMANT_SILENCE = 0.8
 
 
-def _wake_chime() -> np.ndarray:
-    """Two soft rising tones that say "I'm listening" across the room."""
+def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
+    """Soft tones in sequence, each swelling in and out."""
     rate = 24000
     tones = []
-    for freq in (660.0, 990.0):
+    for freq in freqs:
         t = np.arange(int(rate * 0.09)) / rate
         envelope = np.sin(np.pi * t / t[-1]) ** 2
         tones.append(0.12 * envelope * np.sin(2 * np.pi * freq * t))
     return np.concatenate(tones).astype(np.float32)
+
+
+def _wake_chime() -> np.ndarray:
+    """Two soft rising tones that say "I'm listening" across the room."""
+    return _chime_tones((660.0, 990.0))
+
+
+def _sleep_chime() -> np.ndarray:
+    """The same tones falling: "I'm going to sleep"."""
+    return _chime_tones((990.0, 660.0))
 
 
 def _as_int(value) -> int:
@@ -82,6 +94,8 @@ class VoiceAssistant:
         ollama_host: Optional[str] = None,
         memory: bool = True,
         wake_word: Optional[str] = None,
+        wake_window: float = DEFAULT_WAKE_WINDOW,
+        sleep_word: Optional[str] = DEFAULT_SLEEP_WORD,
     ):
         """
         Initialize the voice assistant.
@@ -113,7 +127,9 @@ class VoiceAssistant:
             memory: Keep one continuous conversation in long-term memory
                 (~/.iris/memory.db, or IRIS_MEMORY_DB), remembered by topic
             wake_word: If set, listen only for this word until addressed, and
-                fall dormant again after WAKE_WINDOW seconds without a turn
+                fall dormant again after wake_window seconds without a turn
+            wake_window: Seconds the assistant stays awake after a turn
+            sleep_word: Said while awake, puts the assistant back to sleep
         """
         # Initialize console
         self.console = Console()
@@ -144,6 +160,10 @@ class VoiceAssistant:
         self.wake_word: Optional[str] = None
         self.wake_detector: Optional[WakeWordDetector] = None
         self.awake_until = 0.0
+        self.wake_window = float(wake_window)
+        self.sleep_word = (sleep_word or "").strip() or None
+        self._was_dormant = True  # to notice the moment it falls asleep
+        self._last_window_emit = 0.0
 
         # Track current conversation language for continuity
         self.conversation_language = "en"
@@ -262,6 +282,8 @@ class VoiceAssistant:
             "memory": self.memory is not None,
             "amnesia": self.conversation.amnesia,
             "wake_word": self.wake_word or "",
+            "wake_window": self.wake_window,
+            "sleep_word": self.sleep_word or "",
             "mic_on": not self.pause_event.is_set(),
             "paused": self.suspend_event.is_set(),
             "tools": self.tools.group_states() if self.tools else {},
@@ -277,7 +299,15 @@ class VoiceAssistant:
             engine = self.transcriber.engine if engine == "auto" else engine
             self.wake_detector = WakeWordDetector(engine)
         self.wake_word = word
-        self.awake_until = 0.0  # a new word starts dormant
+        self.awake_until = 0.0  # a new word starts dormant, without a chime
+        self._was_dormant = True
+
+    def set_wake_options(self, window: Optional[float] = None, sleep_word: Optional[str] = None):
+        """Change how long it stays awake, and its sleep word ("" for none)."""
+        if window is not None:
+            self.wake_window = max(5.0, float(window))
+        if sleep_word is not None:
+            self.sleep_word = sleep_word.strip() or None
 
     @property
     def dormant(self) -> bool:
@@ -285,7 +315,34 @@ class VoiceAssistant:
         return bool(self.wake_word) and time.monotonic() >= self.awake_until
 
     def _stay_awake(self):
-        self.awake_until = time.monotonic() + WAKE_WINDOW
+        """Start the awake window over and tell the UI how long it lasts."""
+        self.awake_until = time.monotonic() + self.wake_window
+        self._last_window_emit = time.monotonic()
+        if self.event_bus:
+            self.event_bus.emit("wake.window", {"remaining": self.wake_window})
+
+    def _keep_awake_while_speaking(self):
+        """The user is talking: the window must not run out mid-sentence.
+        The UI is told at most once a second."""
+        now = time.monotonic()
+        self.awake_until = max(self.awake_until, now + self.wake_window)
+        if now - self._last_window_emit >= 1.0:
+            self._last_window_emit = now
+            if self.event_bus:
+                self.event_bus.emit("wake.window", {"remaining": self.wake_window})
+
+    def _note_dormancy(self, dormant: bool):
+        """Mark the moment the assistant falls asleep: a falling chime, and
+        the UI learns the awake window is over."""
+        if dormant and not self._was_dormant:
+            if self.event_bus:
+                self.event_bus.emit("wake.window", {"remaining": 0})
+                self.event_bus.emit("sleep", {})
+            # Only audible when it was actually listening for follow-ups
+            listening = not (self.pause_event.is_set() or self.suspend_event.is_set())
+            if self.speak_replies and listening:
+                sd.play(_sleep_chime(), 24000)
+        self._was_dormant = dormant
 
     def _chime(self):
         """Acknowledge the wake word when no request came with it."""
@@ -310,7 +367,8 @@ class VoiceAssistant:
                 self._chime()
                 return
         self._run_voice_turn(audio_path)
-        if self.wake_word:
+        # Unless the sleep word just put it to sleep (awake_until is zero)
+        if self.wake_word and self.awake_until > 0:
             self._stay_awake()
 
     def _speak(self, text: str):
@@ -385,6 +443,15 @@ class VoiceAssistant:
         self.status_manager.update_status_bar(self.speech_pipeline)
 
         if not text:
+            return
+
+        # "That's all, Iris": back to sleep, nothing to answer
+        if (
+            self.wake_word
+            and self.sleep_word
+            and match_sleep_word(text, self.sleep_word, self.wake_word)
+        ):
+            self.awake_until = 0.0
             return
 
         # Determine response language: use detected if TTS supports it,
@@ -609,6 +676,10 @@ class VoiceAssistant:
                 if self.stop_event.is_set():
                     break
 
+                # Notice falling asleep whatever the loop is doing, so the UI
+                # learns it even with the mic off
+                self._note_dormancy(self.dormant)
+
                 # Stale barge-in from a turn that already ended
                 if self.interrupt_event.is_set():
                     self.interrupt_event.clear()
@@ -662,6 +733,8 @@ class VoiceAssistant:
                             # conversation: memory filing may use the time
                             if not dormant:
                                 self._last_voice = time.monotonic()
+                                if self.wake_word:
+                                    self._keep_awake_while_speaking()
                         self.display_manager.update_audio_level_display(level, self.speech_pipeline)
                         # Throttle level events to ~15 Hz for external UIs
                         if self.event_bus:

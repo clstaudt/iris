@@ -20,6 +20,10 @@ Event types:
     chat.done    {"text": str, "interrupted": bool}
     tool.use     {"tool": str, "detail": str}
     wake         {"word": str}                       the wake word was heard
+    wake.window  {"remaining": float}                seconds until it falls asleep;
+                                                     0 once it is asleep
+    sleep        {}                                  it fell asleep (window over,
+                                                     or the sleep word)
     error        {"message": str, "kind": str}         kind is optional
     memory.updated {}                                topics were filed or forgotten
 """

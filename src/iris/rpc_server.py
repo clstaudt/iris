@@ -116,6 +116,9 @@ def main():
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
         "wake.set": lambda params: controller.set_wake_word(params.get("word", "")),
+        "wake.options": lambda params: controller.set_wake_options(
+            params.get("window"), params.get("sleep_word")
+        ),
         "voice.set_output": lambda params: controller.set_voice_output(
             bool(params.get("enabled", True))
         ),

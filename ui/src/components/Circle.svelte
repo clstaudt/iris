@@ -39,6 +39,8 @@
   // Startup bloom: while the models load an iris unfolds where the ring will
   // be, then its petals flatten out and fade into the ring.
   const BLOOM_OPEN = 3.2; // seconds for the bud to open
+  // Over the last seconds of the awake window the orb drifts toward sleep
+  const FALL_ASLEEP = 10;
   const BLOOM_MERGE = 1.6; // seconds for the flower to become the ring
   const TAU = Math.PI * 2;
   // The title image's petals: violet to blue, lit edges, a warm beard
@@ -222,7 +224,18 @@
       const time = t / 1000;
 
       const state: AssistantState = store.state;
-      const target = hexToRgb(STATE_COLORS[state] ?? STATE_COLORS.idle);
+
+      // Falling asleep: while it listens awake, the last seconds of the
+      // window tint the orb toward its sleeping tone; a new turn, or the user
+      // speaking, restarts the window and it brightens again
+      let drowsy = 0;
+      if (store.awakeUntil !== null && state === "listening") {
+        const remaining = (store.awakeUntil - performance.now()) / 1000;
+        drowsy = Math.min(1, Math.max(0, 1 - remaining / FALL_ASLEEP));
+      }
+      const awake = hexToRgb(STATE_COLORS[state] ?? STATE_COLORS.idle);
+      const asleep = hexToRgb(STATE_COLORS.dormant);
+      const target = awake.map((c, i) => c + (asleep[i] - c) * drowsy);
       for (let i = 0; i < 3; i++) col[i] += (target[i] - col[i]) * 0.05;
 
       // One exposure per trigger: the shutter fires when vision starts and
@@ -273,7 +286,7 @@
 
       const breathe = 0.5 + 0.5 * Math.sin(time * 0.55);
       // Kept well off zero: the ring should brighten with the voice, not blink
-      const glow = 0.4 + shown * 0.6;
+      const glow = (0.4 + shown * 0.6) * (1 - 0.35 * drowsy);
       const r = R * (1 + shown * 0.045); // the ring swells with the audio it meters
 
       ctx!.clearRect(0, 0, SIZE, SIZE);

@@ -23,8 +23,6 @@
     class="absolute text-[11.5px] tracking-wide text-ink-3"
     style="top: {RING_BOTTOM + GAP}px"
   >
-    {store.state === "dormant"
-      ? `Waiting for “${store.config?.wake_word ?? ""}”`
-      : (STATE_LABELS[store.state] ?? "")}
+    {STATE_LABELS[store.state] ?? ""}
   </div>
 </div>
