@@ -530,6 +530,7 @@ class AudioPlayer:
         audio: np.ndarray,
         sample_rate: int,
         on_level: Callable[[float], None] | None,
+        cancelled: Callable[[], bool] | None = None,
     ):
         """Play a buffer, honoring pause() and stop() while it plays.
 
@@ -537,11 +538,15 @@ class AudioPlayer:
         far playback got, and the remainder is played on resume.
         """
         self._stopped.clear()
+
+        def stopped() -> bool:
+            return self._stopped.is_set() or (cancelled is not None and cancelled())
+
         position = 0
         while position < len(audio):
-            while self._paused.is_set() and not self._stopped.is_set():
+            while self._paused.is_set() and not stopped():
                 time.sleep(0.05)
-            if self._stopped.is_set():
+            if stopped():
                 return
 
             segment = np.ascontiguousarray(audio[position:])
@@ -578,7 +583,7 @@ class AudioPlayer:
             buffered = latency + 2 * PLAYBACK_BLOCK / sample_rate
             deadline = len(segment) / sample_rate + buffered + 2.0
             while time.monotonic() - started < deadline:
-                if self._paused.is_set() or self._stopped.is_set():
+                if self._paused.is_set() or stopped():
                     break
                 try:
                     if not sd.get_stream().active:
@@ -587,8 +592,8 @@ class AudioPlayer:
                     pass
                 time.sleep(0.02)
             elapsed = time.monotonic() - started
-            cut_by_pause = self._paused.is_set() and not self._stopped.is_set()
-            if cut_by_pause:
+            cut_by_pause = self._paused.is_set() and not stopped()
+            if cut_by_pause or stopped():
                 sd.stop()
 
             if level_thread:
@@ -602,7 +607,12 @@ class AudioPlayer:
             heard = max(0.0, elapsed - latency - RESUME_REWIND)
             position += int(heard * sample_rate)
 
-    def play(self, audio_file: str, on_level: Callable[[float], None] | None = None):
+    def play(
+        self,
+        audio_file: str,
+        on_level: Callable[[float], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ):
         """
         Play pre-generated audio file with optional filter.
 
@@ -610,6 +620,8 @@ class AudioPlayer:
             audio_file: Path to WAV file to play
             on_level: Optional callback receiving the playback level (0.0-1.0)
                 at ~15 Hz while the audio plays, for output level meters
+            cancelled: Optional callable; playback ends (or never starts) as
+                soon as it returns True
         """
         try:
             # Load audio into memory completely before any playback
@@ -644,7 +656,7 @@ class AudioPlayer:
                 else:
                     audio[-fade_samples:] *= fade_out[:, np.newaxis]
 
-            self._play_resumable(np.ascontiguousarray(audio), sample_rate, on_level)
+            self._play_resumable(np.ascontiguousarray(audio), sample_rate, on_level, cancelled)
 
         except Exception as e:
             print(f"Error playing audio: {e}")

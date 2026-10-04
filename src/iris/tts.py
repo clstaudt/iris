@@ -340,6 +340,11 @@ class SpeechPipeline:
         self.is_generating_flag = threading.Event()
         self._status_lock = threading.Lock()
 
+        # stop() starts a new epoch; work queued in an older one is dropped
+        # wherever it is, even audio still being generated when stop() came
+        self._epoch = 0
+        self._generating_epoch: int | None = None
+
         # Worker threads
         self.generation_worker_thread = None
         self.playback_worker_thread = None
@@ -369,10 +374,14 @@ class SpeechPipeline:
                     self.audio_queue.put(None)
                     break
 
-                # Unpack text and language
-                text, language = item
+                # Unpack text, language and the epoch it was queued in
+                text, language, epoch = item
+                if epoch != self._epoch:  # stopped before its turn came
+                    self.text_queue.task_done()
+                    continue
 
                 # Set flag to indicate TTS generation in progress
+                self._generating_epoch = epoch
                 self.is_generating_flag.set()
 
                 # Generate audio file in the requested language
@@ -380,23 +389,35 @@ class SpeechPipeline:
 
                 # Clear flag when done generating
                 self.is_generating_flag.clear()
+                self._generating_epoch = None
 
-                # Put generated audio in playback queue
-                if audio_file:
-                    self.audio_queue.put(audio_file)
+                # Put generated audio in playback queue, unless stop() came
+                # while it was being generated
+                if audio_file and epoch == self._epoch:
+                    self.audio_queue.put((audio_file, epoch))
+                elif audio_file:
+                    Path(audio_file).unlink(missing_ok=True)
                 self.text_queue.task_done()
 
         def playback_worker():
             """Play audio files from audio queue sequentially."""
             while True:
-                audio_file = self.audio_queue.get()
-                if audio_file is None:  # Shutdown signal
+                item = self.audio_queue.get()
+                if item is None:  # Shutdown signal
                     break
+                audio_file, epoch = item
 
-                # Play the audio
-                self.is_speaking_flag.set()
-                self.player.play(audio_file, on_level=self.on_output_level)
-                self.is_speaking_flag.clear()
+                # Play the audio, unless it belongs to a stopped epoch; the
+                # player checks again while playing, so a stop() racing the
+                # start of the clip still silences it
+                if epoch == self._epoch:
+                    self.is_speaking_flag.set()
+                    self.player.play(
+                        audio_file,
+                        on_level=self.on_output_level,
+                        cancelled=lambda: epoch != self._epoch,
+                    )
+                    self.is_speaking_flag.clear()
 
                 # Cleanup
                 try:
@@ -416,9 +437,14 @@ class SpeechPipeline:
     def is_active(self) -> bool:
         """Check if pipeline has pending work or is currently processing."""
         with self._status_lock:
+            # Audio still being generated for a stopped epoch will be dropped:
+            # it does not count as speaking
+            generating = (
+                self.is_generating_flag.is_set() and self._generating_epoch == self._epoch
+            )
             return (
                 not self.text_queue.empty()
-                or self.is_generating_flag.is_set()
+                or generating
                 or not self.audio_queue.empty()
                 or self.is_speaking_flag.is_set()
             )
@@ -432,7 +458,7 @@ class SpeechPipeline:
         Args:
             text: Text to speak
         """
-        self.text_queue.put((text, self.current_language))
+        self.text_queue.put((text, self.current_language, self._epoch))
 
     def wait_for_speech(self):
         """Wait for all speech generation and playback to finish."""
@@ -448,7 +474,10 @@ class SpeechPipeline:
         self.player.resume()
 
     def stop(self):
-        """Stop the speech pipeline immediately."""
+        """Stop the speech pipeline immediately: what plays, what waits, and
+        what is still being generated."""
+        with self._status_lock:
+            self._epoch += 1
         # Stop any currently playing audio
         self.player.stop()
 
@@ -461,7 +490,9 @@ class SpeechPipeline:
                 pass
         while not self.audio_queue.empty():
             try:
-                self.audio_queue.get_nowait()
+                item = self.audio_queue.get_nowait()
+                if item is not None:
+                    Path(item[0]).unlink(missing_ok=True)
                 self.audio_queue.task_done()
             except Exception:
                 pass

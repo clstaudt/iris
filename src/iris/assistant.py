@@ -351,12 +351,13 @@ class VoiceAssistant:
 
             interrupted = False
             try:
-                for chunk_text in self.conversation.chat_stream(
+                stream = self.conversation.chat_stream(
                     prompt,
                     response_language=response_language,
                     on_tool_use=on_tool_use,
                     source=source,
-                ):
+                )
+                for chunk_text in stream:
                     # Paused: stop consuming the reply until resumed (or stopped)
                     while self.suspend_event.is_set() and not self.interrupt_event.is_set():
                         time.sleep(0.05)
@@ -424,7 +425,9 @@ class VoiceAssistant:
                 answer = "".join(full_response)
 
                 if interrupted:
-                    # Cancel any queued/pending speech for this turn
+                    # Stop generating (closing the stream ends the request, so
+                    # the model is free at once) and drop all pending speech
+                    stream.close()
                     self.speech_pipeline.stop()
                     text_buffer = ""
 
@@ -443,8 +446,9 @@ class VoiceAssistant:
                 if not self.status_manager.status_bar_active:
                     self.status_manager.start(self.speech_pipeline)
 
-            # Speak any remaining text that wasn't spoken yet
-            if text_buffer.strip():
+            # Speak any remaining text that wasn't spoken yet, unless the
+            # reply was stopped in the meantime
+            if text_buffer.strip() and not self.interrupt_event.is_set():
                 self._speak(text_buffer)
 
             # Wait for all speech to complete
