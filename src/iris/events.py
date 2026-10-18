@@ -18,6 +18,10 @@ Event types:
                                                      id only for typed turns
     chat.chunk   {"text": str}                       streaming LLM token chunk
     chat.done    {"text": str, "interrupted": bool}
+    chat.continued {}                                the user went on with a spoken
+                                                     turn that seemed over: it and
+                                                     the reply begun to it give way
+                                                     to the whole turn (chat.user)
     tool.use     {"tool": str, "detail": str}
     wake         {"word": str}                       the wake word was heard
     wake.window  {"remaining": float}                seconds until it falls asleep;
@@ -26,7 +30,7 @@ Event types:
                                                      or the sleep word)
     error        {"message": str, "kind": str}         kind is optional
     setup.progress {"model": str, "label": str,      model download at first start
-                    "done": int, "total": int}       (model: stt, wake or tts);
+                    "done": int, "total": int}       (model: stt, wake, turn or tts);
                                                      an empty label when done
     memory.updated {}                                topics were filed or forgotten
 """

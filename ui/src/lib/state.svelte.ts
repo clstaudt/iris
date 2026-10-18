@@ -312,6 +312,20 @@ class IrisStore {
         break;
       }
 
+      case "chat.continued": {
+        // The user went on with the last spoken turn: it and the reply begun
+        // to it give way to the whole turn, which follows as chat.user
+        let last = this.messages.length - 1;
+        while (last >= 0) {
+          const message = this.messages[last];
+          if (message.role === "user" && message.source === "voice") break;
+          last--;
+        }
+        if (last >= 0) this.messages.splice(last);
+        this.streamingIndex = null;
+        break;
+      }
+
       case "chat.done": {
         if (this.streamingIndex !== null && this.messages[this.streamingIndex]) {
           this.messages[this.streamingIndex].text = (data.text as string) ?? "";

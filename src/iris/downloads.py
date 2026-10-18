@@ -11,24 +11,31 @@ from collections.abc import Callable
 from pathlib import Path
 
 import requests
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from tqdm.auto import tqdm
 
 # on_progress(done_bytes, total_bytes)
 Progress = Callable[[int, int], None]
 
 
-def is_cached(repo: str) -> bool:
+def is_cached(repo: str, filename: str | None = None) -> bool:
+    """Whether a repo, or one file of it, is in the Hugging Face cache."""
     try:
-        snapshot_download(repo, local_files_only=True)
+        if filename:
+            hf_hub_download(repo, filename, local_files_only=True)
+        else:
+            snapshot_download(repo, local_files_only=True)
         return True
     except Exception:
         return False
 
 
-def download(repo: str, on_progress: Progress, interval: float = 0.5) -> str:
-    """Download a repo into the Hugging Face cache, reporting bytes summed
-    over all its files at most every `interval` seconds. Returns its path."""
+def download(
+    repo: str, on_progress: Progress, interval: float = 0.5, filename: str | None = None
+) -> str:
+    """Download a repo (or only one file of it) into the Hugging Face cache,
+    reporting bytes summed over all its files at most every `interval`
+    seconds. Returns its path."""
     lock = threading.Lock()
     totals: dict[int, int] = {}
     done: dict[int, int] = {}
@@ -62,7 +69,9 @@ def download(repo: str, on_progress: Progress, interval: float = 0.5) -> str:
                     done[id(self)] = self.n
                 report()
 
-    path = snapshot_download(repo, tqdm_class=ByteProgress)
+    path = snapshot_download(
+        repo, tqdm_class=ByteProgress, allow_patterns=[filename] if filename else None
+    )
     report(force=True)
     return path
 

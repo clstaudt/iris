@@ -17,6 +17,7 @@ ENGINES = {
     "speech recognition (MLX, Apple GPU)": "mlx_whisper",
     "speech recognition (CPU)": "faster_whisper",
     "voice activity detection": "faster_whisper.vad",
+    "turn detection": "iris.turns",
     "speech synthesis": "kokoro_onnx",
     "web search": "ddgs",
     "web pages": "trafilatura",

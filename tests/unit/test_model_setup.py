@@ -6,6 +6,7 @@ from iris import downloads, transcription, tts
 from iris.controller import AssistantController
 from iris.events import EventBus
 from iris.transcription import WhisperTranscriber, folder_engine
+from iris.turns import SMART_TURN_FILE
 
 
 def test_a_model_folder_names_its_engine(tmp_path):
@@ -106,15 +107,15 @@ def _record(bus):
 def test_first_start_fetches_what_is_missing_with_progress(tmp_path, monkeypatch):
     fetched = []
 
-    def download(repo, on_progress):
-        fetched.append(repo)
+    def download(repo, on_progress, filename=None):
+        fetched.append(filename or repo)
         on_progress(50, 100)
 
     def download_files(files, on_progress):
         fetched.extend(target.name for _, target in files)
         on_progress(3, 4)
 
-    monkeypatch.setattr(downloads, "is_cached", lambda repo: False)
+    monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: False)
     monkeypatch.setattr(downloads, "download", download)
     monkeypatch.setattr(downloads, "download_files", download_files)
     monkeypatch.setattr("iris.controller.find_kokoro_models", lambda: None)
@@ -128,12 +129,13 @@ def test_first_start_fetches_what_is_missing_with_progress(tmp_path, monkeypatch
 
     assert fetched == [
         "Systran/faster-whisper-small",
+        SMART_TURN_FILE,
         tts.KOKORO_MODEL_FILE,
         tts.KOKORO_VOICES_FILE,
     ]
     progress = [data for kind, data in events if kind == "setup.progress"]
-    steps = [(p["model"], p["done"], p["total"]) for p in progress[:2]]
-    assert steps == [("stt", 50, 100), ("tts", 3, 4)]
+    steps = [(p["model"], p["done"], p["total"]) for p in progress[:3]]
+    assert steps == [("stt", 50, 100), ("turn", 50, 100), ("tts", 3, 4)]
     # Done: the UI drops its progress and leaves the setup screen
     assert progress[-1]["label"] == ""
 
@@ -142,8 +144,10 @@ def test_chosen_folders_are_used_as_they_are(tmp_path, monkeypatch):
     stt = tmp_path / "whisper"
     stt.mkdir()
     (stt / "model.bin").write_bytes(b"")
-    monkeypatch.setattr(downloads, "download", lambda *a: pytest.fail("downloaded"))
+    monkeypatch.setattr(downloads, "download", lambda *a, **k: pytest.fail("downloaded"))
     monkeypatch.setattr(downloads, "download_files", lambda *a: pytest.fail("downloaded"))
+    # Smart Turn has no folder to choose: it is fetched unless cached
+    monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: True)
 
     bus = EventBus()
     events = _record(bus)
@@ -153,7 +157,7 @@ def test_chosen_folders_are_used_as_they_are(tmp_path, monkeypatch):
 
 
 def test_setup_info_says_what_is_already_here(tmp_path, monkeypatch):
-    monkeypatch.setattr(downloads, "is_cached", lambda repo: True)
+    monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: True)
     monkeypatch.setattr("iris.controller.find_kokoro_models", lambda: tmp_path)
     info = AssistantController(EventBus()).setup_info()
     assert info["stt"]["cached"] is True and info["stt"]["model"]

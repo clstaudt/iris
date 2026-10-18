@@ -1,11 +1,13 @@
 """Audio recording, playback, and filters for voice assistant."""
 
+import queue
 import tempfile
 import threading
 import time
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +15,8 @@ import numpy as np
 import scipy.signal as signal
 import sounddevice as sd
 import soundfile as sf
+
+from iris.turns import FRAME, SAMPLE_RATE, SmartTurn, SpeechDetector, TurnTracker
 
 warnings.filterwarnings("ignore")
 
@@ -159,7 +163,8 @@ def get_filter(filter_name: str) -> AudioFilter | None:
 
 
 class AudioRecorder:
-    """Records audio from microphone with silence detection."""
+    """Records the user's turns from the microphone: from the first syllable
+    to where Smart Turn hears the end of what they had to say."""
 
     def __init__(
         self,
@@ -168,22 +173,28 @@ class AudioRecorder:
         silence_duration: float = 2.5,
         chunk_duration: float = 2.0,
         device: int | None = None,
+        turn_end: SmartTurn | None = None,
     ):
         """
         Initialize audio recorder.
 
         Args:
-            sample_rate: Audio sample rate for recording
-            silence_threshold: RMS threshold for silence detection
-            silence_duration: Duration of silence to stop recording
+            sample_rate: Audio sample rate for recording (16 kHz for listen())
+            silence_threshold: RMS level above which the input counts as
+                sound, for level meters
+            silence_duration: Silence that ends a turn whatever Smart Turn
+                says, and all that does without it
             chunk_duration: Duration of chunks for streaming transcription
             device: Input device index (None = system default)
+            turn_end: Smart Turn, which hears when a turn is finished
         """
         self.sample_rate = sample_rate
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
         self.chunk_duration = chunk_duration
         self.device = device
+        self.turn_end = turn_end
+        self._speech: SpeechDetector | None = None  # loaded on first listen()
         self._device_error = False  # Track if we've had a device error
 
     @staticmethod
@@ -256,70 +267,39 @@ class AudioRecorder:
         silence_duration: float | None = None,
     ) -> str | None:
         """
-        Record audio from microphone until silence is detected.
-        Starts recording immediately without waiting for speech threshold.
+        Record one turn from the microphone.
+
+        The microphone opens at once; the turn starts with speech and ends
+        when Smart Turn judges a pause in it the end of the turn, or after
+        silence_duration of silence.
 
         Args:
             on_level: Optional callback called with audio level (0.0-1.0) for visualization
             should_stop: Optional callable; recording aborts (returning None) as soon
                 as it returns True. Checked every 50 ms.
-            silence_duration: Seconds of silence that end the recording; defaults
-                to the recorder's setting
+            silence_duration: Seconds of silence that end the turn whatever
+                Smart Turn says; defaults to the recorder's setting
 
         Returns:
             Path to temporary audio file, or None if recording failed or was aborted
         """
-        audio_chunks = []
-        silent_chunks = 0
-        has_audio = False
         silence = self.silence_duration if silence_duration is None else silence_duration
-        max_silent_chunks = int(silence * self.sample_rate / 1024)
-
-        def audio_callback(indata, frames, time_info, status):
-            """Callback for audio stream."""
-            audio_chunks.append(indata.copy())
+        tracker = TurnTracker(self._detector(), self.turn_end, silence)
+        level = self._level_meter(on_level)
 
         # Start recording immediately
         try:
-            with sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                callback=audio_callback,
-                blocksize=1024,
-                device=self.device,
-            ):
-                try:
-                    while True:
-                        sd.sleep(50)  # Faster updates for smoother visualization
-
-                        if should_stop and should_stop():
-                            return None
-
-                        if len(audio_chunks) > 0:
-                            recent_chunk = audio_chunks[-1]
-                            rms = np.sqrt(np.mean(recent_chunk**2))
-
-                            # Notify level callback (normalize to 0-1 range)
-                            if on_level:
-                                # Scale RMS to a 0-1 range (typical speech is 0.01-0.2)
-                                # float() matters: rms is a numpy scalar, which
-                                # is not JSON-serializable for GUI consumers
-                                normalized_level = float(min(1.0, rms / 0.15))
-                                on_level(normalized_level)
-
-                            # Track if we've captured any audio above silence
-                            if rms > self.silence_threshold:
-                                has_audio = True
-                                silent_chunks = 0
-                            else:
-                                silent_chunks += 1
-                                # Only stop on silence if we've recorded some audio
-                                if has_audio and silent_chunks >= max_silent_chunks:
-                                    break
-
-                except KeyboardInterrupt:
-                    # Re-raise to allow proper shutdown in main loop
-                    raise
+            with self._microphone() as frames:
+                while True:
+                    if should_stop and should_stop():
+                        return None
+                    try:
+                        frame = frames.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                    level(frame)
+                    if tracker.feed(frame):
+                        break
         except Exception as e:
             error_str = str(e).lower()
             # Check if this is a device error (no microphone available)
@@ -334,10 +314,7 @@ class AudioRecorder:
                 print(f"Recording error: {e}")
             return None
 
-        if not audio_chunks:
-            return None
-
-        audio_data = np.concatenate(audio_chunks, axis=0)
+        audio_data = tracker.audio()
 
         # Check if we have enough audio (at least 0.3 seconds)
         min_duration = 0.3
@@ -349,6 +326,111 @@ class AudioRecorder:
         sf.write(temp_file.name, audio_data, self.sample_rate)
 
         return temp_file.name
+
+    def listen_on(
+        self,
+        turn: str,
+        on_speech: Callable[[], None],
+        until: Callable[[], bool],
+        should_stop: Callable[[], bool] | None = None,
+        on_level: Callable[[float], None] | None = None,
+        silence_duration: float | None = None,
+    ) -> str | None:
+        """
+        Keep listening after a turn seemed over, while it is being answered.
+
+        Smart Turn can take a pause for the end of a turn that was not over.
+        Should the user go on before until() is true, on_speech() is called at
+        once and the rest of the turn is recorded until it ends, judged as a
+        whole with what came before.
+
+        Args:
+            turn: Path to the turn recorded by listen()
+            on_speech: Called as soon as the user goes on
+            until: Listening ends when this returns True, unless the user has
+                gone on by then
+            should_stop: Recording aborts (returning None) when this returns True
+            on_level: Audio level callback (0.0-1.0) once the user has gone on
+            silence_duration: As for listen()
+
+        Returns:
+            Path to the whole turn, earlier part included, or None if the user
+            did not go on
+        """
+        before, _ = sf.read(turn, dtype="float32")
+        silence = self.silence_duration if silence_duration is None else silence_duration
+        tracker = TurnTracker(self._detector(), self.turn_end, silence, before=before)
+        level = self._level_meter(on_level)
+        try:
+            with self._microphone() as frames:
+                while True:
+                    if should_stop and should_stop():
+                        return None
+                    if not tracker.started and until():
+                        return None
+                    try:
+                        frame = frames.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                    went_on = tracker.started
+                    ended = tracker.feed(frame)
+                    if tracker.started:
+                        if not went_on:
+                            on_speech()
+                        level(frame)
+                    if ended:
+                        break
+        except Exception as e:
+            print(f"Recording error: {e}")
+            return None
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        sf.write(temp_file.name, tracker.audio(), self.sample_rate)
+        return temp_file.name
+
+    def _detector(self) -> SpeechDetector:
+        """The VAD, fresh for a new stretch of audio."""
+        if self.sample_rate != SAMPLE_RATE:
+            raise ValueError(f"Turns are recorded at {SAMPLE_RATE} Hz")
+        if self._speech is None:
+            self._speech = SpeechDetector()
+        self._speech.reset()
+        return self._speech
+
+    @contextmanager
+    def _microphone(self) -> Iterator[queue.Queue]:
+        """The microphone open, its audio arriving in 32 ms frames."""
+        frames: queue.Queue[np.ndarray] = queue.Queue()
+
+        def audio_callback(indata, frame_count, time_info, status):
+            """Callback for audio stream."""
+            frames.put(indata[:, 0].copy())
+
+        with sd.InputStream(
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype="float32",
+            callback=audio_callback,
+            blocksize=FRAME,
+            device=self.device,
+        ):
+            yield frames
+
+    @staticmethod
+    def _level_meter(on_level: Callable[[float], None] | None) -> Callable[[np.ndarray], None]:
+        """Reports the level of the frames it is given to on_level, at ~20 Hz."""
+        last = [0.0]
+
+        def level(frame: np.ndarray):
+            now = time.monotonic()
+            if on_level and now - last[0] >= 0.05:
+                last[0] = now
+                # Scale RMS to a 0-1 range (typical speech is 0.01-0.2);
+                # float() keeps it JSON-serializable for GUI consumers
+                rms = np.sqrt(np.mean(frame**2))
+                on_level(float(min(1.0, rms / 0.15)))
+
+        return level
 
     def listen_streaming(self, on_chunk: Callable[[str], None]) -> Generator[str, None, str | None]:
         """
