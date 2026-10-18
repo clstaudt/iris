@@ -122,6 +122,8 @@ export interface AssistantConfig {
   tts_voice: string;
   input_device: string;
   speak_replies?: boolean;
+  barge_in?: boolean;
+  barge_in_available?: boolean;
   wake_word?: string;
   wake_window?: number;
   sleep_word?: string;
@@ -142,6 +144,8 @@ interface SavedSettings {
   persona?: string;
   input_device?: string;
   speak_replies?: boolean;
+  /** Speaking interrupts the voice */
+  barge_in?: boolean;
   tools?: Record<string, boolean>;
   ollama_host?: string;
   amnesia?: boolean;
@@ -486,6 +490,11 @@ class IrisStore {
     return null;
   }
 
+  async setBargeIn(enabled: boolean) {
+    saveSettings({ barge_in: enabled });
+    await rpc("voice.set_barge_in", { enabled });
+  }
+
   async setTool(name: string, enabled: boolean) {
     saveSettings({ tools: { ...loadSettings().tools, [name]: enabled } });
     await rpc("tools.set", { name, enabled });
@@ -614,6 +623,7 @@ class IrisStore {
     if (saved.llm_model) options.llm_model = saved.llm_model;
     if (saved.persona) options.persona = saved.persona;
     if (saved.speak_replies !== undefined) options.speak_replies = saved.speak_replies;
+    if (saved.barge_in !== undefined) options.barge_in = saved.barge_in;
     if (saved.tools) options.tools = saved.tools;
     if (saved.ollama_host) options.ollama_host = saved.ollama_host;
     if (saved.amnesia) options.amnesia = true;

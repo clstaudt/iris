@@ -34,6 +34,23 @@ SILENCE_THRESHOLD = 0.35
 # pause this long has Smart Turn judge whether it ends the turn
 SPEECH_START = 0.2
 SPEECH_PAUSE = 0.2
+# Over the voice, what the echo canceller leaves of it can sound like speech.
+# Speech this sure (VAD probability) and this long holds the voice: weighed
+# on recordings of a voice's echo in rooms, it holds the voice about once a
+# minute by mistake, and catches nearly every user who speaks.
+HOLD_THRESHOLD = 0.7
+HOLD_TRIGGER = 0.13
+# Held, the voice is listened to this long in the quiet. Once the device has
+# played out what it had (about 0.15 s) and the room is still, speech in at
+# least this share of the time is the user's; anything less was the echo.
+HOLD = 0.55
+HOLD_SETTLE = 0.25
+HOLD_SPEECH = 0.5
+# A short "Stop" is over before the voice has died away. Speech this certain
+# and this long is the user's all the same: the echo canceller, once settled,
+# leaves nothing of the voice that sure.
+HOLD_CERTAIN = 0.9
+HOLD_CERTAIN_TIME = 0.1
 # Audio kept from before speech was recognized, so a turn starts with its
 # first syllable
 PRE_SPEECH = 0.5
@@ -160,11 +177,17 @@ class TurnTracker:
         self._judged = False
         # Smart Turn's verdicts on this turn's pauses, for inspection
         self.verdicts: list[float] = []
+        # The VAD's probability that the last frame was speech
+        self.probability = 0.0
 
     @property
     def started(self) -> bool:
         """Whether the user has started speaking."""
         return bool(self._frames)
+
+    def forget_before(self):
+        """The user began a new turn: the earlier one is not part of it."""
+        self._earlier = None
 
     def audio(self) -> np.ndarray:
         """The turn so far, from just before its first syllable."""
@@ -176,7 +199,7 @@ class TurnTracker:
 
     def feed(self, frame: np.ndarray) -> bool:
         """Take the next 512 samples; True once the turn is over."""
-        probability = self.speech(frame)
+        probability = self.probability = self.speech(frame)
         if not self._frames:
             self._before.append(frame)
             self._speech_run = self._speech_run + 1 if probability >= SPEECH_THRESHOLD else 0

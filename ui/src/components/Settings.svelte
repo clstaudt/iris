@@ -270,6 +270,16 @@
         </select>
         <Icon name="chevron" size={14} class="chevron" />
       </div>
+      {#if store.config?.barge_in_available}
+        <div class="flex items-center justify-between gap-3 py-1.5">
+          <span class="text-[12.5px] text-ink">Interrupt by voice</span>
+          <Switch
+            label="Interrupt by voice"
+            checked={store.config?.barge_in ?? true}
+            onchange={(on) => store.setBargeIn(on)}
+          />
+        </div>
+      {/if}
     </section>
 
     {#if store.config}

@@ -19,10 +19,12 @@ def frames(seconds: float) -> int:
 
 
 class ScriptedSpeech:
-    """A VAD whose verdicts are scripted: speech while the frame is loud."""
+    """A VAD whose verdicts are scripted: certain to be speech while the frame
+    is loud, sure while it is less loud, not speech while it is quiet."""
 
     def __call__(self, frame):
-        return 0.9 if np.abs(frame).max() > 0.5 else 0.05
+        loudest = np.abs(frame).max()
+        return 0.95 if loudest > 0.5 else 0.75 if loudest > 0.2 else 0.05
 
     def reset(self):
         pass
@@ -181,8 +183,12 @@ class TestListenOn:
         earlier = _turn_file(1.0)
         went_on = []
 
+        def goes_on():
+            went_on.append(True)
+            return True
+
         path = AudioRecorder(turn_end=Verdict(0.9)).listen_on(
-            earlier, on_speech=lambda: went_on.append(True), until=lambda: False
+            earlier, on_speech=goes_on, until=lambda: False
         )
         whole, _ = sf.read(path)
         Path(path).unlink()
@@ -191,6 +197,21 @@ class TestListenOn:
         # The earlier second, then the rest of the turn as listen() records it
         assert abs(len(whole) / SAMPLE_RATE - (1.0 + PRE_SPEECH + 1.0 + 0.2)) < 0.1
         assert np.allclose(whole[: SAMPLE_RATE], 0.01, atol=1e-4)
+
+    def test_a_new_turn_leaves_the_earlier_one_out(self, monkeypatch):
+        monkeypatch.setattr(audio_module, "SpeechDetector", ScriptedSpeech)
+        FakeStream.recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE, 0.8), np.zeros(SAMPLE_RATE * 4)]
+        ).astype(np.float32)
+        monkeypatch.setattr(audio_module.sd, "InputStream", FakeStream)
+        earlier = _turn_file(1.0)
+        path = AudioRecorder(turn_end=Verdict(0.9)).listen_on(
+            earlier, on_speech=lambda: False, until=lambda: False
+        )
+        turn, _ = sf.read(path)
+        Path(path).unlink()
+        Path(earlier).unlink()
+        assert abs(len(turn) / SAMPLE_RATE - (PRE_SPEECH + 1.0 + 0.2)) < 0.1
 
     def test_nothing_more_once_the_answer_is_there(self, monkeypatch):
         monkeypatch.setattr(audio_module, "SpeechDetector", ScriptedSpeech)
@@ -203,3 +224,96 @@ class TestListenOn:
         )
         Path(earlier).unlink()
         assert path is None and went_on == []
+
+
+class Voice:
+    """The voice, as listen_on() holds and releases it."""
+
+    def __init__(self):
+        self.holds = 0
+        self.releases = 0
+
+    def hold(self):
+        self.holds += 1
+
+    def release(self):
+        self.releases += 1
+
+
+class TestOverTheVoice:
+    """Speech over the voice holds it; in the quiet the user goes on, while
+    the voice's echo dies away with it."""
+
+    def _listen(self, monkeypatch, recording, answered_after=None, settled=True):
+        monkeypatch.setattr(audio_module, "SpeechDetector", ScriptedSpeech)
+        FakeStream.recording = recording.astype(np.float32)
+        monkeypatch.setattr(audio_module.sd, "InputStream", FakeStream)
+        recorder = AudioRecorder(turn_end=Verdict(0.9), echo=PassThrough(settled))
+        voice, spoke, frames = Voice(), [], [0]
+
+        def until():
+            frames[0] += 1
+            return answered_after is not None and frames[0] > answered_after
+
+        earlier = _turn_file()
+        path = recorder.listen_on(
+            earlier,
+            on_speech=lambda: spoke.append(True) or False,
+            until=until,
+            speaking=lambda: True,
+            hold=voice.hold,
+            release=voice.release,
+        )
+        Path(earlier).unlink()
+        return path, voice, spoke
+
+    def test_the_user_goes_on_in_the_quiet(self, monkeypatch):
+        # Sure to be speech, not certain: it is the going on that tells
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.3), np.zeros(SAMPLE_RATE * 4)]
+        )
+        path, voice, spoke = self._listen(monkeypatch, recording)
+        turn, _ = sf.read(path)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+        # All of what the user said, from just before it
+        assert abs(len(turn) / SAMPLE_RATE - (PRE_SPEECH + 2.0 + 0.2)) < 0.15
+
+    def test_a_short_stop_is_the_users_too(self, monkeypatch):
+        # Over before the voice has died away, but surer than any echo the
+        # settled canceller leaves
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.8), np.zeros(SAMPLE_RATE * 4)]
+        )
+        path, voice, spoke = self._listen(monkeypatch, recording)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+
+    def test_the_echo_dies_away_and_the_voice_goes_on(self, monkeypatch):
+        # A quarter second of echo, sure to be speech, gone once the voice is held
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE // 4, 0.3), np.zeros(SAMPLE_RATE * 2)]
+        )
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(2.5))
+        assert path is None
+        assert (voice.holds, voice.releases, spoke) == (1, 1, [])
+
+    def test_not_listened_to_until_the_canceller_has_learned_the_room(self, monkeypatch):
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.8), np.zeros(SAMPLE_RATE)]
+        )
+        path, voice, spoke = self._listen(
+            monkeypatch, recording, answered_after=frames(3.5), settled=False
+        )
+        assert path is None
+        assert (voice.holds, voice.releases, spoke) == (0, 0, [])
+
+
+class PassThrough:
+    """An echo canceller with nothing to cancel."""
+
+    def __init__(self, settled=False):
+        self.settled = settled
+
+    def clean(self, audio, captured):
+        return audio

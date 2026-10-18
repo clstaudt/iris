@@ -25,6 +25,8 @@ dependencies = [
     "mss>=9.0.0",
     "ddgs>=7.0.0",
     "trafilatura>=2.0.0",
+    # Echo cancellation (WebRTC AEC3), so Iris can be interrupted by voice
+    "livekit>=1.1.20",
 ]
 
 [project.scripts]

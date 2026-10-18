@@ -371,6 +371,14 @@ class AssistantController:
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
+    def set_barge_in(self, enabled: bool) -> dict:
+        """Whether speaking interrupts the voice (with echo cancellation)."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        self.assistant.barge_in = bool(enabled)
+        self.bus.emit("config", self.assistant.config_info())
+        return {"ok": True}
+
     def set_tool(self, group: str, enabled: bool) -> dict:
         """Switch a tool group (camera, screen, web) on or off."""
         if self.assistant is None or self.assistant.tools is None:
