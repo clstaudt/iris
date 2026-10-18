@@ -10,10 +10,50 @@ from pathlib import Path
 
 import soundfile as sf
 from kokoro_onnx import Kokoro
+from kokoro_onnx import tokenizer as kokoro_tokenizer
+from phonemizer.backend import EspeakBackend
+from phonemizer.separator import default_separator
+from phonemizer.utils import list2str, str2list
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn
 
 warnings.filterwarnings("ignore")
+
+
+class KeptEspeak:
+    """Stands in for the phonemizer module in Kokoro's tokenizer.
+
+    phonemizer.phonemize() loads espeak afresh on every call, which takes
+    about 1.5 s on an M3: three times what the voice model needs for a
+    sentence. This phonemizes the same way, with one espeak per language,
+    loaded once and kept.
+    """
+
+    def __init__(self):
+        self._backends: dict[tuple, EspeakBackend] = {}
+        self._lock = threading.Lock()
+
+    def phonemize(
+        self, text: str, language: str, preserve_punctuation: bool, with_stress: bool
+    ) -> str:
+        with self._lock:
+            key = (language, preserve_punctuation, with_stress)
+            backend = self._backends.get(key)
+            if backend is None:
+                backend = EspeakBackend(
+                    language, preserve_punctuation=preserve_punctuation, with_stress=with_stress
+                )
+                self._backends[key] = backend
+            lines = [line.strip(os.linesep) for line in str2list(text)]
+            lines = [line for line in lines if line.strip()]
+            if not lines:
+                return ""
+            return list2str(
+                backend.phonemize(lines, separator=default_separator, strip=False, njobs=1)
+            )
+
+
+kokoro_tokenizer.phonemizer = KeptEspeak()
 
 # Kokoro model download URLs
 KOKORO_MODEL_URL = (
