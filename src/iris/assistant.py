@@ -478,6 +478,20 @@ class VoiceAssistant:
         # Send to LLM (streams response and speaks it)
         self.chat(text, response_language=response_language, source="voice")
 
+    def _keep_exchange(self, prompt: str, answer: str, source: Optional[str], cut: bool):
+        """Keep the exchange in the conversation as the user took it in: a
+        reply cut short only as far as it was said, or shown with the voice
+        off. Of a reply stopped before anything was said, nothing is kept."""
+        if not cut:
+            self.conversation.keep(prompt, self.conversation.reply or "", source)
+            return
+        if self.speak_replies:
+            kept = self.speech_pipeline.said()
+        else:
+            kept = self.conversation.clean_markdown(answer)
+        if kept.strip():
+            self.conversation.keep(prompt, kept, source)
+
     def chat(self, prompt: str, response_language: str = "en", source: Optional[str] = None) -> str:
         """
         Send prompt to LLM, stream response, and speak it.
@@ -497,6 +511,7 @@ class VoiceAssistant:
 
             # Set the speech pipeline language for this turn
             self.speech_pipeline.current_language = response_language
+            self.speech_pipeline.begin_reply()
 
             # Stream the response and display it live
             full_response = []
@@ -519,6 +534,7 @@ class VoiceAssistant:
                     response_language=response_language,
                     on_tool_use=on_tool_use,
                     source=source,
+                    keep=False,  # kept below, once it is known what was heard
                 )
                 for chunk_text in stream:
                     # Paused: stop consuming the reply until resumed (or stopped)
@@ -593,6 +609,9 @@ class VoiceAssistant:
             # Wait for all speech to complete
             self.speech_pipeline.wait_for_speech()
 
+            # Stopped while streaming, or while speaking after the stream
+            cut = interrupted or self.interrupt_event.is_set()
+            self._keep_exchange(prompt, answer, source, cut)
             return answer
 
         except Exception as e:

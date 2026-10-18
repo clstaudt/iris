@@ -37,6 +37,9 @@ class RecordingPlayer:
     def resume(self):
         pass
 
+    def progress(self):
+        return 0.0
+
 
 def _wait(condition, timeout=3.0):
     deadline = time.monotonic() + timeout

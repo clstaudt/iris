@@ -474,6 +474,10 @@ class AudioPlayer:
         self.audio_filter = audio_filter
         self._paused = threading.Event()
         self._stopped = threading.Event()
+        # Where the clip playing now is: (its length and sample rate, the
+        # position its current segment started from, and when that segment
+        # started being heard, None while paused)
+        self._place: tuple[int, int, int, float | None] | None = None
 
     def stop(self):
         """Stop any currently playing audio."""
@@ -491,6 +495,17 @@ class AudioPlayer:
     @property
     def paused(self) -> bool:
         return self._paused.is_set()
+
+    def progress(self) -> float:
+        """How much of the clip playing now has been heard, from 0 to 1."""
+        place = self._place
+        if place is None:
+            return 0.0
+        length, sample_rate, position, heard_since = place
+        heard = position
+        if heard_since is not None:
+            heard += max(0.0, time.monotonic() - heard_since) * sample_rate
+        return min(1.0, heard / length) if length else 1.0
 
     @staticmethod
     def _emit_levels(
@@ -542,6 +557,7 @@ class AudioPlayer:
         far playback got, and the remainder is played on resume.
         """
         self._stopped.clear()
+        self._place = (len(audio), sample_rate, 0, None)
 
         def stopped() -> bool:
             return self._stopped.is_set() or (cancelled is not None and cancelled())
@@ -568,6 +584,7 @@ class AudioPlayer:
                 latency = float(sd.get_stream().latency)
             except Exception:
                 latency = 0.0
+            self._place = (len(audio), sample_rate, position, started + latency)
 
             level_thread = None
             level_stop = threading.Event()
@@ -610,6 +627,7 @@ class AudioPlayer:
             # What was heard is the wall time minus the output latency
             heard = max(0.0, elapsed - latency - RESUME_REWIND)
             position += int(heard * sample_rate)
+            self._place = (len(audio), sample_rate, position, None)
 
     def play(
         self,

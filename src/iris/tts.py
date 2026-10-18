@@ -384,6 +384,21 @@ class KokoroGenerator:
             return None
 
 
+def heard_part(text: str, fraction: float) -> str:
+    """The words of a spoken text that were heard out by the time this
+    fraction of its audio had played (judged by length: speech goes through
+    a text at a fairly even pace)."""
+    end = int(len(text) * max(0.0, min(1.0, fraction)))
+    if end >= len(text):
+        return text
+    if not text[end].isspace():
+        # Cut in the middle of a word, which was not heard out
+        end = max(text.rfind(" ", 0, end), text.rfind("\n", 0, end))
+        if end < 0:
+            return ""
+    return text[:end].rstrip()
+
+
 class SpeechPipeline:
     """
     Parallel speech generation and playback pipeline.
@@ -423,6 +438,11 @@ class SpeechPipeline:
         # wherever it is, even audio still being generated when stop() came
         self._epoch = 0
         self._generating_epoch: int | None = None
+
+        # What has been said of the current reply: the texts played to their
+        # end, and the one playing now
+        self._said: list[str] = []
+        self._playing: str | None = None
 
         # Worker threads
         self.generation_worker_thread = None
@@ -473,7 +493,7 @@ class SpeechPipeline:
                 # Put generated audio in playback queue, unless stop() came
                 # while it was being generated
                 if audio_file and epoch == self._epoch:
-                    self.audio_queue.put((audio_file, epoch))
+                    self.audio_queue.put((audio_file, epoch, text))
                 elif audio_file:
                     Path(audio_file).unlink(missing_ok=True)
                 self.text_queue.task_done()
@@ -484,12 +504,16 @@ class SpeechPipeline:
                 item = self.audio_queue.get()
                 if item is None:  # Shutdown signal
                     break
-                audio_file, epoch = item
+                audio_file, epoch, text = item
 
                 # Play the audio, unless it belongs to a stopped epoch; the
                 # player checks again while playing, so a stop() racing the
                 # start of the clip still silences it
-                if epoch == self._epoch:
+                with self._status_lock:
+                    playing = epoch == self._epoch
+                    if playing:
+                        self._playing = text
+                if playing:
                     self.is_speaking_flag.set()
                     self.player.play(
                         audio_file,
@@ -497,6 +521,12 @@ class SpeechPipeline:
                         cancelled=lambda: epoch != self._epoch,
                     )
                     self.is_speaking_flag.clear()
+                    with self._status_lock:
+                        # Played to its end, unless stop() came first and
+                        # kept the part that was heard
+                        if self._playing is not None and epoch == self._epoch:
+                            self._said.append(text)
+                        self._playing = None
 
                 # Cleanup
                 try:
@@ -539,6 +569,17 @@ class SpeechPipeline:
         """
         self.text_queue.put((text, self.current_language, self._epoch))
 
+    def begin_reply(self):
+        """Start keeping track of what is said of a new reply."""
+        with self._status_lock:
+            self._said = []
+
+    def said(self) -> str:
+        """What has been said of the current reply so far, as far as it was
+        heard when stop() cut it."""
+        with self._status_lock:
+            return " ".join(self._said)
+
     def wait_for_speech(self):
         """Wait for all speech generation and playback to finish."""
         self.text_queue.join()  # Wait for generation
@@ -557,6 +598,13 @@ class SpeechPipeline:
         what is still being generated."""
         with self._status_lock:
             self._epoch += 1
+            # Of the clip playing now, the words heard before the stop count
+            # as said
+            if self._playing is not None:
+                part = heard_part(self._playing, self.player.progress())
+                if part:
+                    self._said.append(part)
+                self._playing = None
         # Stop any currently playing audio
         self.player.stop()
 
