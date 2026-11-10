@@ -28,6 +28,7 @@ from iris.personas import (
 from iris.plugins import load as load_plugins
 from iris.plugins import plugin_dir
 from iris.transcription import (
+    WHISPER_SIZES,
     WhisperTranscriber,
     folder_engine,
     model_repo,
@@ -679,6 +680,79 @@ class AssistantController:
                 self.bus.emit("config", assistant.config_info())
             except Exception as e:
                 self.bus.emit("error", {"message": f"Could not load the model: {e}"})
+            finally:
+                self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
+
+        threading.Thread(target=load, daemon=True).start()
+        return {"ok": True}
+
+    def stt_models(self) -> dict:
+        """Whisper's sizes for this computer's engine: roughly how big each
+        is, whether it is downloaded, and which one is in use."""
+        transcriber = self.assistant.transcriber if self.assistant else None
+        engine = getattr(transcriber, "engine", None) or resolve_engine("auto")
+        folder = str(getattr(transcriber, "model_path", None) or "")
+        current = "" if folder else getattr(transcriber, "model_name", "")
+        return {
+            "engine": engine,
+            "folder": folder,
+            "models": [
+                {
+                    "id": size,
+                    "size_mb": APPROX_MODEL_MB.get(size),
+                    "cached": downloads.is_cached(model_repo(size, engine)),
+                    "active": size == current,
+                }
+                for size in WHISPER_SIZES
+            ],
+        }
+
+    def set_stt_model(self, model: str) -> dict:
+        """Recognize speech with another Whisper size. It is downloaded if
+        needed and loaded in the background; the running assistant switches
+        over when it is ready."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        if model not in WHISPER_SIZES:
+            return {"ok": False, "error": f"There is no Whisper model called {model}"}
+        if self.assistant.recognition_engine != "whisper":
+            return {"ok": False, "error": "The recognition engine in use is not Whisper"}
+
+        def load():
+            assistant = self.assistant
+            try:
+                self._fetch_stt(model)
+                assistant.transcriber = engines.recognition_engine("whisper").create(
+                    {"model": model, "device": "auto", "engine": "auto"}
+                )
+                self.bus.emit("config", assistant.config_info())
+            except Exception as e:
+                self.bus.emit("error", {"message": f"Could not load the model: {e}"})
+            finally:
+                self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
+
+        threading.Thread(target=load, daemon=True).start()
+        return {"ok": True}
+
+    def set_turn_detection(self, mode: str) -> dict:
+        """End turns when Smart Turn hears the user has finished
+        ("smart_turn"), or after a silence ("silence")."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        if mode not in ("smart_turn", "silence"):
+            return {"ok": False, "error": f"Unknown turn detection: {mode}"}
+
+        def load():
+            assistant = self.assistant
+            try:
+                if mode == "smart_turn":
+                    self._fetch_turn()
+                if not assistant.set_turn_detection(mode):
+                    self.bus.emit(
+                        "error",
+                        {"message": "Smart Turn could not be loaded, so a turn ends after a silence."},
+                    )
+                self.bus.emit("config", assistant.config_info())
             finally:
                 self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
 

@@ -106,6 +106,7 @@ class VoiceAssistant:
         sleep_word: Optional[str] = DEFAULT_SLEEP_WORD,
         tts_models_dir: Optional[str] = None,
         barge_in: bool = True,
+        turn_detection: str = "smart_turn",
     ):
         """
         Initialize the voice assistant.
@@ -144,6 +145,8 @@ class VoiceAssistant:
                 in the usual places
             barge_in: Let the user interrupt the voice by speaking (needs
                 echo cancellation, which takes the voice out of the microphone)
+            turn_detection: "smart_turn" to hear when the user has finished,
+                or "silence" to end a turn after silence_duration of silence
         """
         # Where activity is pushed to the app (None in tests)
         self.event_bus = event_bus
@@ -195,7 +198,7 @@ class VoiceAssistant:
             sample_rate,
             silence_threshold,
             silence_duration,
-            turn_end=SmartTurn.load(),
+            turn_end=SmartTurn.load() if turn_detection == "smart_turn" else None,
             echo=self.echo,
         )
 
@@ -283,6 +286,8 @@ class VoiceAssistant:
             "speak_replies": self.speak_replies,
             "barge_in": self.barge_in,
             "barge_in_available": self.echo is not None,
+            "turn_detection": "smart_turn" if self.recorder.turn_end else "silence",
+            "silence_duration": self.recorder.silence_duration,
             "ollama_host": self.conversation.host or "",
             "ollama_url": effective_host(self.conversation.host),
             "memory": self.memory is not None,
@@ -359,6 +364,13 @@ class VoiceAssistant:
                 }
             )
         return states
+
+    def set_turn_detection(self, mode: str) -> bool:
+        """Hear the end of a turn with Smart Turn ("smart_turn"), or after a
+        silence ("silence"). False when Smart Turn could not be loaded, which
+        leaves the silence to end turns."""
+        self.recorder.turn_end = SmartTurn.load() if mode == "smart_turn" else None
+        return mode != "smart_turn" or self.recorder.turn_end is not None
 
     def set_wake_word(self, word: Optional[str], engine: str = "auto"):
         """Listen only for this word from now on (None or "" listens to all).

@@ -43,6 +43,9 @@ MLX_REPOS = {
     "large-v3": "mlx-community/whisper-large-v3-mlx",
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
+# The sizes offered for choosing, smallest first
+WHISPER_SIZES = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
+
 FASTER_WHISPER_REPOS = {
     "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
 }
