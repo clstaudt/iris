@@ -11,6 +11,7 @@ silence, without cutting off someone who pauses mid-thought.
 """
 
 import os
+import time
 from collections import deque
 from typing import Callable, Optional
 
@@ -179,6 +180,10 @@ class TurnTracker:
         self.verdicts: list[float] = []
         # The VAD's probability that the last frame was speech
         self.probability = 0.0
+        # Once the turn is over: seconds from the end of speech until that
+        # was clear, the silence listened to and Smart Turn's verdict
+        self.end_wait = 0.0
+        self._frame_seconds = frame_seconds
 
     @property
     def started(self) -> bool:
@@ -214,13 +219,18 @@ class TurnTracker:
             return False
 
         self._silent_run += 1
+        silence = self._silent_run * self._frame_seconds
         if self._silent_run >= self._max_silent_frames:
+            self.end_wait = silence
             return True
         paused = self._silent_run >= self._pause_frames
         if paused and self.finished is not None and not self._judged:
             # Once per pause: until the user speaks again it stays the same
             self._judged = True
+            judging = time.perf_counter()
             verdict = self.finished(self.audio())
             self.verdicts.append(verdict)
-            return verdict > 0.5
+            if verdict > 0.5:
+                self.end_wait = silence + time.perf_counter() - judging
+                return True
         return False

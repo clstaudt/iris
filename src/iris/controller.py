@@ -7,6 +7,7 @@ import itertools
 import queue
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from iris import downloads, engines
@@ -96,6 +97,8 @@ KOKORO_MB = 335
 # left out because chat.done carries the full reply.
 TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "chat.continued", "tool.use", "error")
 TRANSCRIPT_LIMIT = 500
+# Turn timings kept for the app
+TIMINGS_KEPT = 20
 
 
 class AssistantController:
@@ -138,6 +141,8 @@ class AssistantController:
 
         self._transcript: list[dict] = []
         self._transcript_lock = threading.Lock()
+        # The latest turns' timings, for an app that attaches later
+        self._timings: deque = deque(maxlen=TIMINGS_KEPT)
 
         bus.subscribe(self._on_bus_event)
 
@@ -150,6 +155,8 @@ class AssistantController:
             with self._transcript_lock:
                 self._transcript.append({"type": event_type, "data": dict(data)})
                 del self._transcript[:-TRANSCRIPT_LIMIT]
+        if event_type == "turn.timing":
+            self._timings.append(dict(data))
         if event_type == "flags":
             with self._state_lock:
                 self._flags = data.get("flags", {})
@@ -927,6 +934,7 @@ class AssistantController:
             "persona_names": names,
             "state": state,
             "running": bool(self._loop_thread and self._loop_thread.is_alive()),
+            "timings": list(self._timings),
         }
         if self.assistant is not None:
             result["config"] = self.assistant.config_info()

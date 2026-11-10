@@ -218,6 +218,9 @@ class AudioRecorder:
         self.echo = echo
         self._speech: SpeechDetector | None = None  # loaded on first listen()
         self._device_error = False  # Track if we've had a device error
+        # Of the last turn heard: seconds from the end of speech until it was
+        # clear the turn was over
+        self.last_turn_wait: float | None = None
 
     @staticmethod
     def check_audio_devices() -> tuple[bool, str]:
@@ -321,6 +324,7 @@ class AudioRecorder:
                         continue
                     level(frame)
                     if tracker.feed(frame):
+                        self.last_turn_wait = tracker.end_wait
                         break
         except Exception as e:
             error_str = str(e).lower()
@@ -455,6 +459,7 @@ class AudioRecorder:
                             tracker.forget_before()
                         level(frame)
                     if ended:
+                        self.last_turn_wait = tracker.end_wait
                         break
         except Exception as e:
             print(f"Recording error: {e}")

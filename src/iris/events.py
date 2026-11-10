@@ -28,6 +28,12 @@ Event types:
     sleep        {}                                  it fell asleep (window over,
                                                      or the sleep word)
     error        {"message": str, "kind": str}         kind is optional
+    turn.timing  {"source": "voice"|"text", "total": int,
+                  "stages": {"turn_end", "recognition", "reply", "voice": int|None},
+                  "components": {stage: str}}
+                                                     where a turn's time went, in ms,
+                                                     from the end of speech to the
+                                                     first word heard (see iris.timing)
     setup.progress {"model": str, "label": str,      model download at first start
                     "done": int, "total": int}       (model: stt, wake, turn or tts);
                                                      an empty label when done
