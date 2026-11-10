@@ -4,8 +4,7 @@
   import Composer from "./components/Composer.svelte";
   import Icon from "./components/Icon.svelte";
   import Memory from "./components/Memory.svelte";
-  import PersonaEditor from "./components/PersonaEditor.svelte";
-  import Settings from "./components/Settings.svelte";
+  import SettingsWindow from "./components/settings/SettingsWindow.svelte";
   import Setup from "./components/Setup.svelte";
   import StatusZone from "./components/StatusZone.svelte";
   import Transcript from "./components/Transcript.svelte";
@@ -49,9 +48,8 @@
         <Icon name="brain" size={15} />
       </button>
       <button
-        onclick={() => store.togglePanel("settings")}
-        class="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink {store.panel ===
-          'settings' || store.panel === 'persona'
+        onclick={() => store.toggleSettings()}
+        class="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink {store.settingsPage
           ? 'bg-hover text-ink'
           : 'text-ink-3'}"
         title="Settings"
@@ -72,11 +70,14 @@
         class="flex min-h-0 gap-2 {store.presence ? '' : 'px-2 pb-2'}"
         in:fade={{ duration: 600, delay: 400 }}
       >
-        <!-- In presence only the orb stays: the same one, so it never restarts -->
+        <!-- In presence only the orb stays: the same one, so it never restarts.
+             The settings window covers the conversation without unmounting it. -->
         <section
           class="group relative flex min-w-0 flex-1 flex-col overflow-hidden {store.presence
             ? 'justify-center'
-            : 'rounded-[14px] border border-line bg-panel'}"
+            : 'rounded-[14px] border border-line bg-panel'} {store.settingsPage && !store.presence
+            ? 'hidden'
+            : ''}"
         >
           {#if !store.presence}
             <Transcript />
@@ -95,14 +96,10 @@
         </section>
         {#if store.presence}
           <!-- Nothing beside the orb -->
-        {:else if store.panel === "settings"}
-          <Settings />
+        {:else if store.settingsPage}
+          <SettingsWindow />
         {:else if store.panel === "memory"}
           <Memory />
-        {:else if store.panel === "persona"}
-          {#key store.editingPersona}
-            <PersonaEditor />
-          {/key}
         {/if}
       </div>
     {/if}

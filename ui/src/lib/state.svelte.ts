@@ -155,6 +155,10 @@ export interface AssistantConfig {
   sleep_word?: string;
   stt_model_path?: string;
   tts_models_dir?: string;
+  /** Whether Smart Turn or a silence ends a turn */
+  turn_detection?: TurnDetection;
+  /** Seconds of silence that end a turn without Smart Turn */
+  silence_duration?: number;
   ollama_host?: string;
   ollama_url?: string;
   mic_on?: boolean;
@@ -177,11 +181,33 @@ export interface ModuleInfo {
   active?: boolean;
   /** False when its dependencies are missing */
   available?: boolean;
+  /** Where a plugin came from: "built-in", an installed package or the
+   *  plugin folder */
+  source?: string;
 }
 
-/** How much of the settings is shown: great defaults first, expert options
- *  one step at a time. */
-export type SettingsLevel = "essentials" | "more" | "expert";
+/** The pages of the settings window. */
+export type SettingsPage = "pipeline" | "personas";
+
+/** What ends a turn: Smart Turn hearing the user has finished, or a silence. */
+export type TurnDetection = "smart_turn" | "silence";
+
+/** A Whisper size as the recognition stage offers it. */
+export interface RecognitionModel {
+  id: string;
+  size_mb: number | null;
+  /** Downloaded already */
+  cached: boolean;
+  active: boolean;
+}
+
+export interface RecognitionModels {
+  /** "mlx" or "faster-whisper" */
+  engine: string;
+  /** A model folder in use instead of a size; "" for none */
+  folder: string;
+  models: RecognitionModel[];
+}
 
 /** Id of a speech engine the core has: "kyutai", "kokoro", or one a
  *  plugin adds. */
@@ -239,8 +265,9 @@ interface SavedSettings {
   wake_word?: string;
   wake_window?: number;
   sleep_word?: string;
-  /** How much of the settings is shown */
-  settings_level?: SettingsLevel;
+  /** Whisper size chosen in the pipeline; none for the best this computer runs */
+  whisper_model?: string;
+  turn_detection?: TurnDetection;
   /** Model folders chosen by the user; empty means download as usual */
   stt_model_path?: string;
   tts_models_dir?: string;
@@ -304,13 +331,17 @@ class IrisStore {
   pending = $state<PendingTurn[]>([]);
   speakReplies = $state(true);
   /** The side panel beside the conversation, if one is open */
-  panel = $state<"settings" | "memory" | "persona" | null>(null);
-  /** How much of the settings and the persona editor is shown */
-  settingsLevel = $state<SettingsLevel>(loadSettings().settings_level ?? "essentials");
+  panel = $state<"memory" | null>(null);
+  /** The settings window's page, while it is open */
+  settingsPage = $state<SettingsPage | null>(null);
+  /** The pipeline stage open in the inspector */
+  stage = $state<string | null>(null);
+  /** Whisper's sizes for the recognition stage, once asked for */
+  recognitionModels = $state<RecognitionModels | null>(null);
   /** Presence: the window shows only the orb, for voice and vision */
   presence = $state(window.iris?.presence ?? false);
   /** The persona open in the persona editor; "" for a new one */
-  editingPersona = $state("");
+  editingPersona = $state(loadSettings().persona ?? "iris");
   /** Each speech engine's voices, for the persona editor */
   voices = $state<VoiceOptions | null>(null);
   memoryTopics = $state<MemoryTopic[]>([]);
@@ -377,6 +408,7 @@ class IrisStore {
         break;
 
       case "config": {
+        if (this.recognitionModels) this.loadRecognitionModels().catch(() => {});
         const previous = this.config?.llm_model;
         const previousServer = this.config?.ollama_url;
         this.config = data as unknown as AssistantConfig;
@@ -590,7 +622,8 @@ class IrisStore {
   /** Open the persona editor on a persona, or on a new one (no id). */
   editPersona(id?: string) {
     this.editingPersona = id ?? "";
-    this.panel = "persona";
+    this.settingsPage = "personas";
+    this.panel = null;
   }
 
   async loadPersona(id: string): Promise<PersonaSettings | null> {
@@ -644,21 +677,46 @@ class IrisStore {
   /** Shrink the window to the orb alone, or bring the conversation back. */
   async setPresence(on: boolean) {
     if (on === this.presence || (on && this.needsSetup)) return;
-    if (on) this.panel = null;
+    if (on) {
+      this.panel = null;
+      this.settingsPage = null;
+    }
     this.presence = on;
     await window.iris.setPresence(on);
   }
 
-  setSettingsLevel(level: SettingsLevel) {
-    this.settingsLevel = level;
-    saveSettings({ settings_level: level });
+  /** Open the settings window on a page, or close it (null). */
+  openSettings(page: SettingsPage | null) {
+    this.settingsPage = page;
+    if (page) this.panel = null;
   }
 
-  togglePanel(name: "settings" | "memory") {
-    // The persona editor belongs to settings: the settings button closes it
-    const open = this.panel === "persona" ? "settings" : this.panel;
-    this.panel = open === name ? null : name;
+  toggleSettings() {
+    this.openSettings(this.settingsPage ? null : "pipeline");
+  }
+
+  togglePanel(name: "memory") {
+    this.panel = this.panel === name ? null : name;
+    if (this.panel) this.settingsPage = null;
     if (this.panel === "memory") this.loadMemory();
+  }
+
+  async loadRecognitionModels() {
+    this.recognitionModels = await rpc<RecognitionModels>("stt.models");
+  }
+
+  /** Recognize speech with another Whisper size; it is downloaded if needed
+   *  and switched to once loaded. Returns an error message, or null. */
+  async setRecognitionModel(model: string): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string }>("stt.set", { model });
+    if (!result.ok) return result.error ?? "Could not switch the model";
+    saveSettings({ whisper_model: model, stt_model_path: "" });
+    return null;
+  }
+
+  async setTurnDetection(mode: TurnDetection) {
+    saveSettings({ turn_detection: mode });
+    await rpc("turn.set", { mode });
   }
 
   async loadMemory() {
@@ -849,6 +907,8 @@ class IrisStore {
     if (saved.wake_window) options.wake_window = saved.wake_window;
     if (saved.sleep_word !== undefined) options.sleep_word = saved.sleep_word;
     if (saved.stt_model_path) options.stt_model_path = saved.stt_model_path;
+    else if (saved.whisper_model) options.whisper_model = saved.whisper_model;
+    if (saved.turn_detection) options.turn_detection = saved.turn_detection;
     if (saved.tts_models_dir) options.tts_models_dir = saved.tts_models_dir;
     this.speakReplies = saved.speak_replies ?? true;
     await rpc("assistant.start", options);
