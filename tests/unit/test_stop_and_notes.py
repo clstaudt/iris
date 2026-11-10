@@ -190,3 +190,35 @@ def test_an_error_from_the_model_is_still_shown():
 
     assistant = _assistant(Failing())
     assert assistant.chat("Hi") == "The language model could not answer: no such model"
+
+
+def test_the_output_stream_is_only_ever_touched_by_one_thread(monkeypatch):
+    """PortAudio aborts the process when two threads close the shared stream
+    at once, which Stop did: the app's command, the reply's thread and the
+    playback thread all stop the sound."""
+    from iris import audio
+
+    inside, overlaps = [0], []
+    guard = threading.Lock()
+
+    def slow(*args, **kwargs):
+        with guard:
+            inside[0] += 1
+            if inside[0] > 1:
+                overlaps.append(inside[0])
+        time.sleep(0.01)
+        with guard:
+            inside[0] -= 1
+
+    monkeypatch.setattr(audio.sd, "stop", slow)
+    monkeypatch.setattr(audio.sd, "play", slow)
+    monkeypatch.setattr(audio.sd, "get_stream", lambda: MagicMock(latency=0.0, active=False))
+    player = audio.AudioPlayer()
+    threads = [threading.Thread(target=player.stop) for _ in range(6)]
+    threads += [threading.Thread(target=audio.stop_sound) for _ in range(3)]
+    threads += [threading.Thread(target=audio.play_sound, args=(None, 24000)) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert overlaps == []

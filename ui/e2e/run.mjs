@@ -159,9 +159,8 @@ pushEvent = (type, data) => {
 const results = [];
 
 async function step(name, body) {
-  if (process.env.E2E_ONLY && !name.toLowerCase().includes(process.env.E2E_ONLY.toLowerCase())) {
-    return;
-  }
+  const only = process.env.E2E_ONLY?.toLowerCase();
+  if (only && !name.toLowerCase().includes(only) && !name.startsWith("the app starts")) return;
   const started = Date.now();
   try {
     await body();
@@ -490,6 +489,74 @@ try {
     const done = await eventAfter("chat.done", since, () => true, 5000);
     check(done.at - pressed < 2000, `Stop took ${done.at - pressed} ms`);
     await stop.waitFor({ state: "detached", timeout: 5000 });
+  });
+
+  /** Busy states and audible speech between two moments. */
+  const activity = (from, to) => ({
+    busy: events
+      .filter((e) => e.at >= from && e.at <= to && e.type === "state")
+      .map((e) => e.data.state)
+      .filter((state) => ["thinking", "speaking", "searching", "browsing", "looking"].includes(state)),
+    sound: events.filter((e) => e.at >= from && e.at <= to && e.type === "audio.output" && e.data.rms > 0.001).length,
+  });
+  const stopButton = page.locator('button[title="Stop the current reply"]');
+  const quiet = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function ask(text) {
+    await page.locator("nav button", { hasText: "Conversation" }).click().catch(() => {});
+    await page.locator("textarea").fill(text);
+    await page.locator("textarea").press("Enter");
+    return Date.now();
+  }
+
+  await step("Stop silences a reply being spoken, and Iris stays silent", async () => {
+    const since = await ask("Count from one to forty in words, one number per sentence.");
+    await eventAfter("audio.output", since, (data) => data.rms > 0.001, 180_000);
+    await quiet(2500);
+    const pressed = Date.now();
+    await stopButton.click();
+    await quiet(8000);
+    const after = activity(pressed + 600, Date.now());
+    check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
+    check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
+    check(!(await stopButton.count()), "the Stop button is still there");
+    const info = await rpc("app.info");
+    check(!["thinking", "speaking"].includes(info.state), `Iris is ${info.state}`);
+  });
+
+  await step("after Stop the next message is answered and spoken", async () => {
+    const since = await ask("Reply with exactly: ready when you are.");
+    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
+    await eventAfter("audio.output", since, (data) => data.rms > 0.001, 60_000);
+    await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
+  });
+
+  await step("Stop while the reply is still being written silences it too", async () => {
+    const since = await ask("Tell a story about a lighthouse keeper in about three hundred words.");
+    await eventAfter("chat.chunk", since, () => true, 180_000);
+    await quiet(1200);
+    const pressed = Date.now();
+    await stopButton.click();
+    await quiet(8000);
+    const after = activity(pressed + 600, Date.now());
+    const chunks = events.filter((e) => e.at >= pressed + 600 && e.type === "chat.chunk").length;
+    check(chunks === 0, `the reply went on: ${chunks} more chunks`);
+    check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
+    check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
+  });
+
+  await step("Stop during a tool ends the turn", async () => {
+    const since = await ask("Search the web for the population of Reykjavik and tell me.");
+    await until("a tool to run", () => events.find((e) => e.at >= since && e.type === "tool.use"), 180_000);
+    const pressed = Date.now();
+    await stopButton.click();
+    await quiet(10_000);
+    const after = activity(pressed + 1500, Date.now());
+    check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
+    check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
+    const info = await rpc("app.info");
+    check(!["thinking", "speaking", "searching", "browsing"].includes(info.state), `Iris is ${info.state}`);
   });
 
   await step("nothing went wrong in the page", async () => {

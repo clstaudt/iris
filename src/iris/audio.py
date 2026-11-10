@@ -656,6 +656,42 @@ PLAYBACK_BLOCK = 32768
 RESUME_REWIND = 0.35
 
 
+# sounddevice's play() and stop() act on one shared output stream, and
+# PortAudio crashes the process when two threads close it at once. Stop
+# reaches it from several threads (the app's command, the reply's thread, the
+# playback thread), so every use of that stream goes through this lock.
+_OUTPUT = threading.RLock()
+
+
+def play_sound(audio: np.ndarray, sample_rate: int, **options) -> float:
+    """Start playing on the shared output stream, ending what played before.
+
+    Returns:
+        The stream's output latency in seconds (0 if it cannot be told)
+    """
+    with _OUTPUT:
+        sd.play(audio, sample_rate, **options)
+        try:
+            return float(sd.get_stream().latency)
+        except Exception:
+            return 0.0
+
+
+def stop_sound():
+    """Stop whatever plays on the shared output stream."""
+    with _OUTPUT:
+        sd.stop()
+
+
+def sound_playing() -> bool:
+    """Whether the shared output stream still has audio to play."""
+    with _OUTPUT:
+        try:
+            return bool(sd.get_stream().active)
+        except Exception:
+            return False
+
+
 class AudioPlayer:
     """Plays audio files with normalization and fade effects."""
 
@@ -679,7 +715,7 @@ class AudioPlayer:
     def stop(self):
         """Stop any currently playing audio."""
         self._stopped.set()
-        sd.stop()
+        stop_sound()
         if self.echo is not None:
             self.echo.cut(time.monotonic())
 
@@ -777,12 +813,8 @@ class AudioPlayer:
 
             # Play with maximum buffer size and latency for ultra-smooth playback
             # Extra large buffer (32768 samples = ~740ms) prevents any underruns
-            sd.play(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
             started = time.monotonic()
-            try:
-                latency = float(sd.get_stream().latency)
-            except Exception:
-                latency = 0.0
+            latency = play_sound(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
             self._place = (len(audio), sample_rate, position, started + latency)
             if self.echo is not None:
                 self.echo.played(started + latency, segment, sample_rate)
@@ -807,16 +839,13 @@ class AudioPlayer:
             while time.monotonic() - started < deadline:
                 if self._paused.is_set() or stopped():
                     break
-                try:
-                    if not sd.get_stream().active:
-                        break
-                except Exception:
-                    pass
+                if not sound_playing():
+                    break
                 time.sleep(0.02)
             elapsed = time.monotonic() - started
             cut_by_pause = self._paused.is_set() and not stopped()
             if cut_by_pause or stopped():
-                sd.stop()
+                stop_sound()
                 if self.echo is not None:
                     self.echo.cut(time.monotonic())
 

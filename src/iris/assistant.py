@@ -15,7 +15,7 @@ from faster_whisper.audio import decode_audio
 
 from iris import engines
 from iris.attachments import Attachment, recorded_text
-from iris.audio import AudioPlayer, AudioRecorder, get_filter
+from iris.audio import AudioPlayer, AudioRecorder, get_filter, play_sound
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus
 from iris.llm import ConversationManager, effective_host, split_speech
@@ -431,13 +431,13 @@ class VoiceAssistant:
             # Only audible when it was actually listening for follow-ups
             listening = not (self.pause_event.is_set() or self.suspend_event.is_set())
             if self.speak_replies and listening:
-                sd.play(_sleep_chime(), 24000)
+                play_sound(_sleep_chime(), 24000)
         self._was_dormant = dormant
 
     def _chime(self):
         """Acknowledge the wake word when no request came with it."""
         if self.speak_replies:
-            sd.play(_wake_chime(), 24000)
+            play_sound(_wake_chime(), 24000)
 
     def _handle_heard(self, audio_path: str, dormant: bool):
         """Answer an utterance, or while dormant, check it for the wake word.
