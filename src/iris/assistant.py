@@ -664,6 +664,39 @@ class VoiceAssistant:
         # Send to LLM (streams response and speaks it)
         self.chat(text, response_language=response_language, source="voice")
 
+    def _reply_chunks(self, stream):
+        """The reply's chunks as they come, ending at once when the turn is
+        interrupted.
+
+        The model is read on a thread of its own: while it reasons, runs a
+        tool or is slow to start, nothing arrives, and Stop would otherwise
+        wait for the next chunk.
+        """
+        chunks: queue.Queue = queue.Queue()
+        done = object()
+
+        def read():
+            try:
+                for chunk in stream:
+                    chunks.put(chunk)
+                chunks.put(done)
+            except Exception as error:
+                chunks.put(error)
+
+        threading.Thread(target=read, daemon=True).start()
+        while True:
+            try:
+                chunk = chunks.get(timeout=0.05)
+            except queue.Empty:
+                if self.interrupt_event.is_set():
+                    return
+                continue
+            if chunk is done:
+                return
+            if isinstance(chunk, Exception):
+                raise chunk
+            yield chunk
+
     def _keep_exchange(self, prompt: str, answer: str, source: Optional[str], cut: bool):
         """Keep the exchange in the conversation as the user took it in: a
         reply cut short only as far as it was said, or shown with the voice
@@ -729,7 +762,7 @@ class VoiceAssistant:
                     attachments=attachments,
                     keep=False,  # kept below, once it is known what was heard
                 )
-                for chunk_text in stream:
+                for chunk_text in self._reply_chunks(stream):
                     # Paused: stop consuming the reply until resumed (or stopped)
                     while self.suspend_event.is_set() and not self.interrupt_event.is_set():
                         time.sleep(0.05)
@@ -757,6 +790,11 @@ class VoiceAssistant:
                         self._reply_piece()
                         self._speak(piece)
 
+                # Stopped while nothing was arriving
+                if not interrupted and self.interrupt_event.is_set():
+                    interrupted = True
+                    self.interrupt_event.clear()
+
                 # Clear thinking status now that LLM is done
                 with self.status_manager.status_lock:
                     self.status_manager.status_thinking = False
@@ -765,9 +803,9 @@ class VoiceAssistant:
                 answer = "".join(full_response)
 
                 if interrupted:
-                    # Stop generating (closing the stream ends the request, so
-                    # the model is free at once) and drop all pending speech
-                    stream.close()
+                    # Stop generating (cutting the request off frees the
+                    # model at once) and drop all pending speech
+                    self.conversation.cancel()
                     self.speech_pipeline.stop()
                     text_buffer = ""
 
@@ -798,7 +836,7 @@ class VoiceAssistant:
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = False
 
-            error_msg = f"Error communicating with Ollama: {e}"
+            error_msg = f"The language model could not answer: {e}"
             if self.event_bus:
                 self.event_bus.emit("error", {"message": error_msg})
             logger.exception("Reply failed")

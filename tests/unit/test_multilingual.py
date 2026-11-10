@@ -267,9 +267,10 @@ class TestLLMLanguageInstruction:
         # Check the messages passed to ollama.chat
         call_args = mock_ollama.chat.call_args
         messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
-        system_msgs = [m for m in messages if m["role"] == "system"]
-        lang_instructions = [m for m in system_msgs if "Respond in French" in m.get("content", "")]
-        assert len(lang_instructions) == 1
+        # Told with the user's message: a system message is only ever first
+        assert [m["role"] for m in messages] == ["system", "user"]
+        assert "Respond in French" in messages[-1]["content"]
+        assert messages[-1]["content"].endswith("Salut")
 
     @patch("iris.llm.ollama")
     def test_chat_stream_no_language_instruction_for_english(self, mock_ollama):
