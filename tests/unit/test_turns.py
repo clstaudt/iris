@@ -25,16 +25,10 @@ class PlainConversation:
         return text.replace("**", "")
 
 
-class SilentDisplay:
-    def show_user_message(self, text):
-        pass
-
-
 def _bare_assistant():
     assistant = object.__new__(VoiceAssistant)
     assistant.speech_pipeline = RecordingPipeline()
     assistant.conversation = PlainConversation()
-    assistant.display_manager = SilentDisplay()
     assistant.turn_queue = queue.Queue()
     assistant.hold_event = threading.Event()
     assistant.speak_replies = True
@@ -98,9 +92,6 @@ def test_a_turn_marks_the_conversation_busy():
 class QuietStatus:
     status_lock = threading.Lock()
     status_understanding = False
-
-    def update_status_bar(self, pipeline):
-        pass
 
 
 class Transcript:

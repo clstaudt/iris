@@ -28,7 +28,7 @@ UNFINISHED = [
 
 @pytest.fixture(scope="module")
 def speak():
-    generator = KokoroGenerator(quiet=True)
+    generator = KokoroGenerator()
 
     def speak(text: str) -> np.ndarray:
         path = generator.generate(text)

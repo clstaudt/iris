@@ -114,7 +114,7 @@ def _manager(mock_ollama, capabilities, vision_model=None):
     )
     mock_ollama.list.return_value = []
     mock_ollama.chat.side_effect = lambda **kwargs: iter([{"message": {"content": "ok"}}])
-    return ConversationManager(model="test", vision_model=vision_model, quiet=True)
+    return ConversationManager(model="test", vision_model=vision_model)
 
 
 def _image():
@@ -147,9 +147,8 @@ def test_a_spoken_reply_keeps_only_the_names_too(mock_ollama):
     was heard; the prompt it keeps names the files as well."""
     assistant = object.__new__(VoiceAssistant)
     assistant.conversation = _manager(mock_ollama, ["completion"])
-    assistant.status_manager = MagicMock(status_bar_active=True)
+    assistant.status_manager = MagicMock()
     assistant.speech_pipeline = MagicMock()
-    assistant.display_manager = MagicMock()
     assistant.event_bus = None
     assistant.memory = None
     assistant.speak_replies = True

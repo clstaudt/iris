@@ -71,7 +71,7 @@ class TestGenerateLanguage:
         mock_kokoro = MockKokoro.return_value
         mock_kokoro.create.return_value = (__import__("numpy").zeros(100, dtype="float32"), 24000)
 
-        gen = KokoroGenerator(voice="af_bella", speed=1.0, quiet=True)
+        gen = KokoroGenerator(voice="af_bella", speed=1.0)
         result = gen.generate("Bonjour", language="fr")
 
         assert result is not None
@@ -91,7 +91,7 @@ class TestGenerateLanguage:
         mock_kokoro = MockKokoro.return_value
         mock_kokoro.create.return_value = (__import__("numpy").zeros(100, dtype="float32"), 24000)
 
-        gen = KokoroGenerator(voice="af_bella", speed=1.0, quiet=True)
+        gen = KokoroGenerator(voice="af_bella", speed=1.0)
         result = gen.generate("こんにちは", language="ja")
 
         assert result is not None
@@ -109,7 +109,7 @@ class TestGenerateLanguage:
         mock_kokoro = MockKokoro.return_value
         mock_kokoro.create.return_value = (__import__("numpy").zeros(100, dtype="float32"), 24000)
 
-        gen = KokoroGenerator(voice="af_bella", speed=1.0, quiet=True)
+        gen = KokoroGenerator(voice="af_bella", speed=1.0)
         result = gen.generate("Hallo", language="de")
 
         assert result is not None
@@ -127,7 +127,7 @@ class TestGenerateLanguage:
         mock_kokoro = MockKokoro.return_value
         mock_kokoro.create.return_value = (__import__("numpy").zeros(100, dtype="float32"), 24000)
 
-        gen = KokoroGenerator(voice="af_bella", speed=1.0, quiet=True)
+        gen = KokoroGenerator(voice="af_bella", speed=1.0)
         result = gen.generate("Hello")  # no language arg -> default "en"
 
         assert result is not None
@@ -145,7 +145,7 @@ class TestPersonaVoice:
     @patch("iris.tts.Kokoro")
     def _generator(self, voice, MockKokoro, mock_locate):
         mock_locate.return_value = ("/fake/model.onnx", "/fake/voices.bin")
-        return KokoroGenerator(voice=voice, speed=1.0, quiet=True)
+        return KokoroGenerator(voice=voice, speed=1.0)
 
     def test_english_keeps_the_persona_voice(self):
         assert self._generator("af_sarah").voice_for("en") == ("en-us", "af_sarah")
@@ -214,7 +214,7 @@ class TestTranscriptionLanguage:
             mock_torch.backends.mps.is_available.return_value = False
             mock_torch.cuda.is_available.return_value = False
             transcriber = WhisperTranscriber(
-                model="tiny", device="cpu", quiet=True, engine="faster-whisper"
+                model="tiny", device="cpu", engine="faster-whisper"
             )
 
         text, lang = transcriber.transcribe("/fake/audio.wav")
@@ -234,7 +234,7 @@ class TestTranscriptionLanguage:
         MockWhisper.return_value.transcribe.return_value = ([phantom], mock_info)
 
         transcriber = WhisperTranscriber(
-            model="tiny", device="cpu", quiet=True, engine="faster-whisper"
+            model="tiny", device="cpu", engine="faster-whisper"
         )
         text, _ = transcriber.transcribe("/fake/audio.wav")
         assert text == ""
@@ -260,7 +260,7 @@ class TestLLMLanguageInstruction:
 
         from iris.llm import ConversationManager
 
-        cm = ConversationManager(model="test", tools=None, quiet=True)
+        cm = ConversationManager(model="test", tools=None)
         # Consume the generator
         list(cm.chat_stream("Salut", response_language="fr"))
 
@@ -283,7 +283,7 @@ class TestLLMLanguageInstruction:
 
         from iris.llm import ConversationManager
 
-        cm = ConversationManager(model="test", tools=None, quiet=True)
+        cm = ConversationManager(model="test", tools=None)
         list(cm.chat_stream("Hi", response_language="en"))
 
         call_args = mock_ollama.chat.call_args

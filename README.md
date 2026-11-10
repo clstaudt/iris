@@ -73,7 +73,6 @@ Built with:
 - 🧠 **Local LLM** — Powered by Ollama, keeping all conversations private
 - 🗣️ **Natural Speech** — High-quality text-to-speech
 - ⚡ **Fast Response** — Natural conversation flow
-- 📊 **Rich Terminal UI** — Live status and conversation display
 - 🔄 **Conversation Memory** — Maintains context throughout the conversation
 - 👁️ **Vision Support** — Can see through your webcam
 - 🖥️ **Screen Capture** — Can see what's on your screen
@@ -87,7 +86,7 @@ Built with:
 
 ### Prerequisites
 
-1. **Python 3.11+** and **uv** — [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
+1. **Python 3.11+** and **uv** — [Install uv](https://docs.astral.sh/uv/getting-started/installation/), and **Node.js** with npm for the desktop app
 
 2. **Ollama** — For local LLM inference
 
@@ -120,12 +119,12 @@ Feel free to experiment with different Ollama models! Try `llama3:8b`, `mistral`
 git clone https://github.com/clstaudt/iris.git
 cd iris
 uv sync
-uv run iris
+cd ui
+npm install
+npm run dev
 ```
 
-### First Run Setup
-
-On first run, Iris will check dependencies and offer to download any missing models (LLM, Whisper, and Kokoro TTS ~360 MB). Use `--skip-setup` to bypass this wizard.
+On first launch the app shows a setup screen: it finds Ollama and its models, and downloads the speech models (see [Desktop UI](#desktop-ui-electron-shell-development-mode)).
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -133,58 +132,7 @@ On first run, Iris will check dependencies and offer to download any missing mod
 
 ## Usage
 
-Start the voice assistant:
-
-```bash
-iris
-```
-
-Press `Ctrl+C` to exit.
-
-### Command-line Options
-
-```
-iris --help
-
-Options:
-  --llm-model LLM_MODEL
-                        Ollama model name (default: qwen3:1.7b)
-  --whisper-model {auto,tiny,base,small,medium,large-v3,large-v3-turbo}
-                        Whisper model (default: auto, large-v3-turbo on a GPU, small on a CPU)
-  --whisper-engine {auto,mlx,faster-whisper}
-                        Speech recognition engine (default: auto, MLX on Apple Silicon)
-  --wake-word WORD      Listen only for this word until addressed, e.g. Iris
-  --persona {iris,hal,computer}
-                        Persona/character for the assistant (default: iris)
-  --enable-vision       Enable camera/vision tool (requires vision model)
-  --enable-screen-capture
-                        Enable screen capture tool to see your computer screen
-  --vision-model MODEL  Vision model to use (default: qwen3-vl:8b)
-  --no-barge-in         Do not let speaking interrupt Iris while it talks
-  --skip-setup          Skip the setup wizard
-```
-
-### Examples
-
-```bash
-# Try different LLMs — experiment to find what works best for you!
-iris --llm-model llama3:8b
-iris --llm-model mistral
-iris --llm-model phi3
-
-# Use a different persona
-iris --persona hal
-
-# Enable vision
-ollama pull qwen3-vl:8b
-iris --enable-vision
-
-# Enable screen capture
-iris --enable-screen-capture
-
-# Enable both vision and screen capture
-iris --enable-vision --enable-screen-capture
-```
+Iris is used through the desktop app: speak to it or type, and switch tools, personas and models in its settings.
 
 ### Example Queries
 
@@ -197,15 +145,11 @@ Try asking Iris:
 
 ### Personas
 
-Choose from different personality options:
+Choose a persona in the settings:
 
 - **iris** (default) — Friendly and helpful assistant
 - **hal** — Inspired by HAL 9000, calm and mission-focused. Pursues objectives you give it.
 - **computer** — Matter-of-fact, like the USS Enterprise computer
-
-```bash
-iris --persona hal
-```
 
 Personas can be customized by editing the config files in `src/iris/personas/`, or in the desktop app. Each persona picks a speech engine and one of its voices:
 
@@ -223,15 +167,7 @@ Kyutai's Pocket TTS sounds the most natural and speaks English, French, German, 
 
 ### Vision Capabilities
 
-With vision enabled, Iris can see through your webcam.
-
-```bash
-# Pull the vision model
-ollama pull qwen3-vl:8b
-
-# Enable vision
-iris --enable-vision
-```
+Iris can see through your webcam. The camera tool is on by default; images go to a vision model the Ollama server has, such as `qwen3-vl:8b` (`ollama pull qwen3-vl:8b`).
 
 **Try asking:**
 - "What am I holding?"
@@ -239,25 +175,9 @@ iris --enable-vision
 - "Can you see what's on my desk?"
 - "Read the text on this paper"
 
-**Use a different vision model:**
-
-```bash
-# For a larger model
-ollama pull qwen3-vl:14b
-iris --enable-vision --vision-model qwen3-vl:14b
-```
-
 ### Screen Capture
 
-With screen capture enabled, Iris can see what's displayed on your monitor. This uses the same vision model as the camera and requires screen recording permission on macOS.
-
-```bash
-# Pull the vision model (if not already done)
-ollama pull qwen3-vl:8b
-
-# Enable screen capture
-iris --enable-screen-capture
-```
+Iris can see what's displayed on your monitor. This uses the same vision model as the camera and requires screen recording permission on macOS.
 
 **Try asking:**
 - "What's on my screen right now?"
@@ -265,7 +185,7 @@ iris --enable-screen-capture
 - "What application am I using?"
 - "Describe what you see on my display"
 
-> **macOS note:** Screen recording permission must be granted to the **terminal app running Iris** in **System Settings > Privacy & Security > Screen Recording**. Restart the terminal app after granting permission.
+> **macOS note:** Screen recording permission must be granted to Iris (in development, to the app that started it) in **System Settings > Privacy & Security > Screen Recording**. Restart it after granting permission.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -309,15 +229,15 @@ Iris starts listening as soon as the models are loaded. Speaking and typing shar
 - **Mic** switches listening off while still answering typed messages; **Voice** switches spoken replies off for a text-only chat; **Stop** cancels the current reply.
 - **Wake word** (Settings): Iris sleeps until addressed by name. "Iris, what's the weather?" wakes it and is answered at once; a bare "Iris" plays a soft chime and waits for the request. Follow-ups need no name. Iris stays awake while you talk and for a while after each reply (**Stay awake**, 30 seconds by default). Over the last 10 seconds the orb visibly drifts toward its sleeping tone, then it goes back to sleep with a soft falling chime. Saying the **sleep word** ("That's all, Iris" by default) sends it to sleep right away. While asleep, a voice-activity detector screens out everything that isn't speech, and only speech reaches the smallest Whisper model: about 30–40 ms per utterance on the GPU of an Apple Silicon Mac. The wake word only counts at the start of an utterance, so "tell Iris I said hi" doesn't wake it.
 
-**Memory.** Iris keeps one continuous conversation that survives restarts and is remembered by topic in `~/.iris/memory.db`. The model always sees the recent turns plus a one-line index of every topic it remembers. When you come back to something, it decides itself to `recall` that topic or to `search_memory`, a full-text search over everything said; there are no embeddings and no similarity thresholds. Conversations are sorted into topics by the same model, but only during quiet spells. Filing gives way the moment you speak or type, and a filing call already in flight is cut off, so replies never wait for it. The memory panel (clock icon, top right) lists the topics with their summaries and conversations, and can forget a topic. **Amnesia** in the message box keeps the current conversation out of memory: Iris follows it as usual, but writes nothing, and forgets it entirely when amnesia is switched off. `iris --no-memory` turns memory off altogether.
+**Memory.** Iris keeps one continuous conversation that survives restarts and is remembered by topic in `~/.iris/memory.db`. The model always sees the recent turns plus a one-line index of every topic it remembers. When you come back to something, it decides itself to `recall` that topic or to `search_memory`, a full-text search over everything said; there are no embeddings and no similarity thresholds. Conversations are sorted into topics by the same model, but only during quiet spells. Filing gives way the moment you speak or type, and a filing call already in flight is cut off, so replies never wait for it. The memory panel (clock icon, top right) lists the topics with their summaries and conversations, and can forget a topic. **Amnesia** in the message box keeps the current conversation out of memory: Iris follows it as usual, but writes nothing, and forgets it entirely when amnesia is switched off.
 
 The settings panel (top right) holds the persona, the Ollama server, the language model, switches for the camera, screen capture and web search tools, and the microphone. All choices are remembered between launches.
 
 - **Personas:** besides the built-in ones, YAML files in `~/.iris/personas` appear in the menu. Each persona speaks with its own voice, except in languages that voice cannot speak. The pencil beside the menu edits a persona (name, speech engine, voice, speed, effect and personality, with a button to hear the voice), the plus creates one. Edits are saved to `~/.iris/personas`; an edited built-in persona can be reset.
 - **Ollama server:** empty uses `OLLAMA_HOST` (or `http://localhost:11434`). An OpenAI-style URL ending in `/v1` works too. The server is checked before Iris switches to it.
 - **Models:** the menu lists what the server has installed; switching keeps the conversation history.
-- **Speech recognition:** on Apple Silicon Macs, Whisper runs on the GPU through MLX with large-v3-turbo, which is several times faster than CPU decoding and leaves the CPU idle. Elsewhere faster-whisper runs, with large-v3-turbo on an NVIDIA GPU and small on a CPU. The CLI accepts `--whisper-engine` and `--whisper-model` to override this.
-- **Tools:** unlike the CLI, which gates them behind flags, the desktop UI enables the camera, screen capture and web search tools by default. A tool whose optional dependencies are missing is shown as not installed. Image prompts are routed to a vision model when the server has one.
+- **Speech recognition:** on Apple Silicon Macs, Whisper runs on the GPU through MLX with large-v3-turbo, which is several times faster than CPU decoding and leaves the CPU idle. Elsewhere faster-whisper runs, with large-v3-turbo on an NVIDIA GPU and small on a CPU.
+- **Tools:** the camera, screen capture and web search tools are on by default. A tool whose optional dependencies are missing is shown as not installed. Image prompts are routed to a vision model when the server has one.
 - **Model folders** (under Advanced): point Iris at speech models you already have instead of downloading them. Recognition takes a Whisper folder, either an MLX conversion (`weights.safetensors` or `weights.npz`) or a faster-whisper model (`model.bin`); Voice takes a folder holding `kokoro-v1.0.onnx` and `voices-v1.0.bin`. A folder without them is refused at once. **Download** goes back to the downloaded models.
 
 The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `setup.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `wake.set/options`, `voice.set_output`, `chat.send_text/history`, `memory.topics/topic/forget/set_amnesia`, `persona.list/set/get/voices/save/delete/preview`, `llm.list/set/set_host`, `models.check/set`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `memory.updated`, `error`).
@@ -334,7 +254,7 @@ Check what your shell actually captures:
 .venv/bin/python -c "import sounddevice as sd, numpy as np; r = sd.rec(int(3*16000), samplerate=16000, channels=1); sd.wait(); print('max amplitude:', float(np.abs(r).max()))"
 ```
 
-A working microphone reports a non-zero value (a quiet room still has a noise floor). Exactly `0.0` means capture is being denied. Fix it by enabling the microphone for your launching app under **System Settings > Privacy & Security > Microphone**, then quitting and reopening that app (a reload is not enough). Running `npm run dev` from a terminal that already has the grant — the same one where `iris` works on the CLI — also resolves it.
+A working microphone reports a non-zero value (a quiet room still has a noise floor). Exactly `0.0` means capture is being denied. Fix it by enabling the microphone for your launching app under **System Settings > Privacy & Security > Microphone**, then quitting and reopening that app (a reload is not enough). Running `npm run dev` from a terminal that already has the grant also resolves it.
 
 The app surfaces this itself: a red line appears in the transcript when the microphone delivers only silence for a few seconds.
 
@@ -382,7 +302,6 @@ The app is signed ad hoc, not with a Developer ID, and not notarized. `ui/build/
 - [Ollama](https://ollama.ai/) — Local LLM inference
 - [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) — Kyutai's natural-sounding text-to-speech that runs on the CPU
 - [Kokoro TTS](https://github.com/nazdridoy/kokoro-tts) — High-quality text-to-speech engine
-- [Rich](https://github.com/Textualize/rich) — Terminal UI framework
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 

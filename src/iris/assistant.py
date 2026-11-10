@@ -1,8 +1,8 @@
 """Voice assistant coordinator that orchestrates all components."""
 
+import logging
 import os
 import queue
-import sys
 import threading
 import time
 import warnings
@@ -12,10 +12,6 @@ from typing import Optional
 import numpy as np
 import sounddevice as sd
 from faster_whisper.audio import decode_audio
-from rich.align import Align
-from rich.console import Console, Group
-from rich.panel import Panel
-from rich.text import Text
 
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
@@ -24,14 +20,16 @@ from iris.events import EventBus
 from iris.llm import ConversationManager, effective_host, split_speech
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
+from iris.status import StatusManager
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
 from iris.tts import SpeechGenerator, SpeechPipeline
 from iris.turns import SmartTurn
-from iris.ui import DisplayManager, StatusManager
 from iris.wakeword import WakeWordDetector, match_sleep_word
 
 warnings.filterwarnings("ignore")
+
+logger = logging.getLogger(__name__)
 
 # With a wake word set: how long the assistant keeps listening after a turn
 # (or after the user last spoke) before it goes back to sleep
@@ -93,9 +91,6 @@ class VoiceAssistant:
         sample_rate: int = 16000,
         silence_threshold: float = 0.015,
         silence_duration: float = 3.5,
-        tts_voice: str = "af_bella",
-        tts_speed: float = 1.25,
-        quiet: bool = True,
         persona: Optional[Persona] = None,
         enable_vision: bool = False,
         vision_model: Optional[str] = "qwen3-vl:8b",
@@ -125,9 +120,6 @@ class VoiceAssistant:
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
             silence_duration: Silence that ends a turn Smart Turn has not ended
-            tts_voice: Unused: the persona's voice is spoken
-            tts_speed: Speed for TTS
-            quiet: If True, suppress verbose output during initialization
             persona: Persona to use for the assistant
             enable_vision: Enable camera/vision tool
             vision_model: Vision model to use when vision is needed (default: qwen3-vl:8b)
@@ -150,10 +142,7 @@ class VoiceAssistant:
             barge_in: Let the user interrupt the voice by speaking (needs
                 echo cancellation, which takes the voice out of the microphone)
         """
-        # Initialize console
-        self.console = Console()
-
-        # Event bus for external UIs (None in pure CLI mode)
+        # Where activity is pushed to the app (None in tests)
         self.event_bus = event_bus
 
         # Cooperative control signals for external UIs
@@ -189,12 +178,8 @@ class VoiceAssistant:
         # Track current conversation language for continuity
         self.conversation_language = "en"
 
-        # Store persona and use its voice
+        # The persona speaks with its own engine and voice
         self.persona = persona if persona else get_persona("iris")
-        tts_voice = self.persona.voice
-
-        if not quiet:
-            self.console.print("[dim]Initializing components...[/dim]")
 
         # Initialize components
         # Smart Turn hears when the user has finished speaking; without it
@@ -216,16 +201,13 @@ class VoiceAssistant:
         self.player = AudioPlayer(audio_filter=audio_filter)
         self.player.echo = self.echo
 
-        self.transcriber = WhisperTranscriber(
-            whisper_model, whisper_device, quiet=quiet, engine=whisper_engine
-        )
+        self.transcriber = WhisperTranscriber(whisper_model, whisper_device, engine=whisper_engine)
 
         # Initialize TTS with persona's engine, voice and speed
         self.tts_generator = SpeechGenerator(
             self.persona.engine,
-            tts_voice,
+            self.persona.voice,
             self.persona.speed,
-            quiet=quiet,
             models_dir=tts_models_dir,
         )
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
@@ -235,12 +217,9 @@ class VoiceAssistant:
                 "audio.output", {"rms": level}
             )
 
-        # Initialize UI
-        self.status_manager = StatusManager(self.console)
-        self.status_manager.event_bus = self.event_bus
-        self.display_manager = DisplayManager(self.console, self.status_manager)
+        # What the assistant is doing, pushed to the app as it changes
+        self.status_manager = StatusManager(self.event_bus)
 
-        # Setup tools (after status_manager is created)
         # Long-term memory: filed in the background by the conversation's own
         # model, recalled by it through the memory tools
         self.memory: Optional[MemoryKeeper] = None
@@ -253,41 +232,19 @@ class VoiceAssistant:
                 busy=self._conversation_busy,
             )
 
+        # A tool whose optional dependencies are missing stays off, and the
+        # app shows it as not installed
         self.tools = None
         if enable_vision or enable_screen_capture or enable_web_search or self.memory:
-            self.tools = Tools(console=self.console, status_manager=self.status_manager)
+            self.tools = Tools(status_manager=self.status_manager)
             if self.memory:
                 self.tools.enable_memory(self.memory.store)
-
             if enable_vision:
-                if self.tools.enable_camera():
-                    if not quiet:
-                        self.console.print("[dim]✓ Vision enabled[/dim]")
-                else:
-                    self.console.print(
-                        "[yellow]⚠ Vision dependencies not installed (opencv-python, pillow)[/yellow]"
-                    )
-
+                self.tools.enable_camera()
             if enable_screen_capture:
-                if self.tools.enable_screen_capture():
-                    if not quiet:
-                        self.console.print("[dim]✓ Screen capture enabled[/dim]")
-                        self.console.print(
-                            f"[dim]  Available tools: {list(self.tools._enabled_tools.keys())}[/dim]"
-                        )
-                else:
-                    self.console.print(
-                        "[yellow]⚠ Screen capture dependencies not installed (mss)[/yellow]"
-                    )
-
+                self.tools.enable_screen_capture()
             if enable_web_search:
-                if self.tools.enable_web_search():
-                    if not quiet:
-                        self.console.print("[dim]✓ Web search enabled[/dim]")
-                else:
-                    self.console.print(
-                        "[yellow]⚠ Web search dependencies not installed (requests)[/yellow]"
-                    )
+                self.tools.enable_web_search()
 
         self.set_wake_word(wake_word, engine=whisper_engine)
 
@@ -299,7 +256,6 @@ class VoiceAssistant:
             persona=self.persona,
             tools=self.tools,
             vision_model=vision_model,
-            quiet=quiet,
             host=ollama_host,
             memory=self.memory,
         )
@@ -541,7 +497,6 @@ class VoiceAssistant:
     def _answer_typed(self, turn: dict):
         text = turn["text"]
         attachments = turn.get("attachments") or []
-        self.display_manager.show_user_message(recorded_text(text, attachments))
         if self.event_bus:
             event = {
                 "text": text,
@@ -581,13 +536,11 @@ class VoiceAssistant:
     def _answer_spoken(self, audio_path: str):
         with self.status_manager.status_lock:
             self.status_manager.status_understanding = True
-        self.status_manager.update_status_bar(self.speech_pipeline)
 
         text, detected_language = self.transcriber.transcribe(audio_path)
 
         with self.status_manager.status_lock:
             self.status_manager.status_understanding = False
-        self.status_manager.update_status_bar(self.speech_pipeline)
 
         # The user went on meanwhile: the whole turn is answered instead
         if not text or self.interrupt_event.is_set():
@@ -608,8 +561,6 @@ class VoiceAssistant:
             self.conversation_language = detected_language
         response_language = self.conversation_language
 
-        # Display user message
-        self.display_manager.show_user_message(text)
         self._announced = True
         if self.event_bus:
             self.event_bus.emit(
@@ -656,13 +607,12 @@ class VoiceAssistant:
             # Set thinking status
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = True
-            self.status_manager.update_status_bar(self.speech_pipeline)
 
             # Set the speech pipeline language for this turn
             self.speech_pipeline.current_language = response_language
             self.speech_pipeline.begin_reply()
 
-            # Stream the response and display it live
+            # Stream the response
             full_response = []
             text_buffer = ""  # Buffer for speech chunks
             last_piece = 0  # length of the piece spoken last
@@ -672,7 +622,6 @@ class VoiceAssistant:
                 if tool_name == "recall" and self.memory:
                     topic = self.memory.store.topic(_as_int(tool_args.get("topic_id")))
                     detail = topic.title if topic else ""
-                self.display_manager.show_tool_activity(tool_name, detail)
                 if self.event_bus:
                     self.event_bus.emit("tool.use", {"tool": tool_name, "detail": detail})
 
@@ -703,15 +652,6 @@ class VoiceAssistant:
                     if self.event_bus:
                         self.event_bus.emit("chat.chunk", {"text": chunk_text})
 
-                    # Build current response text
-                    current_text = "".join(full_response)
-
-                    # Update the display to show streaming message
-                    if current_text.strip():
-                        self.display_manager.update_streaming_display(
-                            current_text, self.speech_pipeline
-                        )
-
                     # Speak each piece as it is complete (queued for
                     # sequential playback); the first one as soon as its
                     # first sentence is there
@@ -739,17 +679,10 @@ class VoiceAssistant:
                 if self.event_bus:
                     self.event_bus.emit("chat.done", {"text": answer, "interrupted": interrupted})
 
-                # Final update: show ONLY the message (without status bar)
-                self.display_manager.finalize_message(answer, self.speech_pipeline)
-
             finally:
                 # Clear thinking status if still set
                 with self.status_manager.status_lock:
                     self.status_manager.status_thinking = False
-
-                # Make sure status bar is running
-                if not self.status_manager.status_bar_active:
-                    self.status_manager.start(self.speech_pipeline)
 
             # Speak any remaining text that wasn't spoken yet, unless the
             # reply was stopped in the meantime
@@ -769,59 +702,24 @@ class VoiceAssistant:
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = False
 
-            # Make sure status bar is running
-            if not self.status_manager.status_bar_active:
-                self.status_manager.start(self.speech_pipeline)
-
             error_msg = f"Error communicating with Ollama: {e}"
             if self.event_bus:
                 self.event_bus.emit("error", {"message": error_msg})
-            self.console.print(f"[red]Error:[/red] {error_msg}")
-            import traceback
-
-            traceback.print_exc()
+            logger.exception("Reply failed")
             return error_msg
 
+    def _error(self, message: str):
+        """Tell the app about a problem it should show."""
+        if self.event_bus:
+            self.event_bus.emit("error", {"message": message})
+        logger.error(message)
+
     def run_loop(self):
-        """Run the main voice assistant loop."""
-        self.console.clear()
-
-        # Check if audio devices are available before starting
-        from iris.audio import AudioRecorder
-
+        """Listen and answer until stop_event is set."""
         devices_ok, device_msg = AudioRecorder.check_audio_devices()
         if not devices_ok:
-            self.console.print()
-            self.console.print("[bold red]✗ Microphone Error[/bold red]")
-            self.console.print(f"\n{device_msg}")
-            self.console.print()
-            self.console.print("[dim]Possible solutions:[/dim]")
-            self.console.print("  • Connect a microphone or headset")
-            self.console.print("  • Check system audio input settings")
-            self.console.print("  • Restart the application after connecting a microphone")
-            self.console.print()
+            self._error(f"No microphone: {device_msg}")
             return
-
-        # App name display with persona
-        name_text = Text("\niris\n", style="bold bright_white", justify="center")
-        info = Text()
-        info.append(f"◈ {self.persona.name}", style="dim magenta")
-        info.append("  •  ", style="dim")
-        info.append(f"{self.conversation.model}", style="dim")
-        info.append("  •  ", style="dim")
-        info.append("Ctrl+C to exit", style="dim cyan")
-
-        display = Group(
-            Align.center(name_text),
-            Align.center(info),
-            Align.center(Text("")),
-        )
-
-        self.console.print(display)
-        self.console.print()
-
-        # Initialize status bar at the bottom
-        self.status_manager.start(self.speech_pipeline)
 
         try:
             while True:
@@ -854,8 +752,8 @@ class VoiceAssistant:
                             self._handle_heard(turn["audio"], self.dormant)
                         else:
                             self._run_text_turn(turn)
-                    except Exception as e:
-                        self.console.print(f"[red]Error:[/red] Error in turn: {e}")
+                    except Exception:
+                        logger.exception("Turn failed")
                     continue
 
                 # Paused, or the user is typing: keep the microphone closed
@@ -873,7 +771,6 @@ class VoiceAssistant:
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = not dormant
                         self.status_manager.status_dormant = dormant
-                    self.status_manager.update_status_bar(self.speech_pipeline)
 
                     last_level_emit = [0.0]
                     heard_speech = [False]
@@ -888,7 +785,6 @@ class VoiceAssistant:
                                 self._last_voice = time.monotonic()
                                 if self.wake_word:
                                     self._keep_awake_while_speaking()
-                        self.display_manager.update_audio_level_display(level, self.speech_pipeline)
                         # Throttle level events to ~15 Hz for external UIs
                         if self.event_bus:
                             now = time.monotonic()
@@ -911,21 +807,13 @@ class VoiceAssistant:
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
                         self.status_manager.status_dormant = False
-                    self.status_manager.update_status_bar(self.speech_pipeline)
 
                     # Check if we had a device error
                     if self.recorder._device_error:
                         self.speech_pipeline.stop()
-                        self.status_manager.stop()
-                        self.console.print()
-                        self.console.print(
-                            "[bold red]✗ Microphone disconnected or unavailable[/bold red]"
+                        self._error(
+                            "The microphone was disconnected. Connect one and start Iris again."
                         )
-                        self.console.print()
-                        self.console.print(
-                            "[dim]Please connect a microphone and restart the application.[/dim]"
-                        )
-                        self.console.print()
                         break
 
                     if not audio_path:
@@ -935,19 +823,10 @@ class VoiceAssistant:
                     # reply), listening on in case the user was not finished
                     self._answer_listening(audio_path, dormant)
 
-                except KeyboardInterrupt:
-                    self.speech_pipeline.stop()
-                    self.status_manager.stop()
-                    self.console.print("\n[bold cyan]Goodbye![/bold cyan]")
-                    break
-                except Exception as e:
-                    self.console.print(f"[red]Error:[/red] Error in loop: {e}")
-                    import traceback
-
-                    traceback.print_exc()
+                except Exception:
+                    logger.exception("Listening failed")
         finally:
             self.speech_pipeline.stop()
-            self.status_manager.stop()
             if self.tools:
                 self.tools.cleanup()
             if self.memory:

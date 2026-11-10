@@ -269,8 +269,8 @@ class AssistantController:
         if tts_dir := kwargs.pop("tts_models_dir", ""):
             kwargs["tts_models_dir"] = tts_dir
 
-        # The GUI has no CLI flags, so tools are on by default; each one
-        # degrades to a warning if its optional dependencies are missing.
+        # Tools are on by default; one whose optional dependencies are
+        # missing stays off and shows as not installed
         kwargs.setdefault("enable_vision", True)
         kwargs.setdefault("enable_screen_capture", True)
         kwargs.setdefault("enable_web_search", True)
@@ -628,14 +628,13 @@ class AssistantController:
                 if stt_path is not None:
                     model = stt_path or "auto"
                     self._fetch_stt(model)
-                    assistant.transcriber = WhisperTranscriber(model, quiet=True)
+                    assistant.transcriber = WhisperTranscriber(model)
                 if tts_dir is not None:
                     self._fetch_tts(tts_dir)
                     generator = SpeechGenerator(
                         assistant.tts_generator.engine,
                         assistant.tts_generator.voice,
                         assistant.tts_generator.speed,
-                        quiet=True,
                         models_dir=tts_dir or None,
                     )
                     assistant.tts_generator = generator

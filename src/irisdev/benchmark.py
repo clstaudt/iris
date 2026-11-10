@@ -164,7 +164,7 @@ def run_benchmarks(
 
     # Setup ONNX
     if not cli_only:
-        generator = KokoroGenerator(voice=voice, speed=speed, quiet=True)
+        generator = KokoroGenerator(voice=voice, speed=speed)
         model_path = generator.model_path
         voices_path = generator.voices_path
         console.print("[dim]Warming up ONNX...[/dim]")
@@ -183,7 +183,7 @@ def run_benchmarks(
         elif cli_path:
             # If we don't have model paths yet (cli_only mode), get them
             if model_path is None:
-                temp_gen = KokoroGenerator(voice=voice, speed=speed, quiet=True)
+                temp_gen = KokoroGenerator(voice=voice, speed=speed)
                 model_path = temp_gen.model_path
                 voices_path = temp_gen.voices_path
 

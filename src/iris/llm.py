@@ -2,6 +2,7 @@
 
 import os
 import re
+import logging
 import warnings
 from typing import Optional
 
@@ -14,6 +15,8 @@ from iris.memory import LIVE_TOKENS, PIN_TURNS, PINNED_TOKENS, MemoryKeeper, est
 from iris.personas import Persona, get_persona
 
 warnings.filterwarnings("ignore")
+
+logger = logging.getLogger(__name__)
 
 # Fallback shown when neither a server URL nor OLLAMA_HOST is configured
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
@@ -205,7 +208,6 @@ class ConversationManager:
         persona: Optional[Persona] = None,
         tools=None,
         vision_model: Optional[str] = None,
-        quiet: bool = True,
         host: Optional[str] = None,
         memory: Optional[MemoryKeeper] = None,
     ):
@@ -217,7 +219,6 @@ class ConversationManager:
             persona: Persona to use (defaults to iris)
             tools: Optional Tools instance for function calling
             vision_model: Optional vision model to switch to when using vision tools
-            quiet: If True, suppress verbose output (setup wizard handles this)
             host: Ollama server URL; None follows OLLAMA_HOST
             memory: Long-term memory; when given, the conversation is stored
                 and the context is built from it (see iris.memory)
@@ -240,28 +241,18 @@ class ConversationManager:
         self.conversation_history = []
         # The last complete reply, as it is kept in the conversation
         self.reply: Optional[str] = None
-        self.quiet = quiet
         self.persona = persona if persona else get_persona("iris")
         self.tools = tools
         self.max_context_tokens = self._get_model_context_length()
 
-        # Test Ollama connection
-        if not quiet:
-            print(f"Testing Ollama connection with model '{model}'...")
         # Not fatal: the app starts without a server and says what is missing,
         # and a server can be set later (set_host)
         try:
             self.client.list()
             self.reachable = True
-            if not quiet:
-                print("Ollama connected")
         except Exception as e:
             self.reachable = False
-            print(f"Ollama connection failed: {e}")
-            print("Make sure Ollama is running: brew services start ollama")
-
-        if not quiet:
-            print(f"Model context length: {self.max_context_tokens:,} tokens")
+            logger.warning("Ollama is not reachable at %s: %s", effective_host(self.host), e)
 
     @staticmethod
     def list_available_models(host: Optional[str] = None) -> list[dict]:
@@ -373,24 +364,12 @@ class ConversationManager:
             if context_length:
                 # Use 80% of context to leave room for safety
                 usable_context = int(context_length * 0.8)
-                if not self.quiet:
-                    print(
-                        f"Detected model context: {context_length:,} tokens "
-                        f"(using {usable_context:,})"
-                    )
                 return usable_context
             else:
                 # Fallback: use a conservative default
-                if not self.quiet:
-                    print("Could not detect model context length, using default: 25,600 tokens")
                 return 25600
 
-        except Exception as e:
-            if not self.quiet:
-                print(
-                    f"Warning: Could not query model info ({e}), "
-                    f"using default context: 25,600 tokens"
-                )
+        except Exception:
             return 25600
 
     def estimate_tokens(self, text: str) -> int:
