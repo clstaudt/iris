@@ -39,6 +39,8 @@ export interface ChatMessage {
   text: string;
   streaming: boolean;
   tool?: string;
+  /** What a tool did, as the core words it (plugin tools) */
+  label?: string;
   /** How a user turn arrived */
   source?: "voice" | "text";
   /** Files sent with a typed turn */
@@ -125,10 +127,12 @@ export const BUSY_STATES = new Set([
   "summarizing",
 ]);
 
-/** A switchable tool group as the core reports it. */
+/** A plugin's tools as the core reports them, switchable in Settings. */
 export interface ToolState {
   enabled: boolean;
   available: boolean;
+  /** The plugin's name, e.g. "Camera" */
+  name?: string;
 }
 
 export interface AssistantConfig {
@@ -138,6 +142,8 @@ export interface AssistantConfig {
   whisper_model: string;
   whisper_device: string;
   whisper_engine?: string;
+  /** Speech recognition engine, e.g. "whisper" */
+  recognition_engine?: string;
   tts_engine?: SpeechEngine;
   tts_voice: string;
   input_device: string;
@@ -177,7 +183,17 @@ export interface ModuleInfo {
  *  one step at a time. */
 export type SettingsLevel = "essentials" | "more" | "expert";
 
-export type SpeechEngine = "kyutai" | "kokoro";
+/** Id of a speech engine the core has: "kyutai", "kokoro", or one a
+ *  plugin adds. */
+export type SpeechEngine = string;
+
+/** A speech engine as the persona editor offers it. */
+export interface EngineInfo {
+  id: SpeechEngine;
+  name: string;
+  /** Whether its voices take a speed */
+  takes_speed: boolean;
+}
 
 /** A persona as edited in the persona editor. */
 export interface PersonaSettings {
@@ -203,6 +219,8 @@ export interface VoiceInfo {
 
 export interface VoiceOptions {
   engines: Record<SpeechEngine, VoiceInfo[]>;
+  /** The engines in the core's order, with their names */
+  engine_info?: EngineInfo[];
   filters: string[];
 }
 
@@ -469,6 +487,7 @@ class IrisStore {
           role: "tool",
           text: (data.detail as string) ?? "",
           tool: (data.tool as string) ?? "tool",
+          label: (data.label as string) || undefined,
           streaming: false,
         });
         break;

@@ -114,7 +114,7 @@
             class="flex min-w-0 items-center gap-2 rounded-full border border-line px-3 py-1 text-[12px] text-ink-3"
           >
             <Icon name={tool?.icon ?? "search"} size={12} class="shrink-0" />
-            <span class="shrink-0">{tool?.label ?? message.tool}</span>
+            <span class="shrink-0">{tool?.label ?? message.label ?? message.tool}</span>
             {#if message.text}
               <span class="truncate text-ink-2">{message.text}</span>
             {/if}

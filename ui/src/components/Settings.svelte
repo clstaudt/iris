@@ -4,11 +4,18 @@
   import Icon from "./Icon.svelte";
   import Switch from "./Switch.svelte";
 
+  // The plugins' tool switches, as the core reports them; the shipped ones
+  // until it has
   const TOOLS = [
     { id: "camera", label: "Camera" },
     { id: "screen", label: "Screen" },
     { id: "web", label: "Web search" },
   ];
+  const tools = $derived(
+    store.config?.tools
+      ? Object.entries(store.config.tools).map(([id, state]) => ({ id, label: state.name ?? id }))
+      : TOOLS
+  );
 
   // Pick up personas added since launch
   onMount(() => {
@@ -76,6 +83,10 @@
     Object.entries(store.config?.engines ?? {}).filter(([, list]) => list.length > 0)
   );
   const plugins = $derived(store.config?.plugins ?? []);
+  const speechEngineName = $derived(
+    store.config?.engines?.tts?.find((engine) => engine.id === store.config?.tts_engine)?.label ??
+      (store.config?.tts_engine === "kokoro" ? "Kokoro" : "Kyutai")
+  );
 
   function slotLabel(slot: string) {
     return SLOT_LABELS[slot] ?? slot.charAt(0).toUpperCase() + slot.slice(1);
@@ -232,7 +243,7 @@
     <section class="flex flex-col gap-2">
       <h3 class="section">Tools</h3>
       <div class="flex flex-col">
-        {#each TOOLS as tool}
+        {#each tools as tool}
           {@const state = store.config?.tools?.[tool.id]}
           <div class="flex items-center justify-between gap-3 py-1.5">
             <div class="flex min-w-0 items-baseline gap-2">
@@ -318,7 +329,7 @@
             </dd>
             <dt class="text-ink-3">Voice</dt>
             <dd class="text-ink-2">
-              {store.config.tts_engine === "kokoro" ? "Kokoro" : "Kyutai"} · {store.config.tts_voice}
+              {speechEngineName} · {store.config.tts_voice}
             </dd>
           </dl>
         </section>
