@@ -53,6 +53,8 @@
   );
   const voices = $derived<VoiceInfo[]>(store.voices?.engines[draft?.engine ?? "kyutai"] ?? []);
   const kokoroMissing = $derived(!!store.voices && store.voices.engines.kokoro.length === 0);
+  // The voice's engine, speed and effect, for those who asked for more
+  const detailed = $derived(store.settingsLevel !== "essentials");
 
   /** Voices by language, in the order the engine lists them. */
   const groups = $derived.by(() => {
@@ -146,19 +148,21 @@
 
       <section class="flex flex-col gap-2">
         <h3 class="section">Voice</h3>
-        <div class="segmented" role="radiogroup" aria-label="Speech engine">
-          {#each ENGINES as engine}
-            <button
-              role="radio"
-              aria-checked={draft.engine === engine.id}
-              disabled={engine.id === "kokoro" && kokoroMissing}
-              onclick={() => setEngine(engine.id)}
-              class:active={draft.engine === engine.id}
-            >
-              {engine.label}
-            </button>
-          {/each}
-        </div>
+        {#if detailed}
+          <div class="segmented" role="radiogroup" aria-label="Speech engine">
+            {#each ENGINES as engine}
+              <button
+                role="radio"
+                aria-checked={draft.engine === engine.id}
+                disabled={engine.id === "kokoro" && kokoroMissing}
+                onclick={() => setEngine(engine.id)}
+                class:active={draft.engine === engine.id}
+              >
+                {engine.label}
+              </button>
+            {/each}
+          </div>
+        {/if}
         <div class="flex gap-1.5">
           <div class="relative min-w-0 flex-1">
             <select bind:value={draft.voice} class="field">
@@ -179,35 +183,37 @@
             <Icon name="play" size={13} />
           </button>
         </div>
-        <div class="grid grid-cols-[5.5rem_1fr] items-center gap-x-3 gap-y-2 pt-1">
-          {#if draft.engine === "kokoro"}
-            <label for="persona-speed" class="text-[12.5px] text-ink-2">Speed</label>
-            <div class="flex items-center gap-3">
-              <input
-                id="persona-speed"
-                type="range"
-                min="0.7"
-                max="1.5"
-                step="0.05"
-                bind:value={draft.speed}
-                class="range min-w-0 flex-1"
-              />
-              <span class="w-10 shrink-0 text-right text-[12px] tabular-nums text-ink-2">
-                {Number(draft.speed).toFixed(2)}×
-              </span>
+        {#if detailed}
+          <div class="grid grid-cols-[5.5rem_1fr] items-center gap-x-3 gap-y-2 pt-1">
+            {#if draft.engine === "kokoro"}
+              <label for="persona-speed" class="text-[12.5px] text-ink-2">Speed</label>
+              <div class="flex items-center gap-3">
+                <input
+                  id="persona-speed"
+                  type="range"
+                  min="0.7"
+                  max="1.5"
+                  step="0.05"
+                  bind:value={draft.speed}
+                  class="range min-w-0 flex-1"
+                />
+                <span class="w-10 shrink-0 text-right text-[12px] tabular-nums text-ink-2">
+                  {Number(draft.speed).toFixed(2)}×
+                </span>
+              </div>
+            {/if}
+            <label for="persona-effect" class="text-[12.5px] text-ink-2">Effect</label>
+            <div class="relative">
+              <select id="persona-effect" bind:value={draft.audio_filter} class="field">
+                <option value="">None</option>
+                {#each store.voices?.filters ?? [] as name}
+                  <option value={name}>{filterLabel(name)}</option>
+                {/each}
+              </select>
+              <Icon name="chevron" size={14} class="chevron" />
             </div>
-          {/if}
-          <label for="persona-effect" class="text-[12.5px] text-ink-2">Effect</label>
-          <div class="relative">
-            <select id="persona-effect" bind:value={draft.audio_filter} class="field">
-              <option value="">None</option>
-              {#each store.voices?.filters ?? [] as name}
-                <option value={name}>{filterLabel(name)}</option>
-              {/each}
-            </select>
-            <Icon name="chevron" size={14} class="chevron" />
           </div>
-        </div>
+        {/if}
       </section>
 
       <section class="flex min-h-[220px] flex-1 flex-col gap-2">
