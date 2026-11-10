@@ -45,6 +45,10 @@ DEFAULT_SLEEP_WORD = "That's all"
 DORMANT_SILENCE = 0.8
 
 
+# Seconds the microphone stays closed after a voice preview, for the room
+# to fall quiet
+PREVIEW_SETTLE = 0.4
+
 def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
     """Soft tones in sequence, each swelling in and out."""
     rate = 24000
@@ -890,6 +894,17 @@ class VoiceAssistant:
                         logger.exception("Turn failed")
                     continue
 
+                # A voice is being previewed: the microphone would hear it as
+                # the user, and answer it. It stays closed until the room is
+                # quiet again.
+                if self.speech_pipeline.is_active:
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_listening = False
+                    while self.speech_pipeline.is_active and not self.stop_event.is_set():
+                        time.sleep(0.05)
+                    time.sleep(PREVIEW_SETTLE)
+                    continue
+
                 # Paused, or the user is typing: keep the microphone closed
                 # (models stay loaded) and keep watching for typed turns
                 if self.pause_event.is_set() or self.hold_event.is_set():
@@ -933,8 +948,12 @@ class VoiceAssistant:
                         or self.hold_event.is_set()
                         or self.stop_event.is_set()
                         or not self.turn_queue.empty()
+                        # A voice preview started
+                        or self.speech_pipeline.is_active
                         # The awake window ran out with nobody speaking
-                        or (not dormant and not heard_speech[0] and self.dormant),
+                        or (not dormant and not heard_speech[0] and self.dormant)
+                        # The wake word was switched off: listen to everything
+                        or (dormant and not self.dormant),
                         silence_duration=DORMANT_SILENCE if dormant else None,
                     )
 

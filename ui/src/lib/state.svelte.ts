@@ -311,6 +311,8 @@ export interface SetupInfo {
 }
 
 const SETTINGS_KEY = "iris.settings";
+/** How long a voice preview may take to start (an engine's first load), in ms */
+const PREVIEW_TIMEOUT = 60_000;
 /** Turn timings kept, as many as the core keeps */
 const TIMINGS_KEPT = 20;
 
@@ -366,6 +368,9 @@ class IrisStore {
   settingsPage = $state<SettingsPage | null>(null);
   /** The pipeline stage open in the inspector */
   stage = $state<string | null>(null);
+  /** The voice being previewed, from the click until it has been heard */
+  previewing = $state<string | null>(null);
+  private previewHeard = false;
   /** Whisper's sizes for the recognition stage, once asked for */
   recognitionModels = $state<RecognitionModels | null>(null);
   /** The latest turns' timings, newest last */
@@ -464,6 +469,7 @@ class IrisStore {
         this.running = this.state !== "idle";
         // Started, or failed before its models were fetched
         if (this.state !== "starting") this.leaveSetup();
+        if (this.previewHeard && this.state !== "speaking") this.previewing = null;
         break;
 
       case "turn.timing":
@@ -476,6 +482,7 @@ class IrisStore {
 
       case "audio.output":
         this.outputLevel = (data.rms as number) ?? 0;
+        if (this.previewing && this.outputLevel > 0) this.previewHeard = true;
         break;
 
       case "chat.user": {
@@ -708,9 +715,25 @@ class IrisStore {
     }
   }
 
-  /** Say a line in a voice as it is being edited. */
-  async previewVoice(settings: PersonaSettings) {
-    await rpc("persona.preview", { ...settings });
+  /** Say a line in a voice as it is being edited. Returns an error message,
+   *  or null once the line is on its way. */
+  async previewVoice(settings: PersonaSettings): Promise<string | null> {
+    const voice = `${settings.engine}:${settings.voice}`;
+    this.previewing = voice;
+    this.previewHeard = false;
+    // A voice that never comes does not stay marked
+    setTimeout(() => {
+      if (this.previewing === voice && !this.previewHeard) this.previewing = null;
+    }, PREVIEW_TIMEOUT);
+    let error: string | null = null;
+    try {
+      const result = await rpc<{ ok: boolean; error?: string }>("persona.preview", { ...settings });
+      if (!result.ok) error = result.error ?? "The voice could not be played";
+    } catch (err) {
+      error = `The voice could not be played: ${err}`;
+    }
+    if (error) this.previewing = null;
+    return error;
   }
 
   /** Shrink the window to the orb alone, or bring the conversation back. */
