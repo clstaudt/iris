@@ -1,566 +1,154 @@
-"""Simple tool system for LLM function calling."""
+"""The tools the language model can call: those of the plugins switched on."""
 
-import base64
 import logging
-import os
-import sys
-import time
-import warnings
-from io import BytesIO
+from typing import Optional
 
-import numpy as np
-
-from iris.memory import RECALL_TOKENS, MemoryStore, estimate_tokens, relative_day
+from iris.plugin import Plugin, PluginContext, Tool
+from iris.status import STATUS_FLAG_NAMES
 
 logger = logging.getLogger(__name__)
 
-# Suppress OpenCV/AVCapture warnings
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-# Note: We handle stderr redirection in _look() to suppress warnings without blocking permissions
-
-try:
-    from PIL import Image
-    import cv2
-
-    # Suppress macOS AVCapture deprecation warnings
-    cv2.setLogLevel(0)
-    HAS_CAMERA = True
-except ImportError:
-    HAS_CAMERA = False
-
-try:
-    import mss
-    import mss.tools
-
-    HAS_SCREEN = True
-except ImportError:
-    HAS_SCREEN = False
-
-try:
-    from ddgs import DDGS
-    import trafilatura
-
-    HAS_SEARCH = True
-except ImportError:
-    HAS_SEARCH = False
-
-
-# User-facing switches and the tools behind each of them
-TOOL_GROUPS = {
-    "camera": ("look",),
-    "screen": ("capture_screen",),
-    "web": ("search", "browse"),
-}
+# The tool section of the system prompt opens and closes with these; each
+# tool's guidance goes in between
+GUIDANCE_START = "\n\nIMPORTANT - You have access to tools that you must use appropriately:\n"
+GUIDANCE_END = (
+    "\nIMPORTANT: You MUST use these functions when appropriate. "
+    "NEVER make up or guess what you see."
+)
 
 
 class Tools:
-    """Simple container for LLM tools."""
+    """The plugins' tools, switched on and off by plugin.
 
-    def __init__(self, status_manager=None):
+    The schemas and the system prompt are rebuilt from the tools on every
+    turn, so a switch applies from the next message.
+    """
+
+    def __init__(
+        self,
+        plugins: list[Plugin],
+        context: Optional[PluginContext] = None,
+        status_manager=None,
+        choices: Optional[dict[str, bool]] = None,
+    ):
         """
-        Initialize tools.
-
         Args:
-            status_manager: Optional StatusManager for UI updates
+            plugins: The plugins whose tools are offered, in offering order
+            context: What the plugins get to make their tools
+            status_manager: Shows each tool's activity while it runs
+            choices: {plugin id: on} chosen by the user; a plugin not in it
+                follows its enabled_by_default
         """
         self.status_manager = status_manager
-        self._camera = None
-        self._memory: MemoryStore | None = None
-        self._enabled_tools = {}
+        self._context = context or PluginContext()
+        self._plugins = {plugin.id: plugin for plugin in plugins}
+        # The tools of each plugin switched on
+        self._tools: dict[str, list[Tool]] = {}
+        choices = choices or {}
+        for plugin in plugins:
+            if not plugin.switchable or choices.get(plugin.id, plugin.enabled_by_default):
+                self._switch_on(plugin)
 
-    def enable_camera(self):
-        """
-        Enable camera/vision tool.
-
-        Returns:
-            True if enabled successfully, False if dependencies missing
-        """
-        if HAS_CAMERA:
-            self._enabled_tools["look"] = {
-                "function": self._look,
-                "schema": {
-                    "type": "function",
-                    "function": {
-                        "name": "look",
-                        "description": 'Use your camera to see what the user is showing you. Call this function whenever you need to see something visually to answer the user\'s question. This is your vision - use it when they ask "what do you see?", "look at this", "what am I holding?", or any question requiring visual information.',
-                        "parameters": {"type": "object", "properties": {}, "required": []},
-                    },
-                },
-            }
-            return True
-        return False
-
-    def enable_web_search(self):
-        """
-        Enable web search and browse tools.
-
-        Returns:
-            True if enabled successfully, False if dependencies missing
-        """
-        if HAS_SEARCH:
-            from trafilatura.settings import use_config
-
-            self._traf_config = use_config()
-            self._traf_config.set(
-                "DEFAULT",
-                "USER_AGENTS",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            self._enabled_tools["search"] = {
-                "function": self._search,
-                "schema": {
-                    "type": "function",
-                    "function": {
-                        "name": "search",
-                        "description": "Search the web for current information. Use when you need up-to-date facts, news, or information you don't know.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "Search query"}
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                },
-            }
-            self._enabled_tools["browse"] = {
-                "function": self._browse,
-                "schema": {
-                    "type": "function",
-                    "function": {
-                        "name": "browse",
-                        "description": (
-                            "Fetch and read the contents of a webpage."
-                            " Use when the user mentions a specific website"
-                            " or you need to read a URL from search results."
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "url": {
-                                    "type": "string",
-                                    "description": "Full URL to fetch (e.g. https://www.theguardian.com)",
-                                }
-                            },
-                            "required": ["url"],
-                        },
-                    },
-                },
-            }
-            return True
-        return False
-
-    def enable_screen_capture(self):
-        """
-        Enable screen capture tool.
-
-        Returns:
-            True if enabled successfully, False if dependencies missing
-        """
-        if HAS_SCREEN:
-            self._enabled_tools["capture_screen"] = {
-                "function": self._capture_screen,
-                "schema": {
-                    "type": "function",
-                    "function": {
-                        "name": "capture_screen",
-                        "description": (
-                            "Take a screenshot of the user's physical computer screen."
-                            " Use ONLY when they ask about what is on their screen,"
-                            " monitor, or desktop. NEVER use this to read websites"
-                            " - use 'browse' for that."
-                        ),
-                        "parameters": {"type": "object", "properties": {}, "required": []},
-                    },
-                },
-            }
-            return True
-        return False
-
-    def _look(self, **kwargs) -> dict:
-        """
-        Capture a single image from camera.
-        Note: Looking status should already be set by LLM before this is called.
-
-        Args:
-            **kwargs: Ignored - accepts any arguments LLM might pass
-
-        Returns:
-            Dict with 'success', 'image', and 'message' keys
-        """
-        camera = None
+    def _switch_on(self, plugin: Plugin) -> bool:
+        if not plugin.available():
+            return False
         try:
-            old_stderr_fd = sys.stderr.fileno()
-            saved_stderr_fd = os.dup(old_stderr_fd)
-            devnull_fd = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull_fd, old_stderr_fd)
-            os.close(devnull_fd)
-
-            try:
-                # Open camera temporarily
-                camera = cv2.VideoCapture(0)
-            finally:
-                # Restore stderr
-                os.dup2(saved_stderr_fd, old_stderr_fd)
-                os.close(saved_stderr_fd)
-
-            if not camera.isOpened():
-                return {"success": False, "message": "Camera not available"}
-
-            # Give camera time to warm up (important for first frame quality)
-            # Also makes the "Looking" indicator clearly visible
-            time.sleep(1.5)
-
-            # Discard first few frames (they're often dark/poor quality)
-            for _ in range(5):
-                camera.read()
-
-            # Small additional pause to ensure "Looking" is noticeable
-            time.sleep(0.3)
-
-            # Capture the actual frame
-            ret, frame = camera.read()
-
-            if not ret or frame is None:
-                return {"success": False, "message": "Failed to capture image"}
-
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            # Convert to PIL Image
-            image = Image.fromarray(frame_rgb)
-
-            # Encode as JPEG in memory
-            buffer = BytesIO()
-            image.save(buffer, format="JPEG", quality=85)
-            image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-            return {"success": True, "image": image_base64, "message": "Image captured"}
-
-        except Exception as e:
-            return {"success": False, "message": f"Error capturing image: {e}"}
-        finally:
-            # Release camera immediately (not for video)
-            if camera is not None:
-                camera.release()
-
-            # Clear looking status after camera is done
-            if self.status_manager:
-                with self.status_manager.status_lock:
-                    self.status_manager.status_looking = False
-
-    def _search(self, query: str) -> dict:
-        """
-        Search the web using DuckDuckGo.
-
-        Args:
-            query: Search query string
-
-        Returns:
-            Dict with 'success', 'result', and 'message' keys
-        """
-        logger.info("Searching: %s", query)
-
-        if self.status_manager:
-            with self.status_manager.status_lock:
-                self.status_manager.status_searching = True
-
-        try:
-            results = DDGS().text(query, max_results=5)
-
-            if not results:
-                logger.warning("Search returned no results for: %s", query)
-                return {"success": True, "result": "No results found.", "message": "No results"}
-
-            logger.info("Search got %d results for: %s", len(results), query)
-
-            formatted = []
-            for r in results:
-                title = r.get("title", "")
-                body = r.get("body", "")
-                href = r.get("href", "")
-                formatted.append(f"- {title}: {body} ({href})")
-
-            result_text = "\n".join(formatted)
-            return {
-                "success": True,
-                "result": result_text,
-                "message": f"Search results for: {query}",
-            }
-
-        except Exception as e:
-            logger.error("Search failed for '%s': %s", query, e, exc_info=True)
-            return {"success": False, "result": "Search failed", "message": f"Error: {e}"}
-        finally:
-            if self.status_manager:
-                with self.status_manager.status_lock:
-                    self.status_manager.status_searching = False
-
-    def _browse(self, url: str) -> dict:
-        """
-        Fetch and extract readable text from a webpage using trafilatura.
-
-        Args:
-            url: URL to fetch
-
-        Returns:
-            Dict with 'success', 'result', and 'message' keys
-        """
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-
-        logger.info("Browsing: %s", url)
-
-        if self.status_manager:
-            with self.status_manager.status_lock:
-                self.status_manager.status_browsing = True
-
-        try:
-            downloaded = trafilatura.fetch_url(url, config=self._traf_config)
-            if downloaded is None:
-                logger.warning("Browse could not fetch: %s", url)
-                return {"success": False, "result": "", "message": f"Could not fetch {url}"}
-
-            text = trafilatura.extract(
-                downloaded,
-                include_links=True,
-                include_tables=True,
-                output_format="txt",
-                config=self._traf_config,
-            )
-            if not text:
-                logger.warning("Browse fetched but no content extracted: %s", url)
-                return {"success": False, "result": "", "message": "No content extracted"}
-
-            logger.info("Browse got %d chars from %s", len(text), url)
-
-            if len(text) > 4000:
-                text = text[:4000] + "\n...(truncated)"
-
-            return {
-                "success": True,
-                "result": text,
-                "message": f"Content from: {url}",
-            }
-
-        except Exception as e:
-            logger.error("Browse failed for '%s': %s", url, e, exc_info=True)
-            return {"success": False, "result": "Browse failed", "message": f"Error: {e}"}
-        finally:
-            if self.status_manager:
-                with self.status_manager.status_lock:
-                    self.status_manager.status_browsing = False
-
-    def _capture_screen(self, **kwargs) -> dict:
-        """
-        Capture a screenshot of the user's screen.
-        Note: Capturing screen status should already be set by LLM before this is called.
-
-        Args:
-            **kwargs: Ignored - accepts any arguments LLM might pass
-
-        Returns:
-            Dict with 'success', 'image', and 'message' keys
-        """
-        try:
-            # Capture the primary monitor
-            with mss.mss() as sct:
-                # Get the primary monitor
-                monitor = sct.monitors[1]
-
-                # Capture screenshot
-                screenshot = sct.grab(monitor)
-
-                # Check if screenshot is valid (not empty/black from permission denial)
-                if screenshot.size[0] == 0 or screenshot.size[1] == 0:
-                    return {
-                        "success": False,
-                        "message": "Screen capture failed - screen recording permission may be required. Grant permission in System Settings > Privacy & Security > Screen Recording.",
-                    }
-
-                # Convert to PIL Image
-                image = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
-
-                img_array = np.array(image)
-                if img_array.max() == 0:  # Completely black
-                    return {
-                        "success": False,
-                        "message": "Screen capture returned black image - please grant screen recording permission in System Settings > Privacy & Security > Screen Recording, then restart the application.",
-                    }
-
-                # Resize to reasonable size (vision models don't need full resolution)
-                max_dimension = 1920
-                if image.width > max_dimension or image.height > max_dimension:
-                    ratio = min(max_dimension / image.width, max_dimension / image.height)
-                    new_size = (int(image.width * ratio), int(image.height * ratio))
-                    image = image.resize(new_size, Image.Resampling.LANCZOS)
-
-                # Encode as JPEG in memory
-                buffer = BytesIO()
-                image.save(buffer, format="JPEG", quality=85)
-                image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-                return {"success": True, "image": image_base64, "message": "Screen captured"}
-
-        except Exception as e:
-            error_msg = f"Error capturing screen: {e}. You may need to grant screen recording permission in System Settings."
-            return {"success": False, "message": error_msg}
-        finally:
-            if self.status_manager:
-                with self.status_manager.status_lock:
-                    self.status_manager.status_capturing_screen = False
-
-    def enable_memory(self, store: MemoryStore):
-        """Enable recall and search_memory over long-term memory.
-
-        The topic index in the system prompt tells the model what it
-        remembers; these tools are how it fetches the details.
-        """
-        self._memory = store
-        self._enabled_tools["recall"] = {
-            "function": self._recall,
-            "schema": {
-                "type": "function",
-                "function": {
-                    "name": "recall",
-                    "description": (
-                        "Load an earlier conversation from memory by its topic number"
-                        " (#id in the memory index). Use it whenever the user refers to"
-                        " something discussed before that is not in the recent messages."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "topic_id": {"type": "integer", "description": "Topic number"}
-                        },
-                        "required": ["topic_id"],
-                    },
-                },
-            },
-        }
-        self._enabled_tools["search_memory"] = {
-            "function": self._search_memory,
-            "schema": {
-                "type": "function",
-                "function": {
-                    "name": "search_memory",
-                    "description": (
-                        "Search everything ever said in earlier conversations for words,"
-                        " names or details that the memory index does not show."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Words to look for"}
-                        },
-                        "required": ["query"],
-                    },
-                },
-            },
-        }
+            self._tools[plugin.id] = list(plugin.tools(self._context))
+        except Exception:
+            logger.exception("Plugin %s could not make its tools", plugin.id)
+            return False
         return True
 
-    def _recall(self, topic_id=None, **kwargs) -> dict:
-        try:
-            topic = self._memory.topic(int(topic_id))
-        except (TypeError, ValueError):
-            topic = None
-        if topic is None:
-            return {"success": False, "message": f"No topic #{topic_id} in memory"}
-        # The summary, then as many of the latest exchanges as fit
-        excerpts, used = [], 0
-        for turn in reversed(topic.turns):
-            line = f"{turn['role'].capitalize()} ({relative_day(turn['ts'])}): {turn['text']}"
-            if used + estimate_tokens(line) > RECALL_TOKENS:
-                break
-            excerpts.append(line)
-            used += estimate_tokens(line)
-        text = (
-            f"Memory #{topic.id} {topic.title}\nSummary: {topic.summary}\n\n"
-            "Latest exchanges:\n" + "\n".join(reversed(excerpts))
-        )
-        return {"success": True, "result": text, "topic_id": topic.id, "title": topic.title}
-
-    def _search_memory(self, query: str = "", **kwargs) -> dict:
-        hits = self._memory.search(query)
-        if not hits:
-            return {"success": True, "result": f"Nothing in memory matches '{query}'."}
-        lines = [
-            f"- {relative_day(h['ts'])}, "
-            f"{'#' + str(h['topic_id']) + ' ' + h['title'] if h['topic_id'] else 'no topic'}: "
-            f"{h['snippet']}"
-            for h in hits
-        ]
-        return {"success": True, "result": f"Memory matches for '{query}':\n" + "\n".join(lines)}
-
-    def get_schemas(self) -> list[dict]:
-        """
-        Get Ollama tool schemas for all enabled tools.
+    def set_enabled(self, plugin_id: str, enabled: bool) -> bool:
+        """Switch a plugin's tools on or off.
 
         Returns:
-            List of tool schema dicts
+            False if the plugin is unknown, cannot be switched, or what it
+            needs is not installed
         """
-        return [tool["schema"] for tool in self._enabled_tools.values()]
-
-    def execute(self, tool_name: str, **kwargs) -> dict:
-        """
-        Execute a tool by name.
-
-        Args:
-            tool_name: Name of the tool to execute
-            **kwargs: Arguments to pass to the tool
-
-        Returns:
-            Tool execution result dict
-        """
-        if tool_name not in self._enabled_tools:
-            return {"success": False, "message": f"Unknown tool: {tool_name}"}
-
-        return self._enabled_tools[tool_name]["function"](**kwargs)
-
-    def set_group(self, group: str, enabled: bool) -> bool:
-        """Switch a tool group on or off at runtime.
-
-        The schemas and the system prompt are rebuilt from the enabled tools
-        on every turn, so the change applies from the next message.
-
-        Returns:
-            False if the group is unknown or its dependencies are missing
-        """
-        if group not in TOOL_GROUPS:
+        plugin = self._plugins.get(plugin_id)
+        if plugin is None or not plugin.switchable:
             return False
         if not enabled:
-            for name in TOOL_GROUPS[group]:
-                self._enabled_tools.pop(name, None)
+            self._tools.pop(plugin_id, None)
             return True
-        enable = {
-            "camera": self.enable_camera,
-            "screen": self.enable_screen_capture,
-            "web": self.enable_web_search,
-        }[group]
-        return enable()
+        return plugin_id in self._tools or self._switch_on(plugin)
 
-    def group_states(self) -> dict:
-        """Report each tool group as {"enabled": bool, "available": bool}."""
-        available = {"camera": HAS_CAMERA, "screen": HAS_SCREEN, "web": HAS_SEARCH}
+    def states(self) -> dict[str, dict]:
+        """The switchable plugins as {id: {"enabled", "available", "name"}}."""
         return {
-            group: {
-                "enabled": all(name in self._enabled_tools for name in names),
-                "available": available[group],
+            plugin.id: {
+                "enabled": plugin.id in self._tools,
+                "available": plugin.available(),
+                "name": plugin.name,
             }
-            for group, names in TOOL_GROUPS.items()
+            for plugin in self._plugins.values()
+            if plugin.switchable
         }
 
+    def enabled(self, plugin_id: str) -> bool:
+        """Whether the plugin is on and brings tools."""
+        return bool(self._tools.get(plugin_id))
+
+    def _enabled_tools(self) -> list[Tool]:
+        return [tool for pid in self._plugins if pid in self._tools for tool in self._tools[pid]]
+
+    def tool(self, name: str) -> Optional[Tool]:
+        """The tool of this name, if it is on."""
+        return next((tool for tool in self._enabled_tools() if tool.name == name), None)
+
+    def names(self) -> list[str]:
+        return [tool.name for tool in self._enabled_tools()]
+
+    def names_of(self, plugin_id: str) -> list[str]:
+        """The names of a plugin's tools, while they are on."""
+        return [tool.name for tool in self._tools.get(plugin_id, [])]
+
+    def get_schemas(self) -> list[dict]:
+        """The tools on, as offered to the model."""
+        return [tool.schema() for tool in self._enabled_tools()]
+
     def has_tools(self) -> bool:
-        """
-        Check if any tools are enabled.
+        return bool(self._enabled_tools())
+
+    def guidance(self) -> str:
+        """The tool section of the system prompt, or "" without tools."""
+        tools = self._enabled_tools()
+        if not tools:
+            return ""
+        return GUIDANCE_START + "".join(tool.guidance for tool in tools) + GUIDANCE_END
+
+    def execute(self, tool_name: str, **kwargs) -> dict:
+        """Run a tool, showing its activity meanwhile.
 
         Returns:
-            True if at least one tool is enabled
+            The tool's result dict; a failure if the tool is not on or raised
         """
-        return len(self._enabled_tools) > 0
+        tool = self.tool(tool_name)
+        if tool is None:
+            return {"success": False, "message": f"Unknown tool: {tool_name}"}
+        activity = tool.activity if tool.activity in STATUS_FLAG_NAMES else None
+        self._show(activity, True)
+        try:
+            return tool.run(**kwargs)
+        except Exception as e:
+            logger.exception("Tool %s failed", tool_name)
+            return {"success": False, "message": f"Error: {e}"}
+        finally:
+            self._show(activity, False)
+
+    def describe(self, tool_name: str, arguments: dict) -> tuple[str, str]:
+        """(label, detail) for the transcript: what the tool did, and on what."""
+        tool = self.tool(tool_name)
+        if tool is None:
+            return tool_name, ""
+        return tool.label or tool.name, tool.describe(arguments)
+
+    def _show(self, activity: Optional[str], on: bool):
+        if activity is None or self.status_manager is None:
+            return
+        with self.status_manager.status_lock:
+            setattr(self.status_manager, f"status_{activity}", on)
 
     def cleanup(self):
-        """Cleanup resources (camera already released per-use)."""
-        pass
+        """Release resources (the built-in tools hold none between calls)."""

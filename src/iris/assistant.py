@@ -13,6 +13,7 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper.audio import decode_audio
 
+from iris import engines
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
@@ -20,6 +21,8 @@ from iris.events import EventBus
 from iris.llm import ConversationManager, effective_host, split_speech
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
+from iris.plugin import Plugin, PluginContext
+from iris.plugins import BUILT_IN
 from iris.status import StatusManager
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
@@ -62,13 +65,6 @@ def _sleep_chime() -> np.ndarray:
     return _chime_tones((990.0, 660.0))
 
 
-def _as_int(value) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return -1
-
-
 def _echo_canceller() -> Optional[EchoCanceller]:
     """The echo canceller, or None where it cannot run."""
     if not HAS_ECHO_CANCELLATION:
@@ -87,15 +83,15 @@ class VoiceAssistant:
         whisper_model: str = "auto",
         whisper_device: str = "auto",
         whisper_engine: str = "auto",
+        recognition_engine: str = "whisper",
         llm_model: str = "qwen3:1.7b",
         sample_rate: int = 16000,
         silence_threshold: float = 0.015,
         silence_duration: float = 3.5,
         persona: Optional[Persona] = None,
-        enable_vision: bool = False,
         vision_model: Optional[str] = "qwen3-vl:8b",
-        enable_screen_capture: bool = False,
-        enable_web_search: bool = False,
+        plugins: Optional[list[Plugin]] = None,
+        tools: Optional[dict[str, bool]] = None,
         event_bus: Optional[EventBus] = None,
         turn_queue: Optional[queue.Queue] = None,
         speak_replies: bool = True,
@@ -116,15 +112,18 @@ class VoiceAssistant:
             whisper_device: Device for faster-whisper (cpu, cuda, or auto)
             whisper_engine: "auto" (MLX on Apple Silicon, else faster-whisper),
                 "mlx" or "faster-whisper"
+            recognition_engine: Id of the speech recognition engine (see
+                iris.engines); the whisper_* settings go to it as options
             llm_model: Ollama model name (primary model, should be fast)
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
             silence_duration: Silence that ends a turn Smart Turn has not ended
             persona: Persona to use for the assistant
-            enable_vision: Enable camera/vision tool
             vision_model: Vision model to use when vision is needed (default: qwen3-vl:8b)
-            enable_screen_capture: Enable screen capture tool
-            enable_web_search: Enable web search tool
+            plugins: The plugins whose tools the model may call (see
+                iris.plugins); None for those shipped with Iris
+            tools: {plugin id: on} chosen in the app; a plugin not in it
+                follows its own default
             event_bus: Optional EventBus for streaming activity to an external UI
             turn_queue: Optional queue of typed turns from an external UI. They
                 are taken in run_loop, between listens, so typed and spoken
@@ -201,7 +200,10 @@ class VoiceAssistant:
         self.player = AudioPlayer(audio_filter=audio_filter)
         self.player.echo = self.echo
 
-        self.transcriber = WhisperTranscriber(whisper_model, whisper_device, engine=whisper_engine)
+        self.recognition_engine = recognition_engine
+        self.transcriber = engines.recognition_engine(recognition_engine).create(
+            {"model": whisper_model, "device": whisper_device, "engine": whisper_engine}
+        )
 
         # Initialize TTS with persona's engine, voice and speed
         self.tts_generator = SpeechGenerator(
@@ -232,19 +234,15 @@ class VoiceAssistant:
                 busy=self._conversation_busy,
             )
 
-        # A tool whose optional dependencies are missing stays off, and the
-        # app shows it as not installed
-        self.tools = None
-        if enable_vision or enable_screen_capture or enable_web_search or self.memory:
-            self.tools = Tools(status_manager=self.status_manager)
-            if self.memory:
-                self.tools.enable_memory(self.memory.store)
-            if enable_vision:
-                self.tools.enable_camera()
-            if enable_screen_capture:
-                self.tools.enable_screen_capture()
-            if enable_web_search:
-                self.tools.enable_web_search()
+        # The plugins' tools, on as chosen; a plugin whose optional
+        # dependencies are missing stays off and shows as not installed
+        self.plugins = list(plugins) if plugins is not None else list(BUILT_IN)
+        self.tools = Tools(
+            self.plugins,
+            PluginContext(memory=self.memory.store if self.memory else None),
+            status_manager=self.status_manager,
+            choices=tools,
+        )
 
         self.set_wake_word(wake_word, engine=whisper_engine)
 
@@ -268,10 +266,11 @@ class VoiceAssistant:
             "persona": self.persona.name,
             "persona_id": self.persona.id,
             "llm_model": self.conversation.model,
-            "whisper_model": self.transcriber.model_name,
-            "whisper_device": self.transcriber.device,
-            "whisper_engine": self.transcriber.engine,
-            "stt_model_path": str(self.transcriber.model_path or ""),
+            "recognition_engine": self.recognition_engine,
+            "whisper_model": getattr(self.transcriber, "model_name", ""),
+            "whisper_device": getattr(self.transcriber, "device", ""),
+            "whisper_engine": getattr(self.transcriber, "engine", ""),
+            "stt_model_path": str(getattr(self.transcriber, "model_path", None) or ""),
             "tts_models_dir": str(self.tts_generator.models_dir or ""),
             "tts_engine": self.tts_generator.engine,
             "tts_voice": self.tts_generator.voice,
@@ -288,8 +287,33 @@ class VoiceAssistant:
             "sleep_word": self.sleep_word or "",
             "mic_on": not self.pause_event.is_set(),
             "paused": self.suspend_event.is_set(),
-            "tools": self.tools.group_states() if self.tools else {},
+            "tools": self.tools.states(),
+            "engines": engines.describe(
+                speech=self.tts_generator.engine,
+                recognition=self.recognition_engine,
+                models_dir=self.tts_generator.models_dir,
+            ),
+            "plugins": self.plugin_states(),
         }
+
+    def plugin_states(self) -> list[dict]:
+        """The plugins for the app: {id, label, active, available, source};
+        active when its tools are on or one of its engines is in use."""
+        in_use = {self.tts_generator.engine, self.recognition_engine}
+        states = []
+        for plugin in self.plugins:
+            provides = {e.id for e in plugin.speech_engines()}
+            provides |= {e.id for e in plugin.recognition_engines()}
+            states.append(
+                {
+                    "id": plugin.id,
+                    "label": plugin.name,
+                    "active": self.tools.enabled(plugin.id) or bool(provides & in_use),
+                    "available": plugin.available(),
+                    "source": plugin.source,
+                }
+            )
+        return states
 
     def set_wake_word(self, word: Optional[str], engine: str = "auto"):
         """Listen only for this word from now on (None or "" listens to all).
@@ -298,7 +322,10 @@ class VoiceAssistant:
         """
         word = (word or "").strip() or None
         if word and self.wake_detector is None:
-            engine = self.transcriber.engine if engine == "auto" else engine
+            # The wake word is heard by a tiny Whisper, on the backend
+            # recognition runs on when that is Whisper too
+            if engine == "auto" and isinstance(self.transcriber, WhisperTranscriber):
+                engine = self.transcriber.engine
             self.wake_detector = WakeWordDetector(engine)
         self.wake_word = word
         self.awake_until = 0.0  # a new word starts dormant, without a chime
@@ -618,12 +645,11 @@ class VoiceAssistant:
             last_piece = 0  # length of the piece spoken last
 
             def on_tool_use(tool_name, tool_args):
-                detail = tool_args.get("query") or tool_args.get("url", "")
-                if tool_name == "recall" and self.memory:
-                    topic = self.memory.store.topic(_as_int(tool_args.get("topic_id")))
-                    detail = topic.title if topic else ""
+                label, detail = self.tools.describe(tool_name, tool_args)
                 if self.event_bus:
-                    self.event_bus.emit("tool.use", {"tool": tool_name, "detail": detail})
+                    self.event_bus.emit(
+                        "tool.use", {"tool": tool_name, "label": label, "detail": detail}
+                    )
 
             interrupted = False
             try:
