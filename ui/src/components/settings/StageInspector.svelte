@@ -130,29 +130,64 @@
       (await store.setModelPaths(kind === "stt" ? { stt_path: "" } : { tts_dir: "" })) ?? "";
   }
 
-  // Language model: the server is edited as a draft, applied on Enter or
-  // Connect ---------------------------------------------------------------
+  // Language model: the servers kept, which of them answer, and the one in
+  // use -------------------------------------------------------------------
 
-  let hostDraft = $state<string | null>(null);
-  let hostError = $state("");
-  let connecting = $state(false);
-  const hostValue = $derived(hostDraft ?? config?.ollama_host ?? "");
+  const SERVER_CHECK_MS = 20_000;
+  let adding = $state(false);
+  let newServer = $state("");
+  let serverError = $state("");
+  let connecting = $state<string | null>(null);
+  const activeServer = $derived(config?.ollama_host ?? "");
+  const serverList = $derived([...new Set(["", ...store.servers, activeServer])]);
   const modelMissing = $derived(
     !!config && store.models.length > 0 && !store.models.some((m) => m.name === config?.llm_model)
   );
 
-  async function connect() {
-    connecting = true;
-    hostError = "";
+  $effect(() => {
+    if (stage !== "llm") return;
+    store.checkServers().catch(fail("llm.check_hosts"));
+    const timer = setInterval(
+      () => store.checkServers().catch(fail("llm.check_hosts")),
+      SERVER_CHECK_MS
+    );
+    return () => clearInterval(timer);
+  });
+
+  /** A server by its address without the scheme; the default one by what it is. */
+  function serverName(url: string) {
+    if (!url) return "This computer";
     try {
-      const error = await store.setOllamaHost(hostValue.trim());
-      if (error) hostError = error;
-      else hostDraft = null;
-    } catch (err) {
-      hostError = String(err);
-    } finally {
-      connecting = false;
+      const parsed = new URL(url);
+      return parsed.host + (parsed.pathname === "/" ? "" : parsed.pathname);
+    } catch {
+      return url;
     }
+  }
+
+  async function connect(url: string) {
+    if (url === activeServer || connecting !== null) return;
+    connecting = url;
+    serverError = "";
+    try {
+      serverError = (await store.setOllamaHost(url)) ?? "";
+    } catch (err) {
+      serverError = String(err);
+    } finally {
+      connecting = null;
+      store.checkServers().catch(fail("llm.check_hosts"));
+    }
+  }
+
+  function addServer() {
+    if (!newServer.trim()) return;
+    store.addServer(newServer);
+    newServer = "";
+    adding = false;
+  }
+
+  function focus(node: HTMLInputElement) {
+    node.focus();
   }
 
   // Tools -----------------------------------------------------------------
@@ -321,27 +356,67 @@
       {/if}
     {:else if stage === "llm"}
       <section class="sec">
-        <label class="s-section" for="stage-server">Server</label>
-        <div class="flex gap-1.5">
-          <input
-            id="stage-server"
-            value={hostValue}
-            oninput={(e) => (hostDraft = (e.target as HTMLInputElement).value)}
-            onkeydown={(e) => e.key === "Enter" && connect()}
-            placeholder={config?.ollama_url ?? "http://localhost:11434"}
-            spellcheck="false"
-            class="s-field min-w-0 flex-1"
-          />
-          <button
-            onclick={connect}
-            disabled={connecting || hostDraft === null}
-            class="s-btn h-9"
-          >
-            {connecting ? "Connecting" : "Connect"}
+        <h3 class="s-section">Server</h3>
+        {#each serverList as url (url)}
+          {@const state = store.reachable[url]}
+          <div class="s-option server {url === activeServer ? 'active' : ''}">
+            <button
+              class="pick"
+              role="radio"
+              aria-checked={url === activeServer}
+              disabled={connecting !== null}
+              onclick={() => connect(url)}
+            >
+              <span class="radio"></span>
+              <span class="flex min-w-0 flex-1 flex-col">
+                <span class="name truncate" title={url}>{serverName(url)}</span>
+                {#if connecting === url}
+                  <span class="meta">Connecting</span>
+                {:else if state === false}
+                  <span class="meta unreachable">Unreachable</span>
+                {/if}
+              </span>
+            </button>
+            <span
+              class="dot {state === true ? 'ok' : state === false ? 'down' : ''}"
+              title={state === true ? "Reachable" : state === false ? "Unreachable" : "Checking"}
+            ></span>
+            {#if url && url !== activeServer}
+              <button
+                class="s-icon-btn"
+                onclick={() => store.removeServer(url)}
+                aria-label="Remove {serverName(url)}"
+                title="Remove"
+              >
+                <Icon name="trash" size={13} />
+              </button>
+            {/if}
+          </div>
+        {/each}
+        {#if adding}
+          <div class="flex gap-1.5">
+            <input
+              use:focus
+              bind:value={newServer}
+              onkeydown={(e) => {
+                if (e.key === "Enter") addServer();
+                if (e.key === "Escape") adding = false;
+              }}
+              placeholder="http://host:11434"
+              spellcheck="false"
+              aria-label="Server address"
+              class="s-field min-w-0 flex-1"
+            />
+            <button class="s-btn h-9" disabled={!newServer.trim()} onclick={addServer}>Add</button>
+          </div>
+        {:else}
+          <button class="s-btn self-start" onclick={() => (adding = true)}>
+            <Icon name="plus" size={13} />
+            Add server
           </button>
-        </div>
-        {#if hostError}
-          <p class="s-status error">{hostError}</p>
+        {/if}
+        {#if serverError}
+          <p class="s-status error">{serverError}</p>
         {/if}
       </section>
       <section class="sec">
@@ -541,6 +616,38 @@
   .meter i.lit {
     height: 14px;
     opacity: 0.85;
+  }
+  /* A server: its row picks it, beside that whether it answers and a way to
+     remove it */
+  .server {
+    gap: 0.5rem;
+    padding: 0 0.5rem 0 0;
+  }
+  .server .pick {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.45rem 0 0.45rem 0.75rem;
+    text-align: left;
+  }
+  .server .dot {
+    height: 8px;
+    width: 8px;
+    flex-shrink: 0;
+    border-radius: 9999px;
+    border: 1.5px solid var(--color-ink-3);
+  }
+  .server .dot.ok {
+    border-color: var(--color-ok);
+    background: var(--color-ok);
+  }
+  .server .dot.down {
+    border-color: var(--color-danger);
+  }
+  .unreachable {
+    color: var(--color-danger);
   }
   .play {
     display: flex;

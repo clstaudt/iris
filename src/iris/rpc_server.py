@@ -110,6 +110,7 @@ def main():
         "llm.list": lambda params: controller.list_models(),
         "llm.set": lambda params: controller.set_model(params.get("name", "")),
         "llm.set_host": lambda params: controller.set_ollama_host(params.get("url", "")),
+        "llm.check_hosts": lambda params: controller.check_servers(params.get("urls", [])),
         "chat.send_text": lambda params: controller.send_text(
             params.get("text", ""), params.get("attachments")
         ),

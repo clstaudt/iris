@@ -275,6 +275,47 @@ try {
     check(await option(model).first().evaluate((el) => el.classList.contains("active")), "not marked");
   });
 
+  const servers = inspector.locator(".s-option.server");
+
+  await step("servers: one is added, shown as unreachable, refused, and removed", async () => {
+    await openStage("Language model");
+    const before = await servers.count();
+    await inspector.locator("button.s-btn", { hasText: "Add server" }).click();
+    await inspector.locator('input[aria-label="Server address"]').fill("http://127.0.0.1:9");
+    await inspector.locator('input[aria-label="Server address"]').press("Enter");
+    const row = servers.filter({ hasText: "127.0.0.1:9" });
+    await row.waitFor({ timeout: 5000 });
+    await row.locator(".meta", { hasText: "Unreachable" }).waitFor({ timeout: 15_000 });
+    const host = config().ollama_host;
+    await row.locator("button.pick").click();
+    await inspector.locator(".s-status.error").waitFor({ timeout: 30_000 });
+    check(config().ollama_host === host, "switched to a server that does not answer");
+    await row.locator('button[title="Remove"]').click();
+    await until("the server to be gone", async () => (await servers.count()) === before);
+  });
+
+  await step("servers: the one in use is marked reachable and cannot be removed", async () => {
+    await openStage("Language model");
+    const active = servers.filter({ has: page.locator('button.pick[aria-checked="true"]') });
+    check((await active.count()) === 1, "exactly one server is in use");
+    await active.locator(".dot.ok").waitFor({ timeout: 15_000 });
+    check(!(await active.locator('button[title="Remove"]').count()), "the server in use can be removed");
+  });
+
+  await step("servers: switching to another one and back", async () => {
+    await openStage("Language model");
+    const local = servers.filter({ hasText: "This computer" });
+    // Needs two servers that answer: the one given and this computer's
+    if (!process.env.E2E_HOST || !(await local.locator(".dot.ok").count())) return;
+    await local.locator("button.pick").click();
+    await until("this computer's server to be in use", () => config().ollama_host === "", 30_000);
+    await local.locator('button.pick[aria-checked="true"]').waitFor({ timeout: 5000 });
+    const other = servers.filter({ has: page.locator('button[title="Remove"]') }).first();
+    await other.locator("button.pick").click();
+    await until("the other server to be in use again", () => config().ollama_host !== "", 30_000);
+    await until("its models", () => option(model).count(), 30_000);
+  });
+
   await step("turn end: silence, and back to Smart Turn", async () => {
     await openStage("Turn end");
     await option("Silence").click();
