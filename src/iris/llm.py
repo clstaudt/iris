@@ -4,6 +4,7 @@ import os
 import re
 import logging
 import threading
+import types
 import warnings
 from typing import Optional
 
@@ -256,6 +257,9 @@ class ConversationManager:
         self.client = ollama_client(self.host)
         # Set by cancel(): the reply being streamed is not to go on
         self._cancelled = threading.Event()
+        # The client replies stream through while self.client is the ollama
+        # module, whose shared client must stay open
+        self._own_client = None
         self.memory = memory
         # Recalled topics stay in context for a few turns: {topic_id: turns left}
         self.pinned: dict[int, int] = {}
@@ -685,17 +689,31 @@ class ConversationManager:
         tool or tool round starts. The stream then ends or fails; whoever
         cancelled no longer listens to it."""
         self._cancelled.set()
-        client, self.client = self.client, ollama_client(self.host)
-        if getattr(client, "tools_refused", False):
-            self.client.tools_refused = True
+        client = self._reply_client()
+        if client is self._own_client:
+            self._own_client = None
+        else:
+            self.client = ollama_client(self.host)
+            if getattr(client, "tools_refused", False):
+                self.client.tools_refused = True
         try:
             client._client.close()  # the client's httpx.Client
         except Exception:
             pass
 
+    def _reply_client(self):
+        """The client replies are streamed through: one whose connection
+        cancel() can cut. The ollama module's shared client, used when no
+        server is configured, stays open for everything else."""
+        if not isinstance(self.client, types.ModuleType):
+            return self.client
+        if self._own_client is None:
+            self._own_client = ollama.Client()
+        return self._own_client
+
     def _ask(self, model: str, messages: list, **extra):
         """Ask the model for a streamed reply to these messages."""
-        return self.client.chat(
+        return self._reply_client().chat(
             model=model, messages=system_first(messages), stream=True, **extra
         )
 
