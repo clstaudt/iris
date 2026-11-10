@@ -4,6 +4,7 @@
   import Composer from "./components/Composer.svelte";
   import Icon from "./components/Icon.svelte";
   import Memory from "./components/Memory.svelte";
+  import PersonaEditor from "./components/PersonaEditor.svelte";
   import Settings from "./components/Settings.svelte";
   import Setup from "./components/Setup.svelte";
   import StatusZone from "./components/StatusZone.svelte";
@@ -33,7 +34,7 @@
       <button
         onclick={() => store.togglePanel("settings")}
         class="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink {store.panel ===
-        'settings'
+          'settings' || store.panel === 'persona'
           ? 'bg-hover text-ink'
           : 'text-ink-3'}"
         title="Settings"
@@ -62,6 +63,10 @@
           <Settings />
         {:else if store.panel === "memory"}
           <Memory />
+        {:else if store.panel === "persona"}
+          {#key store.editingPersona}
+            <PersonaEditor />
+          {/key}
         {/if}
       </div>
     {/if}

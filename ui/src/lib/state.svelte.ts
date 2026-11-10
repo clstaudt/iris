@@ -133,10 +133,12 @@ export interface ToolState {
 
 export interface AssistantConfig {
   persona: string;
+  persona_id?: string;
   llm_model: string;
   whisper_model: string;
   whisper_device: string;
   whisper_engine?: string;
+  tts_engine?: SpeechEngine;
   tts_voice: string;
   input_device: string;
   speak_replies?: boolean;
@@ -154,6 +156,35 @@ export interface AssistantConfig {
   memory?: boolean;
   amnesia?: boolean;
   tools?: Record<string, ToolState>;
+}
+
+export type SpeechEngine = "kyutai" | "kokoro";
+
+/** A persona as edited in the persona editor. */
+export interface PersonaSettings {
+  /** File name; none for a persona not saved yet */
+  id?: string;
+  name: string;
+  engine: SpeechEngine;
+  voice: string;
+  speed: number;
+  /** "" for none */
+  audio_filter: string;
+  description: string;
+  /** Shipped with Iris: it can be reset once edited, but not deleted */
+  shipped?: boolean;
+  edited?: boolean;
+}
+
+export interface VoiceInfo {
+  id: string;
+  name: string;
+  language: string;
+}
+
+export interface VoiceOptions {
+  engines: Record<SpeechEngine, VoiceInfo[]>;
+  filters: string[];
 }
 
 /** User choices remembered across launches. */
@@ -234,7 +265,11 @@ class IrisStore {
   pending = $state<PendingTurn[]>([]);
   speakReplies = $state(true);
   /** The side panel beside the conversation, if one is open */
-  panel = $state<"settings" | "memory" | null>(null);
+  panel = $state<"settings" | "memory" | "persona" | null>(null);
+  /** The persona open in the persona editor; "" for a new one */
+  editingPersona = $state("");
+  /** Each speech engine's voices, for the persona editor */
+  voices = $state<VoiceOptions | null>(null);
   memoryTopics = $state<MemoryTopic[]>([]);
   /** First launch: the setup screen is shown and nothing starts until done.
    *  Shown from the first frame, while the core is still booting. */
@@ -295,7 +330,7 @@ class IrisStore {
         const previous = this.config?.llm_model;
         const previousServer = this.config?.ollama_url;
         this.config = data as unknown as AssistantConfig;
-        this.persona = this.config.persona.toLowerCase();
+        this.persona = this.config.persona_id ?? this.config.persona.toLowerCase();
         this.speakReplies = this.config.speak_replies ?? true;
         if (previous && previous !== this.config.llm_model) {
           this.messages = this.messages.filter((m) => m.kind !== "model_missing");
@@ -501,8 +536,64 @@ class IrisStore {
     await rpc("persona.set", { name });
   }
 
+  /** Open the persona editor on a persona, or on a new one (no id). */
+  editPersona(id?: string) {
+    this.editingPersona = id ?? "";
+    this.panel = "persona";
+  }
+
+  async loadPersona(id: string): Promise<PersonaSettings | null> {
+    const result = await rpc<PersonaSettings & { ok: boolean }>("persona.get", { id });
+    if (!result.ok) return null;
+    const { ok: _, ...settings } = result;
+    return settings;
+  }
+
+  async loadVoices() {
+    this.voices = await rpc<VoiceOptions>("persona.voices");
+  }
+
+  /** Save a persona; a new one becomes the current persona. Returns an error
+   *  message, or null once saved. */
+  async savePersona(settings: PersonaSettings): Promise<string | null> {
+    const result = await rpc<{
+      ok: boolean;
+      error?: string;
+      id: string;
+      personas: string[];
+      names: Record<string, string>;
+    }>("persona.save", { ...settings });
+    if (!result.ok) return result.error ?? "Could not save the persona";
+    this.personas = result.personas;
+    this.personaNames = result.names;
+    if (!settings.id) await this.setPersona(result.id);
+    return null;
+  }
+
+  /** Delete a persona, or reset an edited one that ships with Iris. */
+  async deletePersona(id: string) {
+    const result = await rpc<{
+      persona: string | null;
+      personas: string[];
+      names: Record<string, string>;
+    }>("persona.delete", { id });
+    this.personas = result.personas;
+    this.personaNames = result.names;
+    if (result.persona && result.persona !== loadSettings().persona) {
+      this.persona = result.persona;
+      saveSettings({ persona: result.persona });
+    }
+  }
+
+  /** Say a line in a voice as it is being edited. */
+  async previewVoice(settings: PersonaSettings) {
+    await rpc("persona.preview", { ...settings });
+  }
+
   togglePanel(name: "settings" | "memory") {
-    this.panel = this.panel === name ? null : name;
+    // The persona editor belongs to settings: the settings button closes it
+    const open = this.panel === "persona" ? "settings" : this.panel;
+    this.panel = open === name ? null : name;
     if (this.panel === "memory") this.loadMemory();
   }
 

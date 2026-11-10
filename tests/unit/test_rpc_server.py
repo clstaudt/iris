@@ -121,6 +121,22 @@ def test_persona_list(client):
     assert len(response["result"]["personas"]) >= 1
 
 
+def test_persona_editor_gets_a_persona_and_the_voices(client):
+    persona = client.call("persona.get", {"id": "iris"})["result"]
+    assert persona["ok"] is True
+    assert persona["engine"] in ("kyutai", "kokoro")
+    assert persona["shipped"] is True
+
+    voices = client.call("persona.voices")["result"]
+    assert any(v["id"] == "alba" for v in voices["engines"]["kyutai"])
+    assert "intercom" in voices["filters"]
+
+
+def test_a_persona_without_a_name_is_not_saved(client):
+    result = client.call("persona.save", {"name": " ", "engine": "kyutai", "voice": "alba"})
+    assert result["result"]["ok"] is False
+
+
 def test_pause_resume_require_running_assistant(client):
     for method in ("assistant.pause", "assistant.resume"):
         response = client.call(method)

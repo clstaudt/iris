@@ -1,4 +1,5 @@
 name: "Computer"
+engine: "kokoro"
 voice: "af_sarah"
 audio_filter: "intercom"
 speed: 1.1

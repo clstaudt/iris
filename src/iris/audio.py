@@ -172,6 +172,10 @@ def get_filter(filter_name: str) -> AudioFilter | None:
     return AUDIO_FILTERS.get(filter_name.lower())
 
 
+# AudioPlayer.play() uses the player's own filter unless given another
+OWN_FILTER = object()
+
+
 # ============================================================================
 # Audio Recording and Playback
 # ============================================================================
@@ -828,6 +832,7 @@ class AudioPlayer:
         audio_file: str,
         on_level: Callable[[float], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        audio_filter: AudioFilter | None | object = OWN_FILTER,
     ):
         """
         Play pre-generated audio file with optional filter.
@@ -838,6 +843,9 @@ class AudioPlayer:
                 at ~15 Hz while the audio plays, for output level meters
             cancelled: Optional callable; playback ends (or never starts) as
                 soon as it returns True
+
+            audio_filter: Filter for this clip instead of the player's own
+                (None for none)
         """
         try:
             # Load audio into memory completely before any playback
@@ -846,8 +854,10 @@ class AudioPlayer:
             # Pre-process EVERYTHING before starting playback to avoid CPU spikes
 
             # Apply audio filter if specified
-            if self.audio_filter:
-                audio = self.audio_filter.apply(audio, sample_rate)
+            if audio_filter is OWN_FILTER:
+                audio_filter = self.audio_filter
+            if audio_filter:
+                audio = audio_filter.apply(audio, sample_rate)
 
             # Normalize audio to prevent clipping and reduce artifacts
             # Scale to 85% of max to give extra headroom

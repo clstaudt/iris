@@ -1,10 +1,13 @@
 """Persona definitions for the Iris voice assistant."""
 
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
 import yaml
+
+from iris.tts import KOKORO_VOICE_NAME
 
 
 # Common base prompt for all voice assistant personas. Every reply is read
@@ -55,6 +58,9 @@ class Persona:
         voice: str,
         audio_filter: Optional[str] = None,
         speed: float = 1.25,
+        engine: Optional[str] = None,
+        persona_id: Optional[str] = None,
+        path: Optional[Path] = None,
     ):
         """
         Initialize a persona.
@@ -62,16 +68,26 @@ class Persona:
         Args:
             name: Display name of the persona
             description: Unique personality traits (base voice traits are added automatically)
-            voice: Kokoro TTS voice to use (e.g., 'af_bella', 'am_adam', 'bf_emma')
+            voice: Voice of the speech engine (e.g. 'alba' for Kyutai, 'af_bella' for Kokoro)
             audio_filter: Optional audio filter name ('phone', 'radio', 'intercom', 'robotic')
-            speed: Speech speed multiplier (default: 1.25)
+            speed: Speech speed multiplier, for Kokoro voices (default: 1.25)
+            engine: Speech engine, 'kyutai' or 'kokoro'; without one, a Kokoro
+                voice name means Kokoro
+            persona_id: Key the persona is known by (its file name)
+            path: File the persona was loaded from
         """
         self.name = name
-        # Combine base voice traits with unique personality
+        # The personality as written, and combined with the base voice traits
+        self.personality = description
         self.description = VOICE_ASSISTANT_BASE + description
         self.voice = voice
         self.audio_filter = audio_filter
         self.speed = speed
+        if engine is None:
+            engine = "kokoro" if KOKORO_VOICE_NAME.fullmatch(voice) else "kyutai"
+        self.engine = engine
+        self.id = persona_id or slug(name)
+        self.path = path
 
     @classmethod
     def from_file(cls, filepath: Path) -> "Persona":
@@ -85,7 +101,48 @@ class Persona:
             voice=data["voice"],
             audio_filter=data.get("audio_filter"),  # Optional field
             speed=data.get("speed", 1.25),  # Default to 1.25
+            engine=data.get("engine"),
+            persona_id=filepath.stem.lower(),
+            path=filepath,
         )
+
+    @property
+    def builtin(self) -> bool:
+        """Whether the persona is one shipped with Iris, as shipped."""
+        return self.path is not None and self.path.parent == BUILTIN_DIR
+
+    def to_dict(self) -> dict:
+        """The persona's settings, as edited in the UI and saved to its file."""
+        return {
+            "name": self.name,
+            "engine": self.engine,
+            "voice": self.voice,
+            "speed": self.speed,
+            "audio_filter": self.audio_filter or "",
+            "description": self.personality,
+        }
+
+
+def slug(name: str) -> str:
+    """A file name for a persona called this."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "persona"
+
+
+class _PersonaDumper(yaml.SafeDumper):
+    """Writes multi-line text as a block, the way the persona files are written."""
+
+
+_PersonaDumper.add_representer(
+    str,
+    lambda dumper, text: dumper.represent_scalar(
+        "tag:yaml.org,2002:str", text, style="|" if "\n" in text else None
+    ),
+)
+
+
+# Personas shipped with Iris, and those created or edited by the user
+BUILTIN_DIR = Path(__file__).parent / "personas"
+USER_DIR = Path.home() / ".iris" / "personas"
 
 
 def get_persona_dirs() -> list[Path]:
@@ -93,14 +150,13 @@ def get_persona_dirs() -> list[Path]:
     dirs = []
 
     # Built-in personas (shipped with iris package)
-    package_dir = Path(__file__).parent / "personas"
-    if package_dir.exists():
-        dirs.append(package_dir)
+    if BUILTIN_DIR.exists():
+        dirs.append(BUILTIN_DIR)
 
-    # User personas directory
-    user_dir = Path.home() / ".iris" / "personas"
-    if user_dir.exists():
-        dirs.append(user_dir)
+    # User personas directory; a persona there replaces a built-in one of
+    # the same file name
+    if USER_DIR.exists():
+        dirs.append(USER_DIR)
 
     # Environment variable override
     if env_dir := os.environ.get("IRIS_PERSONAS_DIR"):
@@ -128,7 +184,8 @@ def load_all_personas() -> dict[str, Persona]:
         personas["iris"] = Persona(
             name="Iris",
             description="You are Iris, a helpful and friendly assistant. Be conversational, warm, and natural.",
-            voice="af_bella",
+            voice="alba",
+            persona_id="iris",
         )
 
     return personas
@@ -172,3 +229,66 @@ def reload_personas() -> dict[str, str]:
     PERSONAS.clear()
     PERSONAS.update(fresh)
     return {persona_id: persona.name for persona_id, persona in PERSONAS.items()}
+
+
+def save_persona(settings: dict, persona_id: Optional[str] = None) -> str:
+    """Write a persona's settings to its file and load it.
+
+    A built-in persona is saved as the user's own copy, which replaces it; a
+    new one (no id) gets a file name from its name.
+
+    Returns:
+        The persona's id
+    """
+    existing = PERSONAS.get(persona_id) if persona_id else None
+    if existing is not None and existing.path is not None and not existing.builtin:
+        path = existing.path
+    else:
+        persona_id = persona_id or slug(settings["name"])
+        if existing is None:
+            base, n = persona_id, 2
+            while persona_id in PERSONAS:
+                persona_id, n = f"{base}-{n}", n + 1
+        path = USER_DIR / f"{persona_id}.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = {
+        "name": settings["name"].strip(),
+        "engine": settings["engine"],
+        "voice": settings["voice"],
+        "speed": float(settings.get("speed") or 1.0),
+    }
+    if settings.get("audio_filter"):
+        data["audio_filter"] = settings["audio_filter"]
+    description = settings.get("description", "").strip()
+    data["description"] = description + "\n" if description else ""
+    with open(path, "w") as f:
+        yaml.dump(data, f, Dumper=_PersonaDumper, sort_keys=False, allow_unicode=True)
+
+    reload_personas()
+    return path.stem.lower()
+
+
+def delete_persona(persona_id: str) -> bool:
+    """Remove the user's persona file. An edited built-in persona goes back
+    to how it was shipped.
+
+    Returns:
+        Whether a persona of that id is still there (the built-in one)
+    """
+    persona = PERSONAS.get(persona_id)
+    if persona is None or persona.builtin or persona.path is None:
+        return persona is not None
+    persona.path.unlink(missing_ok=True)
+    reload_personas()
+    return persona_id in PERSONAS
+
+
+def find_persona(persona_id: str) -> Optional[Persona]:
+    """The persona of this id, or None."""
+    return PERSONAS.get(persona_id)
+
+
+def shipped(persona_id: str) -> bool:
+    """Whether Iris ships a persona of this id (which the user may have edited)."""
+    return (BUILTIN_DIR / f"{persona_id}.yaml").exists()

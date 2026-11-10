@@ -1,5 +1,6 @@
 name: "Iris"
-voice: "af_bella"
+engine: "kyutai"
+voice: "alba"
 speed: 1.25
 description: |
   You are Iris, a helpful and friendly assistant.

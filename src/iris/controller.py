@@ -12,10 +12,18 @@ from pathlib import Path
 from iris import downloads
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
-from iris.audio import AudioRecorder, get_filter
+from iris.audio import AUDIO_FILTERS, AudioRecorder, get_filter
 from iris.events import EventBus
 from iris.llm import ConversationManager, effective_host, normalize_host, ollama_client
-from iris.personas import get_persona, list_personas, reload_personas
+from iris.personas import (
+    delete_persona,
+    find_persona,
+    get_persona,
+    list_personas,
+    reload_personas,
+    save_persona,
+    shipped,
+)
 from iris.transcription import (
     WhisperTranscriber,
     folder_engine,
@@ -26,15 +34,32 @@ from iris.transcription import (
 )
 from iris.tts import (
     DEFAULT_KOKORO_DIR,
+    ENGINES,
     KOKORO_MODEL_FILE,
     KOKORO_MODEL_URL,
     KOKORO_VOICES_FILE,
     KOKORO_VOICES_URL,
-    KokoroGenerator,
+    SpeechGenerator,
+    engine_speaks,
     find_kokoro_models,
     kokoro_files_in,
+    list_voices,
+    voice_language,
 )
 from iris.turns import SMART_TURN_FILE, SMART_TURN_REPO
+
+# What a voice says when previewed, in its own language
+PREVIEW_LINES = {
+    "en": "Hi, I'm {name}. This is how I sound when we talk.",
+    "fr": "Bonjour, je suis {name}. Voilà comment je parle.",
+    "it": "Ciao, sono {name}. Ecco come parlo.",
+    "es": "Hola, soy {name}. Así es como hablo.",
+    "de": "Hallo, ich bin {name}. So klinge ich, wenn wir uns unterhalten.",
+    "pt": "Olá, eu sou {name}. É assim que eu falo.",
+    "nl": "Hallo, ik ben {name}. Zo klink ik als we praten.",
+    "ja": "こんにちは、{name}です。こんな声で話します。",
+    "zh": "你好，我是{name}。这就是我说话的声音。",
+}
 
 # When several status flags are set simultaneously, the earliest match wins.
 # Tool activity comes first: "thinking" stays set while a tool runs, and the
@@ -606,7 +631,8 @@ class AssistantController:
                     assistant.transcriber = WhisperTranscriber(model, quiet=True)
                 if tts_dir is not None:
                     self._fetch_tts(tts_dir)
-                    generator = KokoroGenerator(
+                    generator = SpeechGenerator(
+                        assistant.tts_generator.engine,
                         assistant.tts_generator.voice,
                         assistant.tts_generator.speed,
                         quiet=True,
@@ -752,13 +778,100 @@ class AssistantController:
                 f"You are now {persona.name}. Earlier replies in this conversation "
                 f"were given by {previous}; do not continue {previous}'s name or manner."
             )
-        assistant.tts_generator.voice = persona.voice
-        assistant.tts_generator.speed = persona.speed
+        generator = assistant.tts_generator
+        generator.engine = persona.engine
+        generator.voice = persona.voice
+        generator.speed = persona.speed
+        # A language the new voice cannot speak is not kept up
+        if not generator.speaks(assistant.conversation_language):
+            assistant.conversation_language = "en"
         assistant.player.audio_filter = (
             get_filter(persona.audio_filter) if persona.audio_filter else None
         )
+
+        # Load the persona's speech engine now rather than at its first reply
+        def prepare():
+            try:
+                generator.prepare()
+            except Exception as e:
+                self.bus.emit("error", {"message": f"Could not load the voice: {e}"})
+
+        threading.Thread(target=prepare, daemon=True).start()
         self.bus.emit("config", assistant.config_info())
         return {"ok": True, "persona": name}
+
+    def persona_voices(self) -> dict:
+        """For the persona editor: each speech engine's voices, and the audio filters."""
+        models_dir = self.assistant.tts_generator.models_dir if self.assistant else None
+        return {
+            "engines": {engine: list_voices(engine, models_dir) for engine in ENGINES},
+            "filters": list(AUDIO_FILTERS),
+        }
+
+    def persona_get(self, persona_id: str) -> dict:
+        """A persona's settings, for editing."""
+        reload_personas()
+        persona = find_persona(persona_id)
+        if persona is None:
+            return {"ok": False, "error": f"Unknown persona: {persona_id}"}
+        return {
+            "ok": True,
+            "id": persona.id,
+            **persona.to_dict(),
+            # Shipped with Iris: it can be reset once edited, but not deleted
+            "shipped": shipped(persona.id),
+            "edited": shipped(persona.id) and not persona.builtin,
+        }
+
+    def persona_save(self, settings: dict) -> dict:
+        """Save a persona edited in the UI (a new one has no id). Saving the
+        current persona applies the changes right away."""
+        if not (settings.get("name") or "").strip():
+            return {"ok": False, "error": "The persona needs a name"}
+        if settings.get("engine") not in ENGINES or not settings.get("voice"):
+            return {"ok": False, "error": "The persona needs a voice"}
+        persona_id = save_persona(settings, settings.get("id") or None)
+        if self.assistant is not None and self.assistant.persona.id == persona_id:
+            self.set_persona(persona_id)
+        return {"ok": True, "id": persona_id, **self.list_personas()}
+
+    def persona_delete(self, persona_id: str) -> dict:
+        """Delete the user's persona, or reset an edited one that ships with
+        Iris. When it was the current persona, Iris takes over."""
+        still_there = delete_persona(persona_id)
+        current = self.assistant.persona.id if self.assistant else None
+        if current == persona_id:
+            current = persona_id if still_there else "iris"
+            self.set_persona(current)
+        return {"ok": True, "persona": current, **self.list_personas()}
+
+    def persona_preview(self, settings: dict) -> dict:
+        """Say a line in a persona's voice, as edited, cutting off whatever is
+        being said. It goes through the speech pipeline, so the mic stays
+        closed while it plays."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        engine, voice = settings.get("engine"), settings.get("voice")
+        if engine not in ENGINES or not voice:
+            return {"ok": False, "error": "No voice chosen"}
+        # In the voice's own language, when Iris can speak it with that engine
+        language = voice_language(engine, voice)
+        if not engine_speaks(engine, language):
+            language = "en"
+        name = (settings.get("name") or "").strip() or "Iris"
+        pipeline = self.assistant.speech_pipeline
+        pipeline.stop()
+        pipeline.queue_speech(
+            PREVIEW_LINES.get(language, PREVIEW_LINES["en"]).format(name=name),
+            language=language,
+            sound={
+                "engine": engine,
+                "voice": voice,
+                "speed": float(settings.get("speed") or 1.0),
+                "audio_filter": settings.get("audio_filter") or "",
+            },
+        )
+        return {"ok": True}
 
     def history(self) -> dict:
         """The conversation so far, as the events that built it."""

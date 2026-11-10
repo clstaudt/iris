@@ -142,6 +142,11 @@ def main():
         ),
         "persona.list": lambda params: controller.list_personas(),
         "persona.set": lambda params: controller.set_persona(params.get("name", "")),
+        "persona.get": lambda params: controller.persona_get(params.get("id", "")),
+        "persona.voices": lambda params: controller.persona_voices(),
+        "persona.save": lambda params: controller.persona_save(params),
+        "persona.delete": lambda params: controller.persona_delete(params.get("id", "")),
+        "persona.preview": lambda params: controller.persona_preview(params),
         "debug.emit": debug_emit,
         "debug.inject_audio": lambda params: controller.inject_audio(params.get("path", "")),
     }
