@@ -234,6 +234,9 @@ try {
     await eventAfter("config", 0, () => true, 180_000);
     await until("the conversation", () => page.locator("textarea").count());
     check(config().wake_word === WAKE_WORD, "the test core must sleep until its wake word");
+    // The room is not part of the test: a typed turn keeps Iris awake for a
+    // while, and it would answer whatever it hears. Typed turns need no mic.
+    await rpc("mic.set", { on: false });
   });
 
   await step("settings open on the pipeline, with every stage", async () => {
@@ -308,12 +311,10 @@ try {
   await step("wake word: off and on again", async () => {
     await openStage("Wake word");
     const toggle = inspector.locator('button[role="switch"][aria-label="Wake word"]');
-    await rpc("mic.set", { on: false }); // nothing is heard while it is off
     await toggle.click();
     await until("the chain to show Off", async () => (await stageValue("Wake word")) === "Off");
     await toggle.click();
     await until("the chain to show the word", async () => (await stageValue("Wake word")) === WAKE_WORD);
-    await rpc("mic.set", { on: true });
   });
 
   await step("voice: the persona's voice plays", async () => {
@@ -395,12 +396,14 @@ try {
 
   await step("personas: a voice plays while the microphone listens, and is not taken for the user", async () => {
     await rpc("wake.set", { word: "" });
+    await rpc("mic.set", { on: true });
     await until("Iris to listen", () => rpc("app.info").then((info) => info.state === "listening"), 15_000);
     const since = Date.now();
     await page.locator(".voice .play").nth(1).click();
     await eventAfter("audio.output", since, (data) => data.rms > 0, 60_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 30_000);
     await new Promise((resolve) => setTimeout(resolve, 6000));
+    await rpc("mic.set", { on: false });
     await rpc("wake.set", { word: WAKE_WORD });
     const heard = events.find((e) => e.at >= since && e.type === "chat.user");
     check(!heard, `the preview was heard as the user saying: ${heard?.data.text}`);

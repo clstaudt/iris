@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import sounddevice as sd
 from faster_whisper.audio import decode_audio
 
 from iris import engines
