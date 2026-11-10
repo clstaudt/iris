@@ -4,8 +4,10 @@ import {
   dialog,
   ipcMain,
   nativeImage,
+  screen,
   shell,
   systemPreferences,
+  type Rectangle,
 } from "electron";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -22,13 +24,134 @@ let mainWindow: BrowserWindow | null = null;
 const ICON_PATH = path.join(__dirname, "../build/icon.png");
 let pythonBridge: PythonBridge | null = null;
 
+// The full window, and presence: a small window with only the orb, always
+// on top, for talking to Iris by voice while doing something else
+const FULL_SIZE = { width: 1280, height: 800 };
+const FULL_MIN = { width: 720, height: 480 };
+const PRESENCE_SIZE = { width: 220, height: 220 };
+const PRESENCE_MARGIN = 24;
+
+/** The window's mode and where it was, remembered between launches. */
+interface WindowState {
+  presence?: boolean;
+  full?: Rectangle;
+  presenceAt?: { x: number; y: number };
+}
+
+let windowState: WindowState = {};
+
+function windowStateFile() {
+  return path.join(app.getPath("userData"), "window-state.json");
+}
+
+function loadWindowState(): WindowState {
+  try {
+    return JSON.parse(fs.readFileSync(windowStateFile(), "utf8")) as WindowState;
+  } catch {
+    return {};
+  }
+}
+
+function saveWindowState() {
+  try {
+    fs.writeFileSync(windowStateFile(), JSON.stringify(windowState));
+  } catch (err) {
+    console.error("[main] could not save the window state:", err);
+  }
+}
+
+/** The bounds moved and shrunk onto the screen nearest to them, so a window
+ *  last seen on a monitor since unplugged comes back into view. */
+function onScreen(bounds: Rectangle): Rectangle {
+  const area = screen.getDisplayMatching(bounds).workArea;
+  const width = Math.min(bounds.width, area.width);
+  const height = Math.min(bounds.height, area.height);
+  return {
+    x: Math.min(Math.max(bounds.x, area.x), area.x + area.width - width),
+    y: Math.min(Math.max(bounds.y, area.y), area.y + area.height - height),
+    width,
+    height,
+  };
+}
+
+/** Where the presence window goes: where it was last, or the bottom right
+ *  corner of the screen the window is on. */
+function presenceBounds(): Rectangle {
+  if (windowState.presenceAt) return onScreen({ ...windowState.presenceAt, ...PRESENCE_SIZE });
+  const display = mainWindow
+    ? screen.getDisplayMatching(mainWindow.getBounds())
+    : screen.getPrimaryDisplay();
+  const area = display.workArea;
+  return {
+    x: area.x + area.width - PRESENCE_SIZE.width - PRESENCE_MARGIN,
+    y: area.y + area.height - PRESENCE_SIZE.height - PRESENCE_MARGIN,
+    ...PRESENCE_SIZE,
+  };
+}
+
+/** Where the full window goes: where it was last, or centered. */
+function fullBounds(): Rectangle {
+  if (windowState.full) return onScreen(windowState.full);
+  const display = mainWindow
+    ? screen.getDisplayMatching(mainWindow.getBounds())
+    : screen.getPrimaryDisplay();
+  const area = display.workArea;
+  const width = Math.min(FULL_SIZE.width, area.width);
+  const height = Math.min(FULL_SIZE.height, area.height);
+  return {
+    x: area.x + Math.round((area.width - width) / 2),
+    y: area.y + Math.round((area.height - height) / 2),
+    width,
+    height,
+  };
+}
+
+/** The window's behavior in each mode: presence floats above other windows
+ *  at a fixed size, without window buttons. */
+function styleWindow(win: BrowserWindow, presence: boolean) {
+  win.setAlwaysOnTop(presence, "floating");
+  win.setResizable(!presence);
+  win.setMaximizable(!presence);
+  win.setFullScreenable(!presence);
+  if (process.platform === "darwin") win.setWindowButtonVisibility(!presence);
+}
+
+function setPresence(on: boolean) {
+  const win = mainWindow;
+  if (!win || on === !!windowState.presence) return;
+  if (on) {
+    // Out of full screen first; presence follows once the window is back
+    if (win.isFullScreen()) {
+      win.once("leave-full-screen", () => setPresence(true));
+      win.setFullScreen(false);
+      return;
+    }
+    windowState.full = win.getNormalBounds();
+    if (win.isMaximized()) win.unmaximize();
+    windowState.presence = true;
+    win.setMinimumSize(PRESENCE_SIZE.width, PRESENCE_SIZE.height);
+    styleWindow(win, true);
+    win.setBounds(presenceBounds(), true);
+  } else {
+    const [x, y] = win.getPosition();
+    windowState.presenceAt = { x, y };
+    windowState.presence = false;
+    styleWindow(win, false);
+    win.setBounds(fullBounds(), true);
+    win.setMinimumSize(FULL_MIN.width, FULL_MIN.height);
+  }
+  saveWindowState();
+}
+
 function createWindow() {
+  windowState = loadWindowState();
+  const presence = !!windowState.presence;
+  const min = presence ? PRESENCE_SIZE : FULL_MIN;
   mainWindow = new BrowserWindow({
     title: "iris",
-    width: 1280,
-    height: 800,
-    minWidth: 720,
-    minHeight: 480,
+    ...(presence ? presenceBounds() : fullBounds()),
+    minWidth: min.width,
+    minHeight: min.height,
     show: false,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 16 },
@@ -40,9 +163,28 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  if (presence) styleWindow(mainWindow, true);
 
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
+  });
+
+  // Remember where the window is, in either mode
+  mainWindow.on("moved", () => {
+    if (!mainWindow || !windowState.presence) return;
+    const [x, y] = mainWindow.getPosition();
+    windowState.presenceAt = { x, y };
+    saveWindowState();
+  });
+  mainWindow.on("close", () => {
+    if (!mainWindow) return;
+    if (windowState.presence) {
+      const [x, y] = mainWindow.getPosition();
+      windowState.presenceAt = { x, y };
+    } else {
+      windowState.full = mainWindow.getNormalBounds();
+    }
+    saveWindowState();
   });
 
   // Links in replies open in the browser; the app window never navigates away
@@ -164,6 +306,11 @@ app.whenReady().then(async () => {
   );
 
   ipcMain.handle("mic-status", () => micStatus);
+  // Read once by the preload, so the first frame already has the right layout
+  ipcMain.on("get-presence", (event) => {
+    event.returnValue = !!windowState.presence;
+  });
+  ipcMain.handle("set-presence", (_event, on: boolean) => setPresence(!!on));
   ipcMain.handle("is-packaged", () => app.isPackaged);
   ipcMain.handle("choose-folder", async (_event, title: string) => {
     const options = { title, properties: ["openDirectory" as const] };

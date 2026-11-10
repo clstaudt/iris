@@ -289,6 +289,8 @@ class IrisStore {
   panel = $state<"settings" | "memory" | "persona" | null>(null);
   /** How much of the settings and the persona editor is shown */
   settingsLevel = $state<SettingsLevel>(loadSettings().settings_level ?? "essentials");
+  /** Presence: the window shows only the orb, for voice and vision */
+  presence = $state(window.iris?.presence ?? false);
   /** The persona open in the persona editor; "" for a new one */
   editingPersona = $state("");
   /** Each speech engine's voices, for the persona editor */
@@ -333,6 +335,13 @@ class IrisStore {
 
   get amnesia() {
     return this.config?.amnesia ?? false;
+  }
+
+  /** What needs the user while only the orb shows: the latest message, when
+   *  it is an error nothing has followed */
+  get presenceError(): string | null {
+    const last = this.messages[this.messages.length - 1];
+    return last?.role === "error" ? last.text : null;
   }
 
   handleEvent(type: string, data: Record<string, unknown>) {
@@ -613,6 +622,14 @@ class IrisStore {
     await rpc("persona.preview", { ...settings });
   }
 
+  /** Shrink the window to the orb alone, or bring the conversation back. */
+  async setPresence(on: boolean) {
+    if (on === this.presence || (on && this.needsSetup)) return;
+    if (on) this.panel = null;
+    this.presence = on;
+    await window.iris.setPresence(on);
+  }
+
   setSettingsLevel(level: SettingsLevel) {
     this.settingsLevel = level;
     saveSettings({ settings_level: level });
@@ -769,6 +786,7 @@ class IrisStore {
       // First launch: nothing starts (or downloads) until the user has said
       // which server, model and speech models to use
       if (info.running) this.needsSetup = false;
+      if (this.needsSetup) this.setPresence(false);
       if (this.needsSetup) {
         this.setupInfo = await rpc<SetupInfo>("setup.info");
         return;

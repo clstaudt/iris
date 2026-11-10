@@ -11,6 +11,9 @@ export interface IrisApi {
   micStatus: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
   chooseFolder: (title: string) => Promise<string | null>;
+  /** Whether the window opened as presence (only the orb) */
+  presence: boolean;
+  setPresence: (on: boolean) => Promise<void>;
   platform: string;
 }
 
