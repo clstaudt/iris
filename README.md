@@ -219,6 +219,15 @@ IRIS_SETUP=download npm run dev   # also hides the models, so they download (abo
 
 Everything a test run writes, downloaded models included, goes into one temporary folder (`$TMPDIR/iris-setup-test`), which is removed when Iris quits. Your own settings, memory and models are left alone. The built app takes the same switch: `IRIS_SETUP=download /Applications/Iris.app/Contents/MacOS/Iris`.
 
+The app's interface is tested end to end against the real Python core, in a headless Chrome instead of Electron:
+
+```bash
+cd ui
+npm run build && npm run e2e      # E2E_MODEL=<model> picks the language model
+```
+
+The test opens every stage of the pipeline, switches models, turn detection and tools, plays voices, edits personas, switches setups, has a typed conversation and stops replies. Its core has a home folder of its own, so your personas, memory and settings are left alone, and it sleeps until a wake word nobody says. It does speak: the voices it plays are heard. Screenshots of failed steps and the core's log go to `ui/e2e/output`.
+
 Iris starts listening as soon as the models are loaded. Speaking and typing share one conversation:
 
 - Iris answers as soon as you have finished, not after a fixed silence. A voice-activity detector (Silero) hears when you pause, and [Smart Turn](https://github.com/pipecat-ai/smart-turn), a small model from the Pipecat project, judges from your words and intonation whether you have finished or are only thinking. Should you go on after it took a pause for the end, the answer begun is dropped and your whole turn is answered. Without Smart Turn (offline on the first run) a turn ends after 3.5 seconds of silence.
