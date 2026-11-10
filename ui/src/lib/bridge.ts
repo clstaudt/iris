@@ -23,7 +23,24 @@ declare global {
   }
 }
 
+/** Where one turn's time went, in ms, from the end of speech to the first
+ *  word heard; null for a stage the turn did not pass. */
+export interface TurnTiming {
+  source: "voice" | "text";
+  stages: {
+    turn_end: number | null;
+    recognition: number | null;
+    reply: number | null;
+    voice: number | null;
+  };
+  total: number;
+  /** What ran each stage, to match a measurement to the setup */
+  components: Record<string, string>;
+}
+
 export interface AppInfo {
+  /** The latest turns' timings */
+  timings?: TurnTiming[];
   version: string;
   personas: string[];
   persona_names?: Record<string, string>;

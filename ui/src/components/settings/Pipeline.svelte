@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { store } from "../../lib/state.svelte";
+  import { store, type TurnTiming } from "../../lib/state.svelte";
+
+  type Timed = keyof TurnTiming["stages"];
   import Icon from "../Icon.svelte";
 
   /** One stage of the chain, or something the language model draws on
@@ -13,6 +15,8 @@
     meta?: string;
     off?: boolean;
     branch?: boolean;
+    /** The part of a turn's time this stage takes */
+    timed?: Timed;
   }
 
   interface Row {
@@ -22,6 +26,10 @@
     stage?: Stage;
     /** The last of a run of branches */
     end?: boolean;
+    /** Its latest measurement, and where its bar starts and how long it is (%) */
+    ms?: number | null;
+    from?: number;
+    width?: number;
   }
 
   onMount(() => {
@@ -96,6 +104,7 @@
             id: "turn",
             icon: "timer",
             label: "Turn end",
+            timed: "turn_end",
             value:
               config.turn_detection === "silence"
                 ? `Silence of ${config.silence_duration ?? 3.5} s`
@@ -105,6 +114,7 @@
             id: "stt",
             icon: "ear",
             label: "Recognition",
+            timed: "recognition",
             value: recognition.value,
             meta: recognition.meta,
           },
@@ -115,7 +125,14 @@
         label: "Think",
         color: "var(--color-accent)",
         stages: [
-          { id: "llm", icon: "cpu", label: "Language model", value: config.llm_model, meta: server },
+          {
+            id: "llm",
+            icon: "cpu",
+            label: "Language model",
+            value: config.llm_model,
+            meta: server,
+            timed: "reply",
+          },
           { id: "persona", icon: "user", label: "Persona", value: config.persona, branch: true },
           {
             id: "tools",
@@ -144,6 +161,7 @@
             id: "voice",
             icon: "message",
             label: "Voice",
+            timed: "voice",
             value: `${speechEngine} · ${voiceName}`,
             meta: config.persona,
           },
@@ -163,17 +181,67 @@
     ] as { id: string; label: string; color: string; stages: Stage[] }[];
   });
 
-  const rows = $derived<Row[]>(
-    sections.flatMap((section) => [
+  /** What runs each timed stage now, as the core names it in a timing. */
+  const components = $derived<Record<Timed, string>>({
+    turn_end: config?.turn_detection ?? "smart_turn",
+    recognition: `${config?.recognition_engine ?? "whisper"}:${config?.whisper_model ?? ""}`,
+    reply: config?.llm_model ?? "",
+    voice: `${config?.tts_engine ?? ""}:${config?.tts_voice ?? ""}`,
+  });
+
+  /** A stage's latest measurement taken with what runs it now; a model
+   *  swapped since is not measured yet. */
+  function measured(stage: Timed): number | null {
+    for (let i = store.timings.length - 1; i >= 0; i--) {
+      const timing = store.timings[i];
+      const ms = timing.stages[stage];
+      if (ms !== null && timing.components[stage] === components[stage]) return ms;
+    }
+    return null;
+  }
+
+  const times = $derived.by(() => {
+    const ms: Record<Timed, number | null> = {
+      turn_end: measured("turn_end"),
+      recognition: measured("recognition"),
+      reply: measured("reply"),
+      voice: measured("voice"),
+    };
+    const values = Object.values(ms).filter((v): v is number => v !== null);
+    return { ms, total: values.reduce((a, b) => a + b, 0), complete: values.length === 4 };
+  });
+
+  const rows = $derived.by<Row[]>(() => {
+    let start = 0;
+    return sections.flatMap((section) => [
       { key: section.id, color: section.color, head: section.label },
-      ...section.stages.map((stage, i, list) => ({
-        key: stage.id,
-        color: section.color,
-        stage,
-        end: stage.branch && !list[i + 1]?.branch,
-      })),
-    ])
+      ...section.stages.map((stage, i, list) => {
+        const row: Row = {
+          key: stage.id,
+          color: section.color,
+          stage,
+          end: stage.branch && !list[i + 1]?.branch,
+        };
+        if (stage.timed) {
+          const ms = times.ms[stage.timed];
+          row.ms = ms;
+          if (ms !== null && times.total > 0) {
+            row.from = (start / times.total) * 100;
+            row.width = Math.max(0.8, (ms / times.total) * 100);
+            start += ms;
+          }
+        }
+        return row;
+      }),
+    ]);
+  });
+
+  /** The bars of the total, one per measured stage. */
+  const totalBars = $derived(
+    rows.filter((row) => row.width !== undefined).map((row) => ({ key: row.key, color: row.color, from: row.from!, width: row.width! }))
   );
+
+  const seconds = (ms: number) => `${(ms / 1000).toFixed(2)} s`;
 
   function open(id: string) {
     store.stage = store.stage === id ? null : id;
@@ -211,17 +279,39 @@
             <span class="value">
               {row.stage.value}{#if row.stage.meta}<span class="meta">&nbsp;· {row.stage.meta}</span>{/if}
             </span>
+            {#if row.stage.timed}
+              <span class="ms">{row.ms != null ? `${row.ms} ms` : "–"}</span>
+              <span class="track">
+                {#if row.width !== undefined}
+                  <i style="left: {row.from}%; width: {row.width}%; background: {row.color}"></i>
+                {/if}
+              </span>
+            {/if}
           </button>
         {/if}
       </div>
     {/each}
+    <div class="row">
+      <span></span>
+      <div class="total">
+        <Icon name="clock" size={16} />
+        <span class="label">First word</span>
+        <span class="value"></span>
+        <span class="ms">{times.total ? seconds(times.total) : "–"}</span>
+        <span class="track">
+          {#each totalBars as bar (bar.key)}
+            <i style="left: {bar.from}%; width: {bar.width}%; background: {bar.color}"></i>
+          {/each}
+        </span>
+      </div>
+    </div>
   </div>
 {/if}
 
 <style>
   .chain {
     display: flex;
-    max-width: 760px;
+    max-width: 860px;
     flex-direction: column;
   }
   .row {
@@ -277,7 +367,7 @@
     display: grid;
     width: 100%;
     min-height: 3.1rem;
-    grid-template-columns: 18px 112px minmax(0, 1fr);
+    grid-template-columns: 18px 112px minmax(0, 1fr) 64px 160px;
     align-items: center;
     gap: 0.75rem;
     margin: 1px 0;
@@ -316,10 +406,49 @@
   .stage.off .value {
     color: var(--color-ink-3);
   }
+  /* Each timed stage's slice of the time to the first word, on one scale */
+  .ms {
+    font-size: 12px;
+    color: var(--color-ink-2);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .track {
+    position: relative;
+    height: 6px;
+    border-radius: 3px;
+    background: rgb(255 255 255 / 0.04);
+  }
+  .track i {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-radius: 3px;
+    transition:
+      left 300ms ease,
+      width 300ms ease;
+  }
+  .total {
+    display: grid;
+    min-height: 3.1rem;
+    grid-template-columns: 18px 112px minmax(0, 1fr) 64px 160px;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+    padding: 0 0.75rem;
+    border-top: 1px solid var(--color-line);
+    color: var(--color-ink-2);
+  }
+  .total .ms {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-ink);
+  }
   /* What the language model draws on, branching off the line */
   .stage.branch {
     min-height: 2.4rem;
-    grid-template-columns: 16px 94px minmax(0, 1fr);
+    grid-template-columns: 16px 94px minmax(0, 1fr) 64px 160px;
     padding-left: 2.5rem;
   }
   .stage.branch .value {
