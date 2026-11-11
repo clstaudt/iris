@@ -15,6 +15,7 @@ Usage::
 
 import json
 import os
+import queue
 import signal
 import sys
 import threading
@@ -57,6 +58,76 @@ def _start_parent_watchdog(interval: float = 2.0):
             threading.Event().wait(interval)
 
     threading.Thread(target=_watch, daemon=True).start()
+
+
+# Controls that take effect the moment they arrive, whatever the core is busy
+# with: Stop must never wait behind a slow request (switching the server or
+# the persona, checking servers), and neither must pausing or the microphone
+IMMEDIATE = frozenset(
+    {"assistant.interrupt", "assistant.pause", "assistant.resume", "assistant.hold", "mic.set"}
+)
+
+
+def serve(read_line, methods: dict, write_frame, immediate=IMMEDIATE):
+    """Answer requests until the input ends.
+
+    Requests are answered one after the other, in the order they came, on a
+    worker thread; the immediate ones are answered as they arrive.
+    """
+    work: queue.Queue = queue.Queue()
+
+    def handle(request: dict):
+        req_id = request.get("id")
+        try:
+            method = request.get("method", "")
+            handler = methods.get(method)
+            if handler is None:
+                raise ValueError(f"Unknown method: {method}")
+            result = handler(request.get("params", {}) or {})
+            write_frame({"jsonrpc": "2.0", "id": req_id, "result": result})
+        except Exception as exc:
+            traceback.print_exc()
+            write_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32603,
+                        "message": str(exc),
+                        "data": traceback.format_exc(),
+                    },
+                }
+            )
+
+    def worker():
+        while True:
+            request = work.get()
+            if request is None:
+                return
+            handle(request)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    while True:
+        line = read_line()
+        if not line:
+            break  # input closed: the parent is gone
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except ValueError as exc:
+            write_frame(
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
+            )
+            continue
+        if request.get("method") in immediate:
+            handle(request)
+        else:
+            work.put(request)
+    work.put(None)
+    thread.join(timeout=5)
 
 
 def main():
@@ -158,41 +229,7 @@ def main():
     }
 
     _start_parent_watchdog()
-
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            break  # stdin closed — parent is gone
-        line = line.strip()
-        if not line:
-            continue
-
-        req_id = None
-        try:
-            request = json.loads(line)
-            req_id = request.get("id")
-            method = request.get("method", "")
-            params = request.get("params", {})
-
-            handler = methods.get(method)
-            if handler is None:
-                raise ValueError(f"Unknown method: {method}")
-
-            result = handler(params)
-            write_frame({"jsonrpc": "2.0", "id": req_id, "result": result})
-        except Exception as exc:
-            traceback.print_exc()
-            write_frame(
-                {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {
-                        "code": -32603,
-                        "message": str(exc),
-                        "data": traceback.format_exc(),
-                    },
-                }
-            )
+    serve(sys.stdin.readline, methods, write_frame)
 
 
 if __name__ == "__main__":

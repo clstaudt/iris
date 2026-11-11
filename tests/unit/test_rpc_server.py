@@ -172,3 +172,55 @@ def test_llm_set_requires_running_assistant(client):
     response = client.call("llm.set", {"name": "some-model"})
     assert "error" not in response
     assert response["result"]["ok"] is False
+
+
+def test_stop_never_waits_behind_a_slow_request():
+    """Stop and the other controls are answered as they arrive; the rest in
+    the order they came."""
+    from iris.rpc_server import serve
+
+    answered = []
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def slow(params):
+        release.wait(5)
+        return {"ok": True}
+
+    methods = {
+        "llm.set_host": slow,
+        "persona.list": lambda params: {"personas": []},
+        "assistant.interrupt": lambda params: {"ok": True},
+    }
+    lines = iter(
+        json.dumps({"jsonrpc": "2.0", "id": n, "method": m})
+        for n, m in enumerate(["llm.set_host", "persona.list", "assistant.interrupt"], 1)
+    )
+
+    def read_line():
+        line = next(lines, None)
+        if line is None:
+            # The interrupt was answered while the slow request still runs
+            deadline = time.monotonic() + 2
+            while 3 not in [f["id"] for f in answered] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            release.set()
+            return ""
+        return line + "\n"
+
+    def write(frame):
+        with lock:
+            answered.append(frame)
+
+    serve(read_line, methods, write)
+    assert [frame["id"] for frame in answered] == [3, 1, 2]
+    assert all("result" in frame for frame in answered)
+
+
+def test_a_line_that_is_not_json_is_answered_with_an_error():
+    from iris.rpc_server import serve
+
+    lines = iter(["not json\n", ""])
+    answered = []
+    serve(lambda: next(lines), {}, answered.append)
+    assert answered[0]["error"]["code"] == -32700
