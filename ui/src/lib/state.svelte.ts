@@ -296,6 +296,8 @@ interface SavedSettings {
   /** Model servers kept to switch between, by URL; the default one is not
    *  listed */
   servers?: string[];
+  /** The model last chosen on each server, by URL */
+  server_models?: Record<string, string>;
   /** Named setups by id, and the one in use */
   setups?: Record<string, Setup>;
   active_setup?: string;
@@ -468,6 +470,7 @@ class IrisStore {
         if (previousServer && previousServer !== this.config.ollama_url) {
           this.messages = this.messages.filter((m) => m.kind !== "ollama_unreachable");
         }
+        this.keepServer(this.config.ollama_host ?? "");
         this.restoreMic();
         break;
       }
@@ -972,9 +975,10 @@ class IrisStore {
     if (!result.ok) return result.error ?? "Could not connect";
     // Kept under the address the core settled on, which is the one it reports
     const host = result.host ?? "";
-    const kept = this.servers.filter((server) => server !== url.trim() && server !== host);
-    this.servers = host ? [...kept, host] : kept;
-    saveSettings({ servers: $state.snapshot(this.servers) });
+    if (url.trim() !== host) {
+      this.servers = this.servers.filter((server) => server !== url.trim());
+    }
+    this.keepServer(host);
     this.reachable[host] = true;
     this.remember({ ollama_host: host });
     this.models = [];
@@ -982,7 +986,32 @@ class IrisStore {
       "llm.list"
     );
     this.models = llms.models;
+    await this.modelForServer(host);
     return null;
+  }
+
+  /** The server in use is always among those kept, so it can be switched
+   *  back to. */
+  private keepServer(host: string) {
+    if (!host || this.servers.includes(host)) return;
+    this.servers = [...this.servers, host];
+    saveSettings({ servers: $state.snapshot(this.servers) });
+  }
+
+  /** After switching servers: the model last used on this one, or, when the
+   *  model in use is not on it, the first it has (one that takes tools if
+   *  there is one). */
+  private async modelForServer(host: string) {
+    const names = this.models.map((m) => m.name);
+    if (names.length === 0) return;
+    const remembered = loadSettings().server_models?.[host];
+    const current = this.config?.llm_model ?? "";
+    let model: string | undefined;
+    if (remembered && names.includes(remembered)) model = remembered;
+    else if (!names.includes(current)) {
+      model = (this.models.find((m) => m.tools) ?? this.models[0]).name;
+    }
+    if (model && model !== current) await this.setModel(model);
   }
 
   /** Keep a server to switch to later. */
@@ -1012,7 +1041,11 @@ class IrisStore {
   }
 
   async setModel(name: string) {
-    this.remember({ llm_model: name });
+    const host = this.config?.ollama_host ?? "";
+    this.remember({
+      llm_model: name,
+      server_models: { ...loadSettings().server_models, [host]: name },
+    });
     await rpc("llm.set", { name });
   }
 
