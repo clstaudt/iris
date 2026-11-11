@@ -181,6 +181,62 @@ OWN_FILTER = object()
 # ============================================================================
 
 
+class SoundDevice:
+    """The computer's microphone and speaker, through sounddevice.
+
+    All of Iris's audio goes through a device: the microphone as an input
+    stream, the speaker as one output stream that plays a clip at a time. A
+    test gives Iris a device of its own instead, such as a virtual room, and
+    two assistants in one process can each have one.
+    """
+
+    def __init__(self):
+        # sounddevice's play() and stop() act on one shared output stream,
+        # and PortAudio crashes the process when two threads close it at
+        # once. Stop reaches it from several threads (the app's command, the
+        # reply's thread, the playback thread), so every use goes through
+        # this lock.
+        self._output = threading.RLock()
+
+    def input_stream(self, **options):
+        """An input stream, as sounddevice.InputStream takes its options."""
+        return sd.InputStream(**options)
+
+    def query_devices(self, *args, **kwargs):
+        """The audio devices, as sounddevice.query_devices lists them."""
+        return sd.query_devices(*args, **kwargs)
+
+    def play(self, audio: np.ndarray, sample_rate: int, **options) -> float:
+        """Start playing a clip, ending the one before.
+
+        Returns:
+            The output's latency in seconds (0 if it cannot be told)
+        """
+        with self._output:
+            sd.play(audio, sample_rate, **options)
+            try:
+                return float(sd.get_stream().latency)
+            except Exception:
+                return 0.0
+
+    def stop(self):
+        """Stop what plays."""
+        with self._output:
+            sd.stop()
+
+    def playing(self) -> bool:
+        """Whether the clip played last still has audio to play."""
+        with self._output:
+            try:
+                return bool(sd.get_stream().active)
+            except Exception:
+                return False
+
+
+# The computer's own audio, which Iris uses unless given another device
+SYSTEM = SoundDevice()
+
+
 class AudioRecorder:
     """Records the user's turns from the microphone: from the first syllable
     to where Smart Turn hears the end of what they had to say."""
@@ -194,6 +250,7 @@ class AudioRecorder:
         device: int | None = None,
         turn_end: SmartTurn | None = None,
         echo: EchoCanceller | None = None,
+        audio: SoundDevice | None = None,
     ):
         """
         Initialize audio recorder.
@@ -208,6 +265,7 @@ class AudioRecorder:
             device: Input device index (None = system default)
             turn_end: Smart Turn, which hears when a turn is finished
             echo: Takes the voice out of what listen_on() hears while it speaks
+            audio: The device recorded from; the computer's microphone if None
         """
         self.sample_rate = sample_rate
         self.silence_threshold = silence_threshold
@@ -216,14 +274,14 @@ class AudioRecorder:
         self.device = device
         self.turn_end = turn_end
         self.echo = echo
+        self.audio = audio or SYSTEM
         self._speech: SpeechDetector | None = None  # loaded on first listen()
         self._device_error = False  # Track if we've had a device error
         # Of the last turn heard: seconds from the end of speech until it was
         # clear the turn was over
         self.last_turn_wait: float | None = None
 
-    @staticmethod
-    def check_audio_devices() -> tuple[bool, str]:
+    def check_audio_devices(self) -> tuple[bool, str]:
         """
         Check if audio input devices are available.
 
@@ -231,7 +289,7 @@ class AudioRecorder:
             Tuple of (devices_available: bool, message: str)
         """
         try:
-            devices = sd.query_devices()
+            devices = self.audio.query_devices()
             input_devices = [d for d in devices if d["max_input_channels"] > 0]
 
             if not input_devices:
@@ -239,7 +297,7 @@ class AudioRecorder:
 
             # Check if default input device is valid
             try:
-                default_input = sd.query_devices(kind="input")
+                default_input = self.audio.query_devices(kind="input")
                 if default_input["max_input_channels"] == 0:
                     return False, "Default input device has no input channels."
             except Exception:
@@ -280,8 +338,8 @@ class AudioRecorder:
         """Return the name of the currently selected input device."""
         try:
             if self.device is not None:
-                return sd.query_devices()[self.device]["name"]
-            return sd.query_devices(kind="input")["name"]
+                return self.audio.query_devices()[self.device]["name"]
+            return self.audio.query_devices(kind="input")["name"]
         except Exception:
             return "Unknown microphone"
 
@@ -495,7 +553,7 @@ class AudioRecorder:
                 lag = frame_count / self.sample_rate
             frames.put(indata[:, 0].copy(), time.monotonic() - lag)
 
-        with sd.InputStream(
+        with self.audio.input_stream(
             samplerate=self.sample_rate,
             channels=1,
             dtype="float32",
@@ -553,7 +611,7 @@ class AudioRecorder:
 
         # Start recording immediately
         try:
-            with sd.InputStream(
+            with self.audio.input_stream(
                 samplerate=self.sample_rate,
                 channels=1,
                 callback=audio_callback,
@@ -656,53 +714,34 @@ PLAYBACK_BLOCK = 32768
 RESUME_REWIND = 0.35
 
 
-# sounddevice's play() and stop() act on one shared output stream, and
-# PortAudio crashes the process when two threads close it at once. Stop
-# reaches it from several threads (the app's command, the reply's thread, the
-# playback thread), so every use of that stream goes through this lock.
-_OUTPUT = threading.RLock()
-
-
 def play_sound(audio: np.ndarray, sample_rate: int, **options) -> float:
-    """Start playing on the shared output stream, ending what played before.
-
-    Returns:
-        The stream's output latency in seconds (0 if it cannot be told)
-    """
-    with _OUTPUT:
-        sd.play(audio, sample_rate, **options)
-        try:
-            return float(sd.get_stream().latency)
-        except Exception:
-            return 0.0
+    """Play on the computer's speaker (see SoundDevice.play)."""
+    return SYSTEM.play(audio, sample_rate, **options)
 
 
 def stop_sound():
-    """Stop whatever plays on the shared output stream."""
-    with _OUTPUT:
-        sd.stop()
+    """Stop what plays on the computer's speaker."""
+    SYSTEM.stop()
 
 
 def sound_playing() -> bool:
-    """Whether the shared output stream still has audio to play."""
-    with _OUTPUT:
-        try:
-            return bool(sd.get_stream().active)
-        except Exception:
-            return False
+    """Whether the computer's speaker still has audio to play."""
+    return SYSTEM.playing()
 
 
 class AudioPlayer:
     """Plays audio files with normalization and fade effects."""
 
-    def __init__(self, audio_filter: Optional[AudioFilter] = None):
+    def __init__(self, audio_filter: Optional[AudioFilter] = None, audio: SoundDevice | None = None):
         """
         Initialize audio player.
 
         Args:
             audio_filter: Optional AudioFilter instance to apply to audio
+            audio: The device played on; the computer's speaker if None
         """
         self.audio_filter = audio_filter
+        self.audio = audio or SYSTEM
         # Told what is played, so the microphone can hear the user over it
         self.echo: EchoCanceller | None = None
         self._paused = threading.Event()
@@ -715,7 +754,7 @@ class AudioPlayer:
     def stop(self):
         """Stop any currently playing audio."""
         self._stopped.set()
-        stop_sound()
+        self.audio.stop()
         if self.echo is not None:
             self.echo.cut(time.monotonic())
 
@@ -814,7 +853,7 @@ class AudioPlayer:
             # Play with maximum buffer size and latency for ultra-smooth playback
             # Extra large buffer (32768 samples = ~740ms) prevents any underruns
             started = time.monotonic()
-            latency = play_sound(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
+            latency = self.audio.play(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
             self._place = (len(audio), sample_rate, position, started + latency)
             if self.echo is not None:
                 self.echo.played(started + latency, segment, sample_rate)
@@ -839,13 +878,13 @@ class AudioPlayer:
             while time.monotonic() - started < deadline:
                 if self._paused.is_set() or stopped():
                     break
-                if not sound_playing():
+                if not self.audio.playing():
                     break
                 time.sleep(0.02)
             elapsed = time.monotonic() - started
             cut_by_pause = self._paused.is_set() and not stopped()
             if cut_by_pause or stopped():
-                stop_sound()
+                self.audio.stop()
                 if self.echo is not None:
                     self.echo.cut(time.monotonic())
 

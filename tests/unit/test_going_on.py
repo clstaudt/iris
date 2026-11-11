@@ -39,30 +39,39 @@ class Pipeline:
     def said(self):
         return self._said
 
+    def begin_reply(self):
+        self._said = ""
+
 
 class Recorder:
     """Listens on: the user speaks after the first turn only."""
 
-    def __init__(self, whole_turn, new_turn):
+    def __init__(self, whole_turn, new_turn, answering):
         self.whole_turn, self.new_turn = whole_turn, new_turn
+        self.answering = answering
         self.calls = []
 
     def listen_on(self, turn, on_speech, until, should_stop=None, on_level=None, **kw):
         self.calls.append(kw.get("speaking") is not None)
         if len(self.calls) == 1:
+            # The user goes on while the turn is being answered
+            self.answering.wait(2)
             return self.whole_turn if on_speech() else self.new_turn
         while not until():
             time.sleep(0.001)
         return None
 
 
-def _assistant(tmp_path, announce=True, said="", barge_in=False):
+def _assistant(tmp_path, announce=True, said="", barge_in=False, said_before=""):
+    """An assistant answering a turn the user goes on with. said is what the
+    voice says of the answer before the user goes on; said_before what it
+    said of the previous turn's answer."""
     assistant = object.__new__(VoiceAssistant)
     assistant.interrupt_event = threading.Event()
     for name in ("pause_event", "suspend_event", "hold_event", "stop_event"):
         setattr(assistant, name, threading.Event())
     assistant.status_manager = Flags()
-    assistant.speech_pipeline = Pipeline(said)
+    assistant.speech_pipeline = Pipeline(said_before)
     assistant.event_bus = EventBus()
     assistant._last_voice = 0.0
     assistant.barge_in = barge_in
@@ -71,11 +80,20 @@ def _assistant(tmp_path, announce=True, said="", barge_in=False):
     for name in ("first", "whole", "new"):
         paths[name] = tmp_path / f"{name}.wav"
         paths[name].write_bytes(b"")
-    assistant.recorder = Recorder(str(paths["whole"]), str(paths["new"]))
+    answering = threading.Event()
+    assistant.recorder = Recorder(str(paths["whole"]), str(paths["new"]), answering)
     answered = []
 
     def handle_heard(path, dormant):
         assistant._announced = announce
+        if not answered:
+            # The answer begins, and the voice says some of it
+            if said:
+                assistant.speech_pipeline._said = said
+            answering.set()
+            deadline = time.monotonic() + 2
+            while not assistant.interrupt_event.is_set() and time.monotonic() < deadline:
+                time.sleep(0.001)
         answered.append((path, assistant.interrupt_event.is_set()))
 
     assistant._handle_heard = handle_heard
@@ -135,3 +153,12 @@ def test_barge_in_switched_off(tmp_path):
     assistant._answer_listening(paths["first"], dormant=False)
     assert assistant.recorder.calls == [False, False]
 
+
+
+def test_what_was_said_of_the_previous_answer_does_not_count(tmp_path):
+    """The user pauses and goes on before anything of this answer was said:
+    the whole turn is answered, its beginning included, however much of the
+    previous answer the voice had said."""
+    assistant, paths, answered = _assistant(tmp_path, said_before="Paris is the capital.")
+    assistant._answer_listening(paths["first"], dormant=False)
+    assert answered == [(paths["first"], True), (paths["whole"], False)]

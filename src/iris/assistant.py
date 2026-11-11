@@ -14,7 +14,7 @@ from faster_whisper.audio import decode_audio
 
 from iris import engines
 from iris.attachments import Attachment, recorded_text
-from iris.audio import AudioPlayer, AudioRecorder, get_filter, play_sound
+from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus
 from iris.llm import ConversationManager, effective_host, split_speech
@@ -110,6 +110,7 @@ class VoiceAssistant:
         tts_models_dir: Optional[str] = None,
         barge_in: bool = True,
         turn_detection: str = "smart_turn",
+        audio: Optional[SoundDevice] = None,
     ):
         """
         Initialize the voice assistant.
@@ -150,6 +151,8 @@ class VoiceAssistant:
                 echo cancellation, which takes the voice out of the microphone)
             turn_detection: "smart_turn" to hear when the user has finished,
                 or "silence" to end a turn after silence_duration of silence
+            audio: The microphone and speaker; the computer's if None (a
+                test gives it a virtual room)
         """
         # Where activity is pushed to the app (None in tests)
         self.event_bus = event_bus
@@ -203,11 +206,12 @@ class VoiceAssistant:
             silence_duration,
             turn_end=SmartTurn.load() if turn_detection == "smart_turn" else None,
             echo=self.echo,
+            audio=audio,
         )
 
         # Initialize audio player with filter from persona
         audio_filter = get_filter(self.persona.audio_filter) if self.persona.audio_filter else None
-        self.player = AudioPlayer(audio_filter=audio_filter)
+        self.player = AudioPlayer(audio_filter=audio_filter, audio=audio)
         self.player.echo = self.echo
 
         self.recognition_engine = recognition_engine
@@ -430,13 +434,13 @@ class VoiceAssistant:
             # Only audible when it was actually listening for follow-ups
             listening = not (self.pause_event.is_set() or self.suspend_event.is_set())
             if self.speak_replies and listening:
-                play_sound(_sleep_chime(), 24000)
+                self.player.audio.play(_sleep_chime(), 24000)
         self._was_dormant = dormant
 
     def _chime(self):
         """Acknowledge the wake word when no request came with it."""
         if self.speak_replies:
-            play_sound(_wake_chime(), 24000)
+            self.player.audio.play(_wake_chime(), 24000)
 
     def _handle_heard(self, audio_path: str, dormant: bool):
         """Answer an utterance, or while dormant, check it for the wake word.
@@ -482,6 +486,10 @@ class VoiceAssistant:
         voice starts, which it would hear.
         """
         while audio_path:
+            # Nothing of this turn's answer has been said yet: what the voice
+            # said of the previous one must not count as heard, or a user who
+            # pauses and goes on loses what they said before the pause
+            self.speech_pipeline.begin_reply()
             answered = threading.Event()
             went_on = threading.Event()
             whole_turn: list[Optional[str]] = [None]
@@ -853,7 +861,7 @@ class VoiceAssistant:
 
     def run_loop(self):
         """Listen and answer until stop_event is set."""
-        devices_ok, device_msg = AudioRecorder.check_audio_devices()
+        devices_ok, device_msg = self.recorder.check_audio_devices()
         if not devices_ok:
             self._error(f"No microphone: {device_msg}")
             return
