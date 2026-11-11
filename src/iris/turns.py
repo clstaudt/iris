@@ -32,6 +32,8 @@ VAD_CONTEXT = 64
 SPEECH_THRESHOLD = 0.5
 SILENCE_THRESHOLD = 0.35
 # Speech this long starts a turn (shorter sounds are clicks and coughs), and a
+# Seconds without speech before a turn after which the VAD starts afresh
+VAD_REFRESH = 4.0
 # pause this long has Smart Turn judge whether it ends the turn
 SPEECH_START = 0.2
 SPEECH_PAUSE = 0.2
@@ -184,6 +186,11 @@ class TurnTracker:
         # was clear, the silence listened to and Smart Turn's verdict
         self.end_wait = 0.0
         self._frame_seconds = frame_seconds
+        # Frames in a row without speech before the turn started: after a
+        # long quiet stretch the VAD starts afresh, as it rates the first
+        # syllables after many seconds of noise floor too low
+        self._quiet_run = 0
+        self._refresh_frames = max(1, round(VAD_REFRESH / frame_seconds))
 
     @property
     def started(self) -> bool:
@@ -206,6 +213,10 @@ class TurnTracker:
         """Take the next 512 samples; True once the turn is over."""
         probability = self.probability = self.speech(frame)
         if not self._frames:
+            self._quiet_run = self._quiet_run + 1 if probability < SILENCE_THRESHOLD else 0
+            if self._quiet_run >= self._refresh_frames and hasattr(self.speech, "reset"):
+                self.speech.reset()
+                self._quiet_run = 0
             self._before.append(frame)
             self._speech_run = self._speech_run + 1 if probability >= SPEECH_THRESHOLD else 0
             if self._speech_run >= self._start_frames:

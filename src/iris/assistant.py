@@ -883,6 +883,7 @@ class VoiceAssistant:
 
                 # Paused conversation: nothing starts until it is resumed
                 if self.suspend_event.is_set():
+                    self.recorder.close_microphone()
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
                     time.sleep(0.05)
@@ -915,6 +916,7 @@ class VoiceAssistant:
                 # Paused, or the user is typing: keep the microphone closed
                 # (models stay loaded) and keep watching for typed turns
                 if self.pause_event.is_set() or self.hold_event.is_set():
+                    self.recorder.close_microphone()
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
                     time.sleep(0.05)
@@ -987,6 +989,7 @@ class VoiceAssistant:
                     logger.exception("Listening failed")
         finally:
             self.speech_pipeline.stop()
+            self.recorder.close_microphone()
             if self.tools:
                 self.tools.cleanup()
             if self.memory:
