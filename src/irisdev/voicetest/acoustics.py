@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
-from scipy.signal import resample_poly
+from scipy.signal import butter, fftconvolve, resample_poly, sosfilt
 
 # The microphones' rate
 RATE = 16000
@@ -74,6 +74,16 @@ class Clip:
     audio: np.ndarray  # at RATE
     started: float  # when it started being heard
     stopped: Optional[float] = None  # when it was cut off, if it was
+    # What a room made of it, worked out when first needed
+    _roomed: Optional[np.ndarray] = field(default=None, repr=False)
+
+    def through(self, room: "Room") -> np.ndarray:
+        """What reaches a microphone in this room of the part heard: the
+        reverberation of what was played rings on after a cut."""
+        if self._roomed is None:
+            self._roomed = room.apply(self.audio)
+        heard = int(round((self.end - self.started) * RATE))
+        return self._roomed[: heard + len(room.response)] if self.stopped is not None else self._roomed
 
     @property
     def end(self) -> float:
@@ -111,6 +121,55 @@ class Utterance:
     audio: np.ndarray = field(repr=False)
     # The endpoints that hear it, with how loud; None for all at full level
     heard_by: Optional[dict] = None
+
+
+class Room:
+    """How a speaker's sound reaches a microphone in a real room, beyond a
+    delayed and quieter copy: the speaker's own coloration and distortion,
+    the room's reverberation, and a delay that differs from what the audio
+    device reports.
+
+    The plain copy is what an echo canceller removes easily; this is what
+    laptop speakers next to their microphone sound like to it.
+    """
+
+    def __init__(
+        self,
+        reverb: float = 0.4,
+        reverb_level: float = 0.35,
+        distortion: float = 2.0,
+        low_cut: float = 180.0,
+        extra_delay: float = 0.04,
+        seed: int = 3,
+    ):
+        """
+        Args:
+            reverb: Seconds for the reverberation to fall by 60 dB (RT60)
+            reverb_level: Its level against the direct sound
+            distortion: How hard loud passages are clipped (0 for none)
+            low_cut: Below this frequency (Hz) small speakers give little
+            extra_delay: Seconds the sound arrives later than the audio
+                device's reported latency says
+        """
+        rng = np.random.default_rng(seed)
+        length = int(reverb * RATE)
+        t = np.arange(length) / RATE
+        tail = rng.standard_normal(length) * np.exp(-6.9 * t / max(reverb, 1e-3))
+        tail *= reverb_level / max(1e-9, np.sqrt(np.sum(tail**2)))
+        self.response = tail.astype(np.float32)
+        self.response[0] += 1.0  # the direct sound
+        self.distortion = distortion
+        self.low_cut = butter(2, low_cut, "highpass", fs=RATE, output="sos") if low_cut else None
+        self.extra_delay = extra_delay
+
+    def apply(self, audio: np.ndarray) -> np.ndarray:
+        """The sound as it arrives at the microphone (longer, by the tail)."""
+        out = audio.astype(np.float32)
+        if self.low_cut is not None:
+            out = sosfilt(self.low_cut, out).astype(np.float32)
+        if self.distortion:
+            out = (np.tanh(self.distortion * out) / self.distortion).astype(np.float32)
+        return fftconvolve(out, self.response)[: len(out) + len(self.response)].astype(np.float32)
 
 
 class Speaker:
@@ -257,6 +316,7 @@ class Space:
         across_delay: float = 0.01,
         noise: float = 0.0005,
         seed: int = 7,
+        room: Optional[Room] = None,
     ):
         """
         Args:
@@ -266,12 +326,16 @@ class Space:
             across_gain: How loud another endpoint's speaker is heard
             across_delay: Seconds from another endpoint's speaker
             noise: Level of every microphone's noise floor
+            room: How speakers reach microphones beyond a delayed copy
+                (reverberation, distortion, a delay the device does not
+                report); None for the plain copy
         """
         self.echo_gain = echo_gain
         self.echo_delay = echo_delay
         self.across_gain = across_gain
         self.across_delay = across_delay
         self.noise = noise
+        self.room = room
         self.endpoints: list[Endpoint] = []
         self.utterances: list[Utterance] = []
         self._lock = threading.Lock()
@@ -318,6 +382,12 @@ class Space:
             gain = self.echo_gain if own else self.across_gain
             delay = self.echo_delay if own else self.across_delay
             if not gain:
+                continue
+            if self.room is not None:
+                delay += self.room.extra_delay
+                tail = len(self.room.response) / RATE
+                for clip in endpoint.speaker.clips_between(start - delay - tail, end):
+                    _mix(block, start, clip.through(self.room), clip.started + delay, gain)
                 continue
             for clip in endpoint.speaker.clips_between(start - delay, end):
                 _mix(block, start, clip.heard(), clip.started + delay, gain)
