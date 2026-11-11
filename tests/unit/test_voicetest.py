@@ -225,3 +225,27 @@ def test_self_talk_is_measured_turn_by_turn():
     assert (second.speaker, second.heard_share) == ("hal", 1.0)
     assert result.overlap == 0
     assert result.self_cuts == {"iris": 0, "hal": 0}
+
+
+def test_a_reply_heard_in_two_turns_counts_the_last():
+    """The listener took the speaker's first sentence as a turn, gave it up
+    when the speaker went on, and heard the whole reply as its next turn."""
+    space = Space(noise=0)
+    a = FakeAssistant("iris", space.endpoint("iris"))
+    b = FakeAssistant("hal", space.endpoint("hal"))
+    start = time.monotonic()
+    a.endpoint.play(tone(0.6), RATE)
+    a.log("chat.done", {"text": "I was thinking. Where do people find meaning?"})
+    time.sleep(0.3)
+    b.log("chat.user", {"text": "I was thinking."})
+    b.log("chat.continued", {})
+    time.sleep(0.5)
+    b.log("chat.user", {"text": "I was thinking. Where do people find meaning?"})
+    b.endpoint.play(tone(0.3), RATE)
+    time.sleep(0.4)
+    a.log("chat.user", {"text": "In each other."})
+    result = SelfTalk(a, b, report=lambda line: None)._analyse(start, time.monotonic())
+    [exchange] = [e for e in result.exchanges if e.speaker == "iris"]
+    assert exchange.heard_share == 1.0
+    assert exchange.turns_heard == 2
+    assert "hal" in result.logs and any(e["event"] == "chat.continued" for e in result.logs["hal"])

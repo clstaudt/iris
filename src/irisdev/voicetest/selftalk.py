@@ -51,6 +51,8 @@ class SelfTalkResult:
     interrupted: dict = field(default_factory=dict)
     stalled: bool = False
     errors: list = field(default_factory=list)
+    # Every event each assistant reported, seconds from the start
+    logs: dict = field(default_factory=dict)
 
 
 class SelfTalk:
@@ -100,26 +102,7 @@ class SelfTalk:
         pairs = ((self.first, self.second), (self.second, self.first))
         for speaker, listener in pairs:
             result.errors += [f"{speaker.name}: {d.get('message')}" for _, _, d in speaker.log.since(start, "error", end)]
-            # What the listener heard, turn by turn, against what was said before it
-            heard_turns = listener.log.since(start, "chat.user", end)
-            replies = speaker.log.since(start, "chat.done", end)
-            previous = start
-            for at, _, data in heard_turns:
-                said = " ".join(d.get("text", "") for t, _, d in replies if previous <= t <= at)
-                if said.strip():
-                    result.exchanges.append(
-                        Exchange(
-                            speaker=speaker.name,
-                            listener=listener.name,
-                            at=at,
-                            said=said,
-                            heard=data.get("text", ""),
-                            heard_share=round(heard_share(data.get("text", ""), said), 2),
-                            turns_heard=1 + len(listener.log.since(previous, "chat.continued", at)),
-                            gap=self._gap(speaker, listener, previous, at),
-                        )
-                    )
-                previous = at
+            result.exchanges += self._exchanges(speaker, listener, start, end)
         result.exchanges.sort(key=lambda e: e.at)
 
         a_sounds = self.first.endpoint.speaker.sounds(start, end, REPLY_GAP)
@@ -133,15 +116,43 @@ class SelfTalk:
             spoke = [other.endpoint.speaker.audible(t) for t in cuts]
             result.interrupted[speaker.name] = sum(spoke)
             result.self_cuts[speaker.name] = len(cuts) - sum(spoke)
+        result.logs = {a.name: [{"at": round(at - start, 3), "event": k, **d} for at, k, d in a.log.since(start, end=end)]
+                       for a in (self.first, self.second)}
         return result
 
-    @staticmethod
-    def _gap(speaker, listener, since: float, heard_at: float) -> Optional[float]:
-        """From the end of the speaker's reply heard at this moment to the
-        listener's first word after it."""
-        sounds = speaker.endpoint.speaker.sounds(since, heard_at, REPLY_GAP)
-        if not sounds:
-            return None
-        reply_end = sounds[-1][1]
-        answer = listener.endpoint.speaker.first_sound_after(reply_end)
-        return None if answer is None else round(answer - reply_end, 2)
+    def _exchanges(self, speaker, listener, start: float, end: float) -> list[Exchange]:
+        """Each of the speaker's replies and how the listener heard it.
+
+        A reply is what the speaker said between two turns it heard; the
+        listener heard it in the turns it took meanwhile, of which the last
+        is what it answered (a turn taken in a pause and given up when the
+        speaker went on is followed by the whole one).
+        """
+        exchanges = []
+        heard_by_speaker = [at for at, _, _ in speaker.log.since(start, "chat.user", end)]
+        bounds = [start] + heard_by_speaker + [end]
+        for begin, until in zip(bounds, bounds[1:]):
+            replies = [d for _, _, d in speaker.log.since(begin, "chat.done", until) if d.get("text", "").strip()]
+            sounds = speaker.endpoint.speaker.sounds(begin, until, REPLY_GAP)
+            if not replies or not sounds:
+                continue
+            said = replies[-1]["text"]
+            turns = listener.log.since(sounds[0][0], "chat.user", until)
+            if not turns:
+                continue
+            at, _, heard = turns[-1]
+            reply_end = sounds[-1][1]
+            answer = listener.endpoint.speaker.first_sound_after(reply_end)
+            exchanges.append(
+                Exchange(
+                    speaker=speaker.name,
+                    listener=listener.name,
+                    at=at,
+                    said=said,
+                    heard=heard.get("text", ""),
+                    heard_share=round(heard_share(heard.get("text", ""), said), 2),
+                    turns_heard=len(turns),
+                    gap=None if answer is None else round(answer - reply_end, 2),
+                )
+            )
+        return exchanges
