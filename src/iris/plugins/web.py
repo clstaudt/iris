@@ -1,12 +1,14 @@
 """The web: Iris searches it for current facts and reads pages."""
 
 import logging
+import time
 
 from iris.plugin import Plugin, PluginContext, Tool
 
 try:
     import trafilatura
     from ddgs import DDGS
+    from ddgs.exceptions import DDGSException
     from trafilatura.settings import use_config
 
     HAS_SEARCH = True
@@ -38,6 +40,13 @@ BROWSE_GUIDANCE = (
 )
 
 
+# Tries of a search: the engines ddgs asks (auto), again after a moment,
+# then DuckDuckGo alone. ddgs raises "No results found." both when there are
+# none and when the engines it asked refused (rate limits), which a moment
+# later often answer.
+SEARCH_TRIES = (("auto", 0.0), ("auto", 0.8), ("duckduckgo", 1.5))
+
+
 def search(query: str) -> dict:
     """
     Search the web using DuckDuckGo.
@@ -46,12 +55,30 @@ def search(query: str) -> dict:
         query: Search query string
 
     Returns:
-        Dict with 'success', 'result', and 'message' keys
+        Dict with 'success', 'result', and 'message' keys. Nothing found is
+        a success with "No results found.", so the model says so instead
+        of blaming the service; only a search that could not be made fails.
     """
     logger.info("Searching: %s", query)
+    results, error = [], None
+    for backend, wait in SEARCH_TRIES:
+        time.sleep(wait)
+        try:
+            results = DDGS().text(query, max_results=5, backend=backend)
+            error = None
+        except DDGSException as e:
+            # Nothing found, or the engines refused: try again
+            logger.warning("Search found nothing (%s, %s): %s", backend, e, query)
+            continue
+        except Exception as e:
+            logger.warning("Search failed (%s): %s", backend, e)
+            error = e
+            continue
+        if results:
+            break
     try:
-        results = DDGS().text(query, max_results=5)
-
+        if error is not None and not results:
+            raise error
         if not results:
             logger.warning("Search returned no results for: %s", query)
             return {"success": True, "result": "No results found.", "message": "No results"}
