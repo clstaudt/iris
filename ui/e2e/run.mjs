@@ -209,6 +209,7 @@ const inspector = page.locator("aside");
 const option = (text) => inspector.locator(".s-option", { hasText: text });
 
 async function openStage(label, title = label) {
+  if (!(await stage(label).count())) await openSettings();
   if ((await stage(label).getAttribute("aria-expanded")) !== "true") await stage(label).click();
   await inspector.locator("h2", { hasText: title }).waitFor({ timeout: 5000 });
 }
