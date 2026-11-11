@@ -70,6 +70,7 @@ def conversations(args, out: Path) -> int:
         summarize,
     )
     from irisdev.voicetest.acoustics import RATE
+    from irisdev.voicetest.scripted import budgets_from
     from irisdev.voicetest.stub_llm import MODEL
 
     chosen = [c for c in CONVERSATIONS if not args.only or any(o.lower() in c.name for o in args.only)]
@@ -88,7 +89,7 @@ def conversations(args, out: Path) -> int:
     iris.warm_up(str(warm))
     warm.unlink()
     runner = ScriptedConversations(
-        iris, space, voice, check_replies=stub is None,
+        iris, space, voice, check_replies=stub is None, budgets=budgets_from(args.budgets),
         reply_timeout=args.reply_timeout or (300.0 if stub is None else 180.0),
     )
     results = []
@@ -189,6 +190,8 @@ def main(argv=None) -> int:
     talk.add_argument("--repeat", type=int, default=1, help="hold the conversations this many times")
     talk.add_argument("--reply-timeout", type=float, help="seconds a reply may take")
     talk.add_argument("--first-token", type=float, default=0.3, help="the scripted model's first-token delay")
+    talk.add_argument("--budgets", default=os.environ.get("IRIS_VOICETEST_BUDGETS", ""),
+                      help="budgets to use, as voice_pipeline=3.5,barge_in=1 (or IRIS_VOICETEST_BUDGETS)")
 
     pair = commands.add_parser("selftalk", help="two Irises talking to each other")
     pair.add_argument("--personas", nargs=2, default=["iris", "hal"])

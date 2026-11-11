@@ -137,9 +137,11 @@ class Speaker:
             last.stopped = max(now, last.started)
 
     def playing(self) -> bool:
-        """Whether the last clip still has audio to play."""
+        """Whether the last clip still has audio to play (a stopped one has
+        none, even before it was heard)."""
         with self._lock:
-            return bool(self.clips) and self.clips[-1].end > time.monotonic()
+            last = self.clips[-1] if self.clips else None
+            return last is not None and last.stopped is None and last.end > time.monotonic()
 
     def clips_between(self, start: float, end: float = float("inf")) -> list[Clip]:
         with self._lock:

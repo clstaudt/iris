@@ -28,6 +28,20 @@ BUDGETS = {
     # From pressing Stop to silence
     "stop": 0.5,
 }
+
+
+def budgets_from(text: str) -> dict:
+    """Budgets given as "name=seconds,name=seconds" (as in the environment
+    variable IRIS_VOICETEST_BUDGETS), checked against the known names."""
+    budgets = {}
+    for item in filter(None, (part.strip() for part in (text or "").split(","))):
+        name, _, seconds = item.partition("=")
+        if name.strip() not in BUDGETS:
+            raise ValueError(f"No budget called {name.strip()!r}; there are {', '.join(BUDGETS)}")
+        budgets[name.strip()] = float(seconds)
+    return budgets
+
+
 # How much of what the user said the assistant must have heard (its words)
 HEARD = 0.75
 # The user waits this long after the assistant has finished before speaking
