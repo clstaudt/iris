@@ -6,6 +6,8 @@ echo cancellation) interrupts it: what they say is the next turn."""
 import threading
 import time
 
+import numpy as np
+
 from iris.assistant import VoiceAssistant
 from iris.events import EventBus
 
@@ -162,3 +164,60 @@ def test_what_was_said_of_the_previous_answer_does_not_count(tmp_path):
     assistant, paths, answered = _assistant(tmp_path, said_before="Paris is the capital.")
     assistant._answer_listening(paths["first"], dormant=False)
     assert answered == [(paths["first"], True), (paths["whole"], False)]
+
+
+class TestOwnVoice:
+    """A turn made of the voice's own words is its echo, not the user's."""
+
+    def test_the_voice_heard_back(self):
+        from iris.assistant import echo_of
+
+        spoken = "I'll run the search for Ali G Indahouse quotes."
+        assert echo_of("I'll run the", spoken)
+        assert echo_of("the search.", spoken)
+        # A longer echo comes back garbled
+        assert echo_of("I’ll run the search for Ali G Indahouse quote", spoken)
+
+    def test_the_users_words(self):
+        from iris.assistant import echo_of
+
+        spoken = "Would you like coffee or tea?"
+        assert not echo_of("Tea", spoken)
+        assert not echo_of("Tea please, with milk", spoken)
+        assert not echo_of("What is the capital of France?", "Paris is the capital of France.")
+        assert not echo_of("I'll run the search", "")
+
+
+def test_a_turn_of_the_voices_own_words_is_not_answered(tmp_path):
+    """Heard just after the voice said them: no turn, nothing answered."""
+    import soundfile as sf
+
+    from iris.assistant import VoiceAssistant
+
+    assistant = object.__new__(VoiceAssistant)
+    assistant.interrupt_event = threading.Event()
+    assistant.status_manager = Flags()
+    assistant.wake_word = None
+    answered = []
+    assistant.chat = lambda *args, **kwargs: answered.append(args)
+    assistant.event_bus = EventBus()
+
+    class Spoken:
+        def spoken_since(self, moment):
+            return "I'll run the search for Ali G Indahouse quotes."
+
+    class Transcriber:
+        def __init__(self, text):
+            self.text = text
+
+        def transcribe(self, path):
+            return self.text, "en"
+
+    assistant.speech_pipeline = Spoken()
+    turn = tmp_path / "turn.wav"
+    sf.write(turn, np.zeros(16000, dtype=np.float32), 16000)
+    events = _events(assistant)
+
+    assistant.transcriber = Transcriber("I'll run the")
+    assistant._answer_spoken(str(turn))
+    assert answered == [] and "chat.user" not in events

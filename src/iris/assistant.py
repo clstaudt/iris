@@ -3,6 +3,7 @@
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import warnings
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import soundfile as sf
 from faster_whisper.audio import decode_audio
 
 from iris import engines
@@ -77,6 +79,48 @@ def _echo_canceller() -> Optional[EchoCanceller]:
         return EchoCanceller()
     except Exception:
         return None
+
+
+# A turn that begins while the voice speaks, or this long after it stopped
+# (its last syllables still arrive, through the room and the device), may
+# be its echo
+ECHO_AFTER = 0.5
+# A turn of four words or more is the voice's echo when this share of its
+# words come, in order, from what the voice said
+ECHO_SHARE = 0.85
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", (text or "").lower().replace("\u2019", "'"))
+
+
+def echo_of(heard: str, spoken: str) -> bool:
+    """Whether a turn heard is the voice's own words coming back: two or
+    three words the voice said just so, one after the other, or for a
+    longer turn (which comes back garbled), most of its words in the order
+    the voice said them. A single word ("yes", "tea") could be the user's."""
+    heard_words, spoken_words = _words(heard), _words(spoken)
+    if len(heard_words) < 2 or not spoken_words:
+        return False
+    if len(heard_words) < 4:
+        n = len(heard_words)
+        return any(spoken_words[k : k + n] == heard_words for k in range(len(spoken_words) - n + 1))
+    # How many of the heard words the voice said in the same order
+    previous = [0] * (len(spoken_words) + 1)
+    for word in heard_words:
+        current = [0] * (len(spoken_words) + 1)
+        for k, said in enumerate(spoken_words, 1):
+            current[k] = previous[k - 1] + 1 if word == said else max(previous[k], current[k - 1])
+        previous = current
+    return previous[-1] >= ECHO_SHARE * len(heard_words)
+
+
+def _seconds_of(path: str) -> float:
+    """How long a recording is (0 if it cannot be read)."""
+    try:
+        return sf.info(path).duration
+    except Exception:
+        return 0.0
 
 
 class VoiceAssistant:
@@ -635,6 +679,7 @@ class VoiceAssistant:
 
         turn_wait = getattr(getattr(self, "recorder", None), "last_turn_wait", None)
         recognizing = time.monotonic()
+        turn_began = recognizing - (turn_wait or 0.0) - _seconds_of(audio_path)
         text, detected_language = self.transcriber.transcribe(audio_path)
         self._timing = TurnTiming(
             "voice",
@@ -648,6 +693,15 @@ class VoiceAssistant:
 
         # The user went on meanwhile: the whole turn is answered instead
         if not text or self.interrupt_event.is_set():
+            return
+
+        # The microphone heard Iris's own voice (an echo the canceller let
+        # through, for instance while the computer was too busy to play on
+        # time): answering it would have Iris talk to itself, turn after turn
+        pipeline = getattr(self, "speech_pipeline", None)
+        spoken_since = getattr(pipeline, "spoken_since", None)
+        if spoken_since and echo_of(text, spoken_since(turn_began - ECHO_AFTER)):
+            logger.info("Took no turn of the voice's own words: %r", text)
             return
 
         # "That's all, Iris": back to sleep, nothing to answer

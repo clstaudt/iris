@@ -6,7 +6,9 @@ import queue
 import re
 import tempfile
 import threading
+import time
 import warnings
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -586,6 +588,10 @@ class SpeechGenerator:
             return generator.generate(text, language=language)
 
 
+# Clips of the voice remembered, to recognize its echo in a turn
+SPOKEN_KEPT = 20
+
+
 class SpeechPipeline:
     """
     Parallel speech generation and playback pipeline.
@@ -614,6 +620,9 @@ class SpeechPipeline:
         # Optional callback for the moment the voice starts saying a reply
         self.on_reply_audio = None
         self._reply_heard = False
+        # What the voice said lately, as (when it stopped being heard, text),
+        # so a turn the microphone made of it can be told from the user's
+        self._spoken: deque[tuple[float, str]] = deque(maxlen=SPOKEN_KEPT)
 
         # Queues for pipeline
         self.text_queue = queue.Queue()
@@ -729,6 +738,8 @@ class SpeechPipeline:
                         if self._playing is not None and epoch == self._epoch:
                             self._said.append(text)
                         self._playing = None
+                        if not sound:
+                            self._spoken.append((time.monotonic(), text))
 
                 # Cleanup
                 try:
@@ -778,6 +789,15 @@ class SpeechPipeline:
         with self._status_lock:
             self._said = []
             self._reply_heard = False
+
+    def spoken_since(self, moment: float) -> str:
+        """What the voice was saying at or after this moment (time.monotonic()):
+        clips still heard then, and the one playing now."""
+        with self._status_lock:
+            texts = [text for ended, text in self._spoken if ended >= moment]
+            if self._playing:
+                texts.append(self._playing)
+        return " ".join(texts)
 
     def said(self) -> str:
         """What has been said of the current reply so far, as far as it was
