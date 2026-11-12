@@ -303,11 +303,13 @@ class IrisUnderTest:
 
     def refresh_model(self):
         """Read what the model is again (the scripted model's changed): its
-        context length and capabilities, forgetting tools it refused."""
+        context length and capabilities, forgetting tools it refused, and
+        which model on the server sees, as Iris picks it at its start."""
         conversation = self.assistant.conversation
         conversation._capability_cache.clear()
         conversation._no_tools.clear()
         conversation.max_context_tokens = conversation._get_model_context_length()
+        conversation.vision_model = self.controller._pick_vision_model()
 
     def configure(self, name: str, value, wait: float = CONFIG_WAIT) -> bool:
         """Change a setting as the app does, and wait for the "config" event

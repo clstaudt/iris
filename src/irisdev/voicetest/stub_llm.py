@@ -17,11 +17,20 @@ offered, when the tool call and the first byte went out, and whether the
 client hung up before the reply was complete.
 
 A rule can also stand for a model server in trouble: one that stalls part
-way through a reply (stall_after), as a network that drops out does, or a
-small model that writes its tool call into the reply as text (as_text),
-streamed in pieces that split the markup (chunk). The model itself can be
-one without tool support: its capabilities say so, or it refuses requests
-with tools as Ollama does (refuse_tools).
+way through a reply (stall_after), as a network that drops out does, one
+that fails part way through (error_after, as Ollama streams an error) or
+at once with an HTTP status (status), or a small model that writes its tool
+call into the reply as text (as_text), streamed in pieces that split the
+markup (chunk). The model itself can be one without tool support: its
+capabilities say so, or it refuses requests with tools as Ollama does
+(refuse_tools). It can disappear from the server (missing): it is no longer
+listed, and a request for it is answered 404 as Ollama answers one for a
+model it does not have.
+
+Beside the model, the server can hold a model that sees (vision): it is
+listed with the capability "vision", and the images a request carries are
+recorded. A request with images for a model that cannot see is refused, so
+a test notices an image sent to the wrong model.
 """
 
 import json
@@ -35,6 +44,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional, Union
 
 MODEL = "voicetest:latest"
+# The model that sees, served beside MODEL when the stub has vision
+VISION_MODEL = "voicetest-vision:latest"
+VISION_CAPABILITIES = ("completion", "vision")
+# How the stub refuses images for a model that cannot see
+NO_IMAGES = "this model is missing data required for image input"
 
 SHORT = "Paris is the capital of France. It lies on the Seine."
 LONG = " ".join(
@@ -49,6 +63,9 @@ AFTER_TOOL = "Here is what I found. {first}"
 # persona that changed, no more tools ("(Note: ...)" and a blank line each)
 NOTES = re.compile(r"^(?:\(Note: .*?\)\n\n)+", re.DOTALL)
 NOTE = re.compile(r"\(Note: (.*?)\)\n\n", re.DOTALL)
+# A user message of notes alone: those of a tool round (no more tools),
+# which Iris puts at the end of the request
+ONLY_NOTES = re.compile(r"^(?:\(Note: .*?\)(?:\n\n|$))+$", re.DOTALL)
 # A search result as iris.plugins.web formats it
 RESULT_LINE = re.compile(r"^- (?P<title>.*?): (?P<body>.*) \((?P<href>[^()]*)\)\s*$", re.MULTILINE)
 # A request to summarize the conversation (iris.llm.summarize_old_messages)
@@ -60,6 +77,16 @@ CAPABILITIES = ("completion", "tools")
 
 
 # Reading a conversation ------------------------------------------------------
+
+
+def turn_of(messages: list[dict]) -> list[dict]:
+    """The messages without a last user message of notes alone: those notes
+    belong to the tool round before them, not to the user."""
+    if messages and messages[-1].get("role") == "user" and ONLY_NOTES.match(
+        messages[-1].get("content") or ""
+    ):
+        return messages[:-1]
+    return messages
 
 
 def user_text(message: dict) -> str:
@@ -75,6 +102,7 @@ def notes_of(message: dict) -> list[str]:
 
 def last_user(messages: list[dict]) -> str:
     """The user's last message, without notes; "" if there is none."""
+    messages = turn_of(messages)
     for message in reversed(messages):
         if message.get("role") == "user":
             return user_text(message)
@@ -88,6 +116,7 @@ def user_messages(messages: list[dict]) -> list[str]:
 
 def tool_rounds(messages: list[dict]) -> int:
     """How many tool results have come back since the user's last message."""
+    messages = turn_of(messages)
     rounds = 0
     for message in reversed(messages):
         if message.get("role") == "user":
@@ -115,9 +144,22 @@ def results(content: str) -> list[dict]:
     return [m.groupdict() for m in RESULT_LINE.finditer(content or "")]
 
 
+def images_of(messages: list[dict]) -> list[str]:
+    """The images (base64) the request shows the model: those of the
+    messages since the user's last message, and of that message."""
+    messages = turn_of(messages)
+    found: list[str] = []
+    for message in reversed(messages):
+        found = list(message.get("images") or []) + found
+        if message.get("role") == "user":
+            break
+    return found
+
+
 def reply_to(messages: list[dict]) -> str:
     """The reply to the conversation: long when the last user message asks
     for it, short otherwise."""
+    messages = turn_of(messages)
     for message in reversed(messages):
         if message.get("role") == "user":
             return LONG if LONG_REQUEST.search(message.get("content") or "") else SHORT
@@ -199,6 +241,13 @@ class Rule:
     as_text: Optional[Callable[[Call], str]] = None
     # Characters per streamed piece of the reply, instead of a word each
     chunk: Optional[int] = None
+    # Words of the reply sent before the server fails, streaming an error
+    # as Ollama does once the reply has begun
+    error_after: Optional[int] = None
+    # Answered at once with this HTTP status and the error, instead of a reply
+    status: Optional[int] = None
+    # What the server says went wrong (error_after and status)
+    error: str = "model runner has unexpectedly stopped"
 
     def matches(self, messages: list[dict]) -> bool:
         if callable(self.match):
@@ -220,6 +269,9 @@ class Answer:
     first_token: Optional[float] = None
     stall_after: Optional[int] = None
     chunk: Optional[int] = None
+    error_after: Optional[int] = None
+    status: Optional[int] = None
+    error: str = ""
 
 
 # The record of a request -------------------------------------------------------
@@ -253,6 +305,15 @@ class StubRequest:
     # What was sent: the text, and a tool call
     text: str = ""
     call: Optional[Call] = None
+    # The model asked, and the images the request showed it
+    model: str = ""
+    images: list = field(default_factory=list, repr=False)
+    # The HTTP status it was answered with when it was not answered with a
+    # reply (a model not there, images for a model that cannot see,
+    # Rule.status), and the error streamed when it failed part way
+    # (Rule.error_after)
+    status: Optional[int] = None
+    error: str = ""
 
     @property
     def system(self) -> str:
@@ -301,6 +362,8 @@ class StubModel:
         on_request: Optional[Callable[[str, StubRequest], None]] = None,
         capabilities: tuple = CAPABILITIES,
         refuse_tools: bool = False,
+        vision: bool = False,
+        missing: bool = False,
     ):
         """
         Args:
@@ -316,6 +379,9 @@ class StubModel:
             refuse_tools: Refuse a request that offers tools, as Ollama does
                 for a model without tool support (400, "does not support
                 tools")
+            vision: Serve VISION_MODEL, a model that sees, beside MODEL
+            missing: MODEL is gone from the server: not listed, and a
+                request for it is answered 404
         """
         self.first_token = first_token
         self.per_word = per_word
@@ -324,6 +390,8 @@ class StubModel:
         self.on_request = on_request
         self.capabilities = tuple(capabilities)
         self.refuse_tools = refuse_tools
+        self.vision = vision
+        self.missing = missing
         self._default_rules = list(rules or [])
         self.rules = list(self._default_rules)
         self.serial = serial
@@ -360,7 +428,7 @@ class StubModel:
                 if self.path == "/api/version":
                     self._json({"version": "0.0.0-voicetest"})
                 elif self.path == "/api/tags":
-                    self._json({"models": [stub._entry()]})
+                    self._json({"models": [stub._entry(name) for name in stub.models()]})
                 elif self.path == "/":
                     self._json({"status": "ok"})
                 else:
@@ -369,7 +437,11 @@ class StubModel:
             def do_POST(self):
                 body = self._body()
                 if self.path == "/api/show":
-                    self._json(stub._show())
+                    name = body.get("model") or body.get("name") or MODEL
+                    if stub.has(name):
+                        self._json(stub._show(name))
+                    else:
+                        self._json({"error": stub.not_found(name)}, 404)
                 elif self.path == "/api/chat":
                     stub._chat(self, body)
                 else:
@@ -393,7 +465,7 @@ class StubModel:
 
     # The settings a conversation may change
     SETTINGS = ("first_token", "per_word", "serial", "context_length", "summary_delay", "capabilities",
-                "refuse_tools")
+                "refuse_tools", "vision", "missing")
 
     def configure(self, **settings) -> dict:
         """Change settings (SETTINGS) from now on; returns what they were."""
@@ -429,17 +501,36 @@ class StubModel:
             "quantization_level": "Q4_0",
         }
 
-    def _entry(self) -> dict:
+    def models(self) -> list[str]:
+        """The models the server lists now."""
+        return ([] if self.missing else [MODEL]) + ([VISION_MODEL] if self.vision else [])
+
+    def has(self, name: str) -> bool:
+        """Whether the server answers for a model: MODEL unless it is
+        missing, VISION_MODEL with vision, and any other name as MODEL."""
+        if name in (MODEL, VISION_MODEL):
+            return name in self.models()
+        return True
+
+    def capabilities_of(self, name: str) -> tuple:
+        return VISION_CAPABILITIES if name == VISION_MODEL else self.capabilities
+
+    @staticmethod
+    def not_found(name: str) -> str:
+        """How Ollama says it has no such model."""
+        return f"model '{name}' not found, try pulling it first"
+
+    def _entry(self, name: str = MODEL) -> dict:
         return {
-            "name": MODEL,
-            "model": MODEL,
+            "name": name,
+            "model": name,
             "modified_at": "2026-01-01T00:00:00Z",
             "size": 1,
             "digest": "0" * 64,
             "details": self._details(),
         }
 
-    def _show(self) -> dict:
+    def _show(self, name: str = MODEL) -> dict:
         return {
             "modelfile": "",
             "parameters": "",
@@ -449,13 +540,14 @@ class StubModel:
                 "general.architecture": "voicetest",
                 "voicetest.context_length": self.context_length,
             },
-            "capabilities": list(self.capabilities),
+            "capabilities": list(self.capabilities_of(name)),
         }
 
     # Answering -----------------------------------------------------------------
 
     def answer(self, messages: list[dict], offered: list[str]) -> Answer:
         """What the model answers to these messages, with these tools offered."""
+        messages = turn_of(messages)
         last = messages[-1] if messages else {}
         rule = next((r for r in self.rules if r.matches(messages)), None)
         if rule is None:
@@ -486,7 +578,8 @@ class StubModel:
         else:
             text = reply_to(messages)
         return Answer(text, first_token=rule.first_token, stall_after=rule.stall_after,
-                      chunk=rule.chunk)
+                      chunk=rule.chunk, error_after=rule.error_after, status=rule.status,
+                      error=rule.error)
 
     def _record(self, body: dict) -> StubRequest:
         messages = body.get("messages") or []
@@ -494,7 +587,7 @@ class StubModel:
         first = messages[0] if messages else {}
         if first.get("role") == "system" and (first.get("content") or "").startswith(SUMMARY_PROMPT):
             kind = "summary"
-        elif messages and messages[-1].get("role") == "tool":
+        elif turn_of(messages) and turn_of(messages)[-1].get("role") == "tool":
             kind = "tool_round"
         else:
             kind = "reply"
@@ -505,6 +598,8 @@ class StubModel:
             messages=messages,
             tools=offered,
             stream=body.get("stream", True) is not False,
+            model=body.get("model") or "",
+            images=images_of(messages),
         )
         with self._lock:
             record.index = len(self.requests)
@@ -528,8 +623,21 @@ class StubModel:
                 return True
             time.sleep(min(POLL, left))
 
+    def _refuse(self, handler, record: StubRequest, status: int, error: str):
+        record.status, record.error = status, error
+        try:
+            handler._json({"error": error}, status)
+        except (BrokenPipeError, ConnectionResetError):
+            record.closed = time.monotonic()
+
     def _chat(self, handler: BaseHTTPRequestHandler, body: dict):
         record = self._record(body)
+        if record.model and not self.has(record.model):
+            self._refuse(handler, record, 404, self.not_found(record.model))
+            return
+        if record.images and "vision" not in self.capabilities_of(record.model or MODEL):
+            self._refuse(handler, record, 400, NO_IMAGES)
+            return
         if self.refuse_tools and body.get("tools"):
             record.refused = True
             handler._json({"error": f"registry.ollama.ai/library/{MODEL} does not support tools"}, 400)
@@ -549,7 +657,9 @@ class StubModel:
             first_token = self.first_token if answer.first_token is None else answer.first_token
             if not self._pause(handler, first_token, record):
                 return
-            if record.stream:
+            if answer.status is not None:
+                self._refuse(handler, record, answer.status, answer.error)
+            elif record.stream:
                 self._stream(handler, answer, record)
             else:
                 self._whole(handler, answer, record)
@@ -579,6 +689,9 @@ class StubModel:
         """The reply as one JSON object ("stream": false)."""
         if answer.stall_after is not None:
             self._stall(handler, record)
+            return
+        if answer.error_after is not None:
+            self._refuse(handler, record, 500, answer.error)
             return
         text = answer.call.lead_in if answer.call else answer.text
         payload = {
@@ -626,6 +739,15 @@ class StubModel:
             for n, piece in enumerate(pieces):
                 if n == answer.stall_after:
                     self._stall(handler, record)
+                    return
+                if n == answer.error_after:
+                    # The status went out with the first byte: Ollama tells
+                    # of a failure part way in the stream itself
+                    record.error = answer.error
+                    send({"error": answer.error})
+                    handler.wfile.write(b"0\r\n\r\n")
+                    handler.wfile.flush()
+                    record.finished = time.monotonic()
                     return
                 if n and not self._pause(handler, self.per_word, record):
                     return

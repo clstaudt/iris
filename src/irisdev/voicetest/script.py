@@ -327,10 +327,14 @@ class Conversation:
     tools: dict = field(default_factory=dict)
     # FakeWeb's arguments (results, pages, delay, browse_delay)
     web: Optional[dict] = None
+    # FakeCamera's and FakeScreen's arguments (color, available, black...)
+    camera: Optional[dict] = None
+    screen: Optional[dict] = None
     # The scripted model's rules
     stub_rules: Optional[list] = None
     # The scripted model's settings (first_token, per_word, serial,
-    # context_length, summary_delay, capabilities, refuse_tools)
+    # context_length, summary_delay, capabilities, refuse_tools, vision,
+    # missing)
     stub_options: dict = field(default_factory=dict)
     persona: Optional[str] = None
     turn_detection: Optional[str] = None
