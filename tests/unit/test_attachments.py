@@ -87,6 +87,13 @@ def test_too_many_files_are_refused():
         prepare_all([_upload(f"{i}.txt", "text/plain", b"x") for i in range(11)])
 
 
+def test_a_file_over_25_mb_is_refused():
+    limit = 25 * 1024 * 1024
+    assert prepare(_upload("notes.txt", "text/plain", b"a" * limit)).kind == "document"
+    with pytest.raises(AttachmentError, match="notes.txt is larger than 25 MB"):
+        prepare(_upload("notes.txt", "text/plain", b"a" * (limit + 1)))
+
+
 def test_only_names_are_recorded():
     files = prepare_all([_upload("a.txt", "text/plain", b"secret contents")])
     assert recorded_text("Summarize", files) == "Summarize\n\n(Attached: a.txt)"

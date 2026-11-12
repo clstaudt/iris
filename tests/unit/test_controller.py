@@ -219,6 +219,35 @@ def test_history_keeps_the_visible_conversation():
     assert events[1]["data"]["text"] == "Hello"
 
 
+def test_a_silent_microphone_is_warned_about_once(monkeypatch):
+    """A real microphone always hears some noise: exact zeros for more than
+    four seconds mean the system withholds it. That is said once, not with
+    every level, and said again after another such silence."""
+    now = [100.0]
+    monkeypatch.setattr("iris.controller.time.monotonic", lambda: now[0])
+    bus = EventBus()
+    warnings = []
+    bus.subscribe(lambda event_type, data: warnings.append(data) if event_type == "error" else None)
+    AssistantController(bus)
+
+    def levels(rms, seconds):
+        for _ in range(round(seconds * 15)):
+            bus.emit("audio.level", {"rms": rms})
+            now[0] += 1 / 15
+
+    levels(0.0, 3.8)
+    assert warnings == []
+    levels(0.0, 6)
+    assert len(warnings) == 1
+    assert "silence" in warnings[0]["message"]
+    # Sound, then a pause in it: no warning
+    levels(0.02, 1)
+    levels(0.0, 3.8)
+    assert len(warnings) == 1
+    levels(0.0, 1)
+    assert len(warnings) == 2
+
+
 def test_work_shows_through_a_paused_mic(monkeypatch):
     """Typed turns are answered with the mic off; thinking must not read as paused."""
     monkeypatch.setattr("iris.controller.VoiceAssistant", FakeAssistant)
