@@ -90,8 +90,20 @@ ECHO_AFTER = 0.5
 ECHO_SHARE = 0.85
 
 
+# Numbers as speech recognition writes them, and as a reply may
+_NUMBERS = {
+    word: str(n)
+    for n, word in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+        "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+    )
+}
+
+
 def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9']+", (text or "").lower().replace("\u2019", "'"))
+    """The words of a text, lower case, numbers as digits."""
+    found = re.findall(r"[a-z0-9']+", (text or "").lower().replace("\u2019", "'"))
+    return [_NUMBERS.get(word, word) for word in found]
 
 
 def echo_of(heard: str, spoken: str) -> bool:

@@ -7,8 +7,9 @@ import threading
 import time
 
 import numpy as np
+import soundfile as sf
 
-from iris.assistant import VoiceAssistant
+from iris.assistant import VoiceAssistant, echo_of
 from iris.events import EventBus
 
 
@@ -170,17 +171,15 @@ class TestOwnVoice:
     """A turn made of the voice's own words is its echo, not the user's."""
 
     def test_the_voice_heard_back(self):
-        from iris.assistant import echo_of
-
         spoken = "I'll run the search for Ali G Indahouse quotes."
         assert echo_of("I'll run the", spoken)
         assert echo_of("the search.", spoken)
         # A longer echo comes back garbled
         assert echo_of("I’ll run the search for Ali G Indahouse quote", spoken)
+        # Numbers come back as words
+        assert echo_of("Number two.", "This is sentence number 2 of a long answer.")
 
     def test_the_users_words(self):
-        from iris.assistant import echo_of
-
         spoken = "Would you like coffee or tea?"
         assert not echo_of("Tea", spoken)
         assert not echo_of("Tea please, with milk", spoken)
@@ -190,10 +189,6 @@ class TestOwnVoice:
 
 def test_a_turn_of_the_voices_own_words_is_not_answered(tmp_path):
     """Heard just after the voice said them: no turn, nothing answered."""
-    import soundfile as sf
-
-    from iris.assistant import VoiceAssistant
-
     assistant = object.__new__(VoiceAssistant)
     assistant.interrupt_event = threading.Event()
     assistant.status_manager = Flags()
