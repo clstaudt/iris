@@ -107,3 +107,39 @@ def test_a_typed_tool_call_stays_out_of_reply_and_history():
     assert conversation.conversation_history[-1] == {
         "role": "assistant", "content": "Checking another source.",
     }
+
+
+class ChunkedClient(FakeClient):
+    """Streams each scripted reply chunk by chunk, noting how far it got."""
+
+    def chat(self, model, messages, stream=False, tools=None):
+        self.offered_tools.append(tools is not None)
+        self.sent = 0
+
+        def chunks(reply):
+            for chunk in reply:
+                self.sent += 1
+                yield chunk
+
+        return chunks(self.replies.pop(0))
+
+
+def test_a_reply_streams_while_tools_are_on_offer():
+    """The voice starts before the model has finished its reply."""
+    conversation, _ = _conversation([])
+    conversation.client = ChunkedClient([[say("It's "), say("sunny. "), say("Enjoy!")]])
+    stream = conversation.chat_stream("Weather?")
+    assert next(stream) == "It's "
+    assert conversation.client.sent == 1
+    assert "".join(stream) == "sunny. Enjoy!"
+
+
+def test_text_before_a_tool_call_is_said_and_kept():
+    conversation, tools = _conversation([])
+    conversation.client = ChunkedClient(
+        [[say("Let me look that up. "), call("search")], [say("It's sunny.")]]
+    )
+    reply = "".join(conversation.chat_stream("Weather?"))
+    assert reply == "Let me look that up. It's sunny."
+    assert tools.executed == ["search"]
+    assert conversation.conversation_history[-1]["content"] == "Let me look that up. It's sunny."

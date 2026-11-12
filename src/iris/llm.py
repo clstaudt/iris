@@ -139,14 +139,60 @@ def pause_at_line_ends(text: str) -> str:
     )
 
 
-def speech_break(text: str, start: int, end: int) -> int:
-    """Index after the last sentence end or line break in text[start:end],
-    where the text can be cut for speech, or -1 if there is none."""
+def speech_break(text: str, start: int, end: int, first: bool = False) -> int:
+    """Index after the last (or first) sentence end or line break in
+    text[start:end], where the text can be cut for speech, or -1 if there is
+    none."""
     cut = -1
     for match in SPEECH_BREAK.finditer(text, start, end):
         if not LIST_NUMBER.search(text, 0, match.end()):
             cut = match.end()
+            if first:
+                break
     return cut
+
+
+# The first piece of a reply ends at its first sentence (one this long at
+# least, so "Sure." is not a piece of its own): the voice starts as soon as
+# the sentence is there
+FIRST_PIECE_MIN = 24
+# Later pieces end at the last sentence within this span, once there is more
+# text than the minimum: long pieces keep the voice flowing
+PIECE_MIN = 180
+PIECE_SENTENCE_FROM = 90
+PIECE_SENTENCE_TO = 280
+# ...but while the piece before was short, they are scaled down: one is at
+# most this many times as long as the one before. Synthesizing a piece takes
+# about a quarter of its playing time, so it is ready before the one before
+# has been spoken, and the voice never waits for a long piece.
+PIECE_GROWTH = 3
+
+
+def split_speech(buffer: str, previous: int) -> tuple[str, str]:
+    """Split streamed reply text into a piece ready to be spoken and the rest,
+    which waits for more text. Returns ("", buffer) while no piece is ready.
+
+    previous is the length of the piece before, 0 for the first piece of the
+    reply. A paragraph is always a piece of its own.
+    """
+    while "\n\n" in buffer:
+        head, buffer = buffer.split("\n\n", 1)
+        if head.strip():
+            return head.strip(), buffer
+    if not previous:
+        cut = speech_break(buffer, FIRST_PIECE_MIN, len(buffer), first=True)
+    else:
+        scale = min(1.0, PIECE_GROWTH * previous / PIECE_SENTENCE_TO)
+        start, end = int(PIECE_SENTENCE_FROM * scale), int(PIECE_SENTENCE_TO * scale)
+        cut = -1
+        if len(buffer) > PIECE_MIN * scale:
+            cut = speech_break(buffer, start, end)
+        if cut < 0 and len(buffer) > end:
+            # One long sentence: it ends the piece wherever it ends
+            cut = speech_break(buffer, start, len(buffer), first=True)
+    if cut > 0:
+        return buffer[:cut].strip(), buffer[cut:]
+    return "", buffer
 
 
 class ConversationManager:
@@ -626,21 +672,22 @@ class ConversationManager:
 
         # If tools available, let LLM decide if it needs them
         if self.tools and self.tools.has_tools():
-            # Use streaming even for tool check - only buffer if we see tool calls
             stream = self.client.chat(
                 model=self.model, messages=messages, tools=self.tools.get_schemas(), stream=True
             )
 
-            # Collect response and check for tool calls
+            # The reply streams as it comes, so the voice can start before
+            # the model has finished; text before a tool call ("Let me look
+            # that up") is said while the tool runs
             full_response = []
             tool_calls = None
 
             for chunk in stream:
                 message_chunk = chunk.get("message", {})
-
-                # Collect content
-                if "content" in message_chunk:
-                    full_response.append(message_chunk["content"])
+                chunk_text = message_chunk.get("content") or ""
+                if chunk_text:
+                    full_response.append(chunk_text)
+                    yield chunk_text
 
                 # Check for tool calls - they might appear in any chunk, not just the last
                 if message_chunk.get("tool_calls"):
@@ -648,7 +695,7 @@ class ConversationManager:
 
             # If LLM wants to use tools, execute them and get new response
             if tool_calls:
-                spoken = []
+                spoken = list(full_response)
                 rounds = 0
                 while tool_calls:
                     rounds += 1
@@ -752,12 +799,7 @@ class ConversationManager:
                 self._record(prompt, answer, source)
                 return
             else:
-                # No tools needed - yield the response we already collected
                 answer = "".join(full_response)
-                for chunk_text in full_response:
-                    if chunk_text:
-                        yield chunk_text
-
                 self._record(prompt, answer, source)
                 return
 

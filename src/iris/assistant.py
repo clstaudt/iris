@@ -19,7 +19,7 @@ from rich.text import Text
 
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
 from iris.events import EventBus
-from iris.llm import ConversationManager, effective_host, speech_break
+from iris.llm import ConversationManager, effective_host, split_speech
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.tools import Tools
@@ -501,6 +501,7 @@ class VoiceAssistant:
             # Stream the response and display it live
             full_response = []
             text_buffer = ""  # Buffer for speech chunks
+            last_piece = 0  # length of the piece spoken last
 
             def on_tool_use(tool_name, tool_args):
                 detail = tool_args.get("query") or tool_args.get("url", "")
@@ -545,35 +546,15 @@ class VoiceAssistant:
                             current_text, self.speech_pipeline
                         )
 
-                    # Check if we should speak accumulated text
-                    should_speak = False
-                    text_to_speak = ""
-
-                    # Use consistent chunk sizes for smooth speech flow
-                    min_length = 180
-                    search_length = 280
-                    min_sentence_pos = 90
-
-                    # First check for paragraph break
-                    if "\n\n" in text_buffer:
-                        parts = text_buffer.split("\n\n", 1)
-                        text_to_speak = parts[0].strip()
-                        text_buffer = parts[1] if len(parts) > 1 else ""
-                        should_speak = True
-
-                    # Otherwise check if we have enough text with sentence
-                    # ending or line break (a list item ends at its line)
-                    elif len(text_buffer) > min_length:
-                        cut = speech_break(text_buffer, min_sentence_pos, search_length)
-
-                        if cut > 0:
-                            text_to_speak = text_buffer[:cut].strip()
-                            text_buffer = text_buffer[cut:]
-                            should_speak = True
-
-                    # Speak the chunk (queue it for sequential playback)
-                    if should_speak and text_to_speak:
-                        self._speak(text_to_speak)
+                    # Speak each piece as it is complete (queued for
+                    # sequential playback); the first one as soon as its
+                    # first sentence is there
+                    while True:
+                        piece, text_buffer = split_speech(text_buffer, last_piece)
+                        if not piece:
+                            break
+                        last_piece = len(piece)
+                        self._speak(piece)
 
                 # Clear thinking status now that LLM is done
                 with self.status_manager.status_lock:
