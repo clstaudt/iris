@@ -238,6 +238,30 @@ def test_still_offline_switching_on_says_so_again_and_stays_off(stub, offline, m
     assert controller.assistant.speak_replies is False
 
 
+def test_switching_on_again_while_it_loads_loads_it_once(stub, offline, monkeypatch):
+    fetches = []
+    loading = threading.Event()
+
+    def download(repo, on_progress, filename=None, interval=0.5):
+        fetches.append(repo)
+        loading.wait(5)
+
+    monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: False)
+    monkeypatch.setattr(downloads, "download", download)
+    bus = EventBus()
+    seen = Recorded(bus)
+    controller = AssistantController(bus)
+    controller.assistant = _assistant(stub, bus, Microphone())
+    offline.online = True
+    controller.set_mic(True)
+    assert wait_until(lambda: fetches, 5)
+    controller.set_mic(True)
+    controller.set_mic(True)
+    loading.set()
+    assert wait_until(lambda: (seen.last("config") or {}).get("mic_on") is True, 5)
+    assert len(fetches) == 1
+
+
 # The first start, as the app makes it ---------------------------------------------------
 
 
