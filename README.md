@@ -103,7 +103,7 @@ Iris ships as a self-contained app for Apple Silicon Macs (macOS 14 or later), p
 
 1. Have a language model server, as above.
 2. Open the disk image and drag **Iris** into **Applications**.
-3. Open Iris. Because the app is not notarized, macOS refuses the first time ("Apple could not verify..."). Click **Done**, then go to **System Settings > Privacy & Security**, scroll down to the message about Iris, click **Open Anyway**, and confirm. This is needed only once. If macOS instead says the app "is damaged", run `xattr -dr com.apple.quarantine /Applications/Iris.app` in Terminal and open it again.
+3. Open Iris. Released disk images are signed with a Developer ID and notarized by Apple, so the app opens like any other. A disk image built without a Developer ID is signed ad hoc only: macOS then refuses it the first time ("Apple could not verify..."). Click **Done**, then go to **System Settings > Privacy & Security**, scroll down to the message about Iris, click **Open Anyway**, and confirm. This is needed only once. If macOS instead says the app "is damaged", run `xattr -dr com.apple.quarantine /Applications/Iris.app` in Terminal and open it again.
 4. Allow the microphone when asked. The camera and screen recording are asked for the first time Iris uses them.
 5. Follow the setup screen. The speech models download once (about 2 GB) into `~/.cache/huggingface` and `~/.iris/models`.
 
@@ -352,11 +352,15 @@ npm run dist:mac        # -> ui/release/Iris-<version>-macOS-arm64.dmg
 
 `ui/scripts/package-mac.sh` does three things:
 
-1. It freezes the Python core with PyInstaller (`packaging/iris-rpc.spec`) into a standalone `iris-rpc` folder. The core's own Python, from a separate build environment in `packaging/.venv`, comes along, so the recipient needs no Python. `iris-rpc --check` then imports every engine inside the bundle (speech recognition on MLX and on the CPU, voice activity detection, turn detection, echo cancellation, Pocket TTS and Kokoro, web search, web pages, camera, screen capture, audio devices) and stops the build if one is missing.
+1. It freezes the Python core with PyInstaller (`packaging/iris-rpc.spec`) into a standalone `iris-rpc` folder. The core's own Python, from a separate build environment in `packaging/.venv`, comes along, so the recipient needs no Python. `iris-rpc --check` then imports every engine inside the bundle (speech recognition on MLX and on the CPU, voice activity detection, turn detection, echo cancellation, Pocket TTS and Kokoro, the voice itself, OpenAI-compatible model servers, web search, web pages, camera, screen capture, audio devices) and stops the build if one is missing.
 2. It builds the UI.
-3. It runs electron-builder, which puts the core into the app's `Resources` and writes the `.dmg`.
+3. It runs electron-builder, which puts the core into the app's `Resources`, signs the app under the hardened runtime (`ui/build/entitlements.mac.plist`) and writes the `.dmg`.
 
-What is not in the app: the speech models, which are downloaded at first launch (or taken from folders the recipient points to), and the language model server. The app is signed ad hoc, not with a Developer ID, and not notarized; `ui/build/entitlements.mac.plist` holds the entitlements a hardened, notarized build will need.
+What is not in the app: the speech models, which are downloaded at first launch (or taken from folders the recipient points to), and the language model server.
+
+**Signing and notarizing.** With a Developer ID Application certificate the app is signed with it: one in the login keychain is found by itself, or give it as `CSC_LINK` (a base64-encoded `.p12`, or its path) and `CSC_KEY_PASSWORD`. It is then notarized by Apple when `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` (an app-specific password of that Apple ID) and `APPLE_TEAM_ID` are set; electron-builder also takes a stored `notarytool` profile as `APPLE_KEYCHAIN_PROFILE`. Without a certificate, or with `CSC_IDENTITY_AUTO_DISCOVERY=false`, the app is signed ad hoc and not notarized.
+
+**In CI.** `.github/workflows/pack-electron.yml` builds the disk image on a macOS runner for every push to `main` (signed ad hoc, kept as an artifact of the run) and for every tag `v*` (signed with the Developer ID and notarized, using the repository secrets `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID`). A tag's disk image is uploaded to its GitHub release; a draft release is made if there is none. To release, set the version in `ui/package.json` and push a matching tag, e.g. `v0.2.0`.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 

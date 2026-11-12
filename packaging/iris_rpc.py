@@ -21,6 +21,8 @@ ENGINES = {
     "echo cancellation": "livekit.rtc",
     "speech synthesis (Pocket TTS)": "pocket_tts",
     "speech synthesis (Kokoro)": "kokoro_onnx",
+    "the voice (both engines)": "iris.tts",
+    "OpenAI-compatible model servers": "iris.llm_client",
     "web search": "ddgs",
     "web pages": "trafilatura",
     "camera": "cv2",

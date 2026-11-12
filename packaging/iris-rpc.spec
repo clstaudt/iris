@@ -57,10 +57,9 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    # Installed for other tools but never used by the core: torch only
-    # backs optional model conversion in CTranslate2 and MLX Whisper
+    # Installed for other tools but never used by the core. torch stays:
+    # Pocket TTS runs on it, and the voice imports it
     excludes=[
-        "torch",
         "torchvision",
         "torchaudio",
         "pandas",
