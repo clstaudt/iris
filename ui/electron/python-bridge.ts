@@ -260,8 +260,8 @@ export class PythonBridge {
       this.process.kill("SIGTERM");
       const proc = this.process;
       setTimeout(() => {
-        if (!proc.killed) proc.kill("SIGKILL");
-      }, 3000);
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+      }, 3000).unref();
     }
     this.process = null;
   }
