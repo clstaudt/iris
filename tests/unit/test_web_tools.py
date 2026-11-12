@@ -70,12 +70,6 @@ class TestEnableWebSearch:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def no_waiting(monkeypatch):
-    """Searches are tried again without the pauses between tries."""
-    monkeypatch.setattr("iris.plugins.web.time.sleep", lambda seconds: None)
-
-
 class TestSearch:
     @patch("iris.plugins.web.DDGS")
     def test_returns_formatted_results(self, mock_ddgs_cls):
@@ -92,7 +86,7 @@ class TestSearch:
         assert "Result 2" in result["result"]
         assert "https://one.com" in result["result"]
         mock_ddgs_cls.return_value.text.assert_called_once_with(
-            "test query", max_results=5, backend="auto"
+            "test query", max_results=5, backend="yahoo"
         )
 
     @patch("iris.plugins.web.DDGS")
@@ -298,8 +292,8 @@ class TestLLMSearchPrompt:
 class TestSearchTriedAgain:
     @patch("iris.plugins.web.DDGS")
     def test_engines_that_refused_are_asked_again(self, mock_ddgs_cls):
-        """ddgs says "No results found." when the engines it asked refused;
-        a moment later they answer."""
+        """ddgs says "No results found." when the engines it asked refused,
+        or answered in a page it cannot read; asked again, they answer."""
         mock_ddgs_cls.return_value.text.side_effect = [
             DDGSException("No results found."),
             [{"title": "Ali G Indahouse - Quotes", "body": "Keep it real", "href": "https://q.example"}],
@@ -309,14 +303,24 @@ class TestSearchTriedAgain:
         assert "Keep it real" in result["result"]
 
     @patch("iris.plugins.web.DDGS")
-    def test_duckduckgo_alone_last(self, mock_ddgs_cls):
+    def test_yahoo_six_times_then_every_engine(self, mock_ddgs_cls):
         mock_ddgs_cls.return_value.text.side_effect = DDGSException("No results found.")
         result = _web().execute("search", query="something nobody wrote")
         backends = [call.kwargs["backend"] for call in mock_ddgs_cls.return_value.text.call_args_list]
-        assert backends == ["auto", "auto", "duckduckgo"]
+        assert backends == ["yahoo"] * 6 + ["auto"]
         # Nothing found is said as such, not as a broken service
         assert result["success"] is True
         assert "No results found" in result["result"]
+
+    @patch("iris.plugins.web.DDGS")
+    def test_each_try_asks_as_another_browser(self, mock_ddgs_cls):
+        """ddgs picks the browser it asks as when it is made: a fresh one per
+        try, so a page for a phone that it cannot read is not asked for again."""
+        mock_ddgs_cls.return_value.text.side_effect = [DDGSException("No results found.")] * 2 + [
+            [{"title": "Reykjavik", "body": "About 140,000 people", "href": "https://r.example"}]
+        ]
+        assert "140,000" in _web().execute("search", query="population of Reykjavik")["result"]
+        assert mock_ddgs_cls.call_count == 3
 
     @patch("iris.plugins.web.DDGS")
     def test_a_network_failure_is_tried_again_then_reported(self, mock_ddgs_cls):
@@ -347,7 +351,7 @@ class TestSearchTriedAgain:
             DDGSException("No results found."),
             TimeoutException("operation timed out"),
             [],
-        ]
+        ] + [DDGSException("ConnectError: Connection refused")] * 3
         result = _web().execute("search", query="something nobody wrote")
         assert result["success"] is True
         assert result["result"] == "No results found."

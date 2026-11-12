@@ -504,11 +504,6 @@ class TestToolLoop:
 
 
 class TestFakeWeb:
-    @pytest.fixture(autouse=True)
-    def quick_tries(self, monkeypatch):
-        """Iris tries a search three times, at once here."""
-        monkeypatch.setattr(web, "SEARCH_TRIES", tuple((backend, 0.0) for backend, _ in web.SEARCH_TRIES))
-
     def test_searches_and_pages_are_scripted_recorded_and_restored(self):
         ddgs, reader = getattr(web, "DDGS", None), web.trafilatura
         pages = {"https://sport.example/report": "The winning goal came late.", "https://sport.example/gone": None}

@@ -1,7 +1,6 @@
 """The web: Iris searches it for current facts and reads pages."""
 
 import logging
-import time
 
 from iris.plugin import Plugin, PluginContext, Tool
 
@@ -40,11 +39,19 @@ BROWSE_GUIDANCE = (
 )
 
 
-# Tries of a search: the engines ddgs asks (auto), again after a moment,
-# then DuckDuckGo alone. ddgs raises "No results found." both when there are
-# none and when the engines it asked refused (rate limits), which a moment
-# later often answer.
-SEARCH_TRIES = (("auto", 0.0), ("auto", 0.8), ("duckduckgo", 1.5))
+# Tries of a search, each with a fresh DDGS, until one finds something.
+# Measured with ddgs 9.16, most of its engines turn a script away
+# (DuckDuckGo with a bot check or by not answering, Brave with a rate
+# limit, Google with 403, Mojeek with a captcha), which ddgs reports as
+# nothing found. Yahoo answers, but ddgs asks as a browser picked at
+# random, and Yahoo's page for a phone (and for some Safari versions) is
+# one ddgs cannot read: a third to a half of its answers come back empty
+# although Yahoo found plenty. Such an answer comes quickly, and a fresh
+# DDGS is another browser, so Yahoo is asked up to six times, then every
+# engine ddgs has (auto), for a network where others answer.
+SEARCH_TRIES = ("yahoo",) * 6 + ("auto",)
+# Results the model gets
+MAX_RESULTS = 5
 # What ddgs raises when the engines answered and none found anything; any
 # other DDGSException is an engine it could not reach, or that timed out
 NOTHING_FOUND = "No results found."
@@ -52,7 +59,7 @@ NOTHING_FOUND = "No results found."
 
 def search(query: str) -> dict:
     """
-    Search the web using DuckDuckGo.
+    Search the web with ddgs's engines.
 
     Args:
         query: Search query string
@@ -65,10 +72,9 @@ def search(query: str) -> dict:
     """
     logger.info("Searching: %s", query)
     error, answered = None, False
-    for backend, wait in SEARCH_TRIES:
-        time.sleep(wait)
+    for backend in SEARCH_TRIES:
         try:
-            results = DDGS().text(query, max_results=5, backend=backend)
+            results = DDGS().text(query, max_results=MAX_RESULTS, backend=backend)
         except Exception as e:
             if isinstance(e, DDGSException) and str(e) == NOTHING_FOUND:
                 logger.info("Search found nothing (%s): %s", backend, query)
