@@ -32,6 +32,20 @@ class TestHeardPart:
     def test_less_than_the_first_word(self):
         assert heard_part(self.TEXT, 0.05) == ""
 
+    def test_japanese_and_chinese_are_heard_up_to_the_cut(self):
+        """They put no spaces between words: a clip cut short kept nothing
+        of what was heard, as if the user had heard none of it."""
+        japanese = "東京の明日の天気は晴れで、最高気温は十八度です。"
+        assert heard_part(japanese, 0.5) == japanese[: len(japanese) // 2]
+        chinese = "北京明天是晴天，最高气温十八度左右。"
+        assert heard_part(chinese, 0.5) == chinese[: len(chinese) // 2]
+        assert heard_part(chinese, 0.0) == ""
+
+    def test_a_latin_word_in_japanese_is_still_not_cut_in_half(self):
+        text = "今日はFootballの試合です。"
+        inside = (text.index("Football") + 3) / len(text)
+        assert heard_part(text, inside) == "今日は"
+
 
 class InstantGenerator:
     def generate(self, text, language="en"):

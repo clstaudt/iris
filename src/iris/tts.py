@@ -312,6 +312,11 @@ class KokoroGenerator(SpeechEngine):
             return None
 
 
+# Characters that stand alone, as Japanese and Chinese (and Korean) put no
+# spaces between words
+STANDS_ALONE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]")
+
+
 def heard_part(text: str, fraction: float) -> str:
     """The words of a spoken text that were heard out by the time this
     fraction of its audio had played (judged by length: speech goes through
@@ -319,11 +324,15 @@ def heard_part(text: str, fraction: float) -> str:
     end = int(len(text) * max(0.0, min(1.0, fraction)))
     if end >= len(text):
         return text
-    if not text[end].isspace():
-        # Cut in the middle of a word, which was not heard out
-        end = max(text.rfind(" ", 0, end), text.rfind("\n", 0, end))
-        if end < 0:
-            return ""
+
+    def inside_a_word(at: int) -> bool:
+        before, after = text[at - 1], text[at]
+        spaced = not (STANDS_ALONE.match(before) or STANDS_ALONE.match(after))
+        return spaced and not before.isspace() and not after.isspace()
+
+    # Cut in the middle of a word, which was not heard out: back to its start
+    while end > 0 and inside_a_word(end):
+        end -= 1
     return text[:end].rstrip()
 
 
