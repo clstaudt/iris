@@ -24,6 +24,7 @@ from iris.personas import Persona, get_persona
 from iris.plugin import Plugin, PluginContext
 from iris.plugins import BUILT_IN
 from iris.status import StatusManager
+from iris.timing import TurnTiming
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
 from iris.tts import SpeechGenerator, SpeechPipeline
@@ -77,6 +78,9 @@ def _echo_canceller() -> Optional[EchoCanceller]:
 
 class VoiceAssistant:
     """Voice assistant with speech-to-text, LLM, and text-to-speech."""
+
+    # Where the current turn's time goes, reported once the reply is heard
+    _timing: Optional[TurnTiming] = None
 
     def __init__(
         self,
@@ -213,6 +217,7 @@ class VoiceAssistant:
             models_dir=tts_models_dir,
         )
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
+        self.speech_pipeline.on_reply_audio = self._reply_heard
 
         if self.event_bus:
             self.speech_pipeline.on_output_level = lambda level: self.event_bus.emit(
@@ -295,6 +300,46 @@ class VoiceAssistant:
             ),
             "plugins": self.plugin_states(),
         }
+
+    def _timing_components(self) -> dict:
+        """What ran each stage of a turn, so a measurement can be matched to
+        the setup it was taken with."""
+        recorder = getattr(self, "recorder", None)
+        transcriber = getattr(self, "transcriber", None)
+        speech = getattr(self, "tts_generator", None)
+        return {
+            "turn_end": "smart_turn" if getattr(recorder, "turn_end", None) else "silence",
+            "recognition": f"{getattr(self, 'recognition_engine', '')}:"
+            f"{getattr(transcriber, 'model_name', '')}",
+            "reply": getattr(getattr(self, "conversation", None), "model", ""),
+            "voice": f"{getattr(speech, 'engine', '')}:{getattr(speech, 'voice', '')}",
+        }
+
+    def _report_timing(self):
+        """Send the current turn's timing to the app, once."""
+        timing = self._timing
+        if timing is None or timing.reported:
+            return
+        timing.reported = True
+        if self.event_bus:
+            self.event_bus.emit("turn.timing", timing.event())
+
+    def _reply_heard(self):
+        """The voice started saying the reply: the turn's timing is complete."""
+        timing = self._timing
+        if timing is not None and not timing.reported:
+            timing.first_audio()
+            self._report_timing()
+
+    def _reply_piece(self):
+        """A part of the reply is ready to be spoken."""
+        timing = self._timing
+        if timing is None:
+            return
+        timing.first_piece()
+        # Without the voice, the reply is complete once it is written
+        if not self.speak_replies:
+            self._report_timing()
 
     def plugin_states(self) -> list[dict]:
         """The plugins for the app: {id, label, active, available, source};
@@ -524,6 +569,7 @@ class VoiceAssistant:
     def _answer_typed(self, turn: dict):
         text = turn["text"]
         attachments = turn.get("attachments") or []
+        self._timing = TurnTiming("text", components=self._timing_components())
         if self.event_bus:
             event = {
                 "text": text,
@@ -564,7 +610,15 @@ class VoiceAssistant:
         with self.status_manager.status_lock:
             self.status_manager.status_understanding = True
 
+        turn_wait = getattr(getattr(self, "recorder", None), "last_turn_wait", None)
+        recognizing = time.monotonic()
         text, detected_language = self.transcriber.transcribe(audio_path)
+        self._timing = TurnTiming(
+            "voice",
+            turn_end=turn_wait,
+            recognition=time.monotonic() - recognizing,
+            components=self._timing_components(),
+        )
 
         with self.status_manager.status_lock:
             self.status_manager.status_understanding = False
@@ -638,6 +692,8 @@ class VoiceAssistant:
             # Set the speech pipeline language for this turn
             self.speech_pipeline.current_language = response_language
             self.speech_pipeline.begin_reply()
+            if self._timing is not None:
+                self._timing.reply_started()
 
             # Stream the response
             full_response = []
@@ -686,6 +742,7 @@ class VoiceAssistant:
                         if not piece:
                             break
                         last_piece = len(piece)
+                        self._reply_piece()
                         self._speak(piece)
 
                 # Clear thinking status now that LLM is done
@@ -713,6 +770,7 @@ class VoiceAssistant:
             # Speak any remaining text that wasn't spoken yet, unless the
             # reply was stopped in the meantime
             if text_buffer.strip() and not self.interrupt_event.is_set():
+                self._reply_piece()
                 self._speak(text_buffer)
 
             # Wait for all speech to complete

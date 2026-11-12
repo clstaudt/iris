@@ -611,6 +611,9 @@ class SpeechPipeline:
 
         # Optional callback receiving playback level (0.0-1.0) for output meters
         self.on_output_level = None
+        # Optional callback for the moment the voice starts saying a reply
+        self.on_reply_audio = None
+        self._reply_heard = False
 
         # Queues for pipeline
         self.text_queue = queue.Queue()
@@ -701,8 +704,12 @@ class SpeechPipeline:
                 with self._status_lock:
                     playing = epoch == self._epoch
                     # A preview in another voice is not part of the reply
+                    first = playing and not sound and not self._reply_heard
                     if playing and not sound:
                         self._playing = text
+                        self._reply_heard = True
+                if first and self.on_reply_audio:
+                    self.on_reply_audio()
                 if playing:
                     self.is_speaking_flag.set()
                     effect = {}
@@ -770,6 +777,7 @@ class SpeechPipeline:
         """Start keeping track of what is said of a new reply."""
         with self._status_lock:
             self._said = []
+            self._reply_heard = False
 
     def said(self) -> str:
         """What has been said of the current reply so far, as far as it was
