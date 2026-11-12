@@ -18,6 +18,7 @@ ENGINES = {
     "speech recognition (CPU)": "faster_whisper",
     "voice activity detection": "faster_whisper.vad",
     "turn detection": "iris.turns",
+    "echo cancellation": "livekit.rtc",
     "speech synthesis": "kokoro_onnx",
     "web search": "ddgs",
     "web pages": "trafilatura",

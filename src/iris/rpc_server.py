@@ -132,6 +132,9 @@ def main():
         "voice.set_output": lambda params: controller.set_voice_output(
             bool(params.get("enabled", True))
         ),
+        "voice.set_barge_in": lambda params: controller.set_barge_in(
+            bool(params.get("enabled", True))
+        ),
         "tools.set": lambda params: controller.set_tool(
             params.get("name", ""), bool(params.get("enabled", True))
         ),

@@ -16,7 +16,22 @@ import scipy.signal as signal
 import sounddevice as sd
 import soundfile as sf
 
-from iris.turns import FRAME, SAMPLE_RATE, SmartTurn, SpeechDetector, TurnTracker
+from iris.echo import STEP, EchoCanceller
+from iris.turns import (
+    FRAME,
+    HOLD,
+    HOLD_CERTAIN,
+    HOLD_CERTAIN_TIME,
+    HOLD_SETTLE,
+    HOLD_SPEECH,
+    HOLD_THRESHOLD,
+    HOLD_TRIGGER,
+    SAMPLE_RATE,
+    SPEECH_THRESHOLD,
+    SmartTurn,
+    SpeechDetector,
+    TurnTracker,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -174,6 +189,7 @@ class AudioRecorder:
         chunk_duration: float = 2.0,
         device: int | None = None,
         turn_end: SmartTurn | None = None,
+        echo: EchoCanceller | None = None,
     ):
         """
         Initialize audio recorder.
@@ -187,6 +203,7 @@ class AudioRecorder:
             chunk_duration: Duration of chunks for streaming transcription
             device: Input device index (None = system default)
             turn_end: Smart Turn, which hears when a turn is finished
+            echo: Takes the voice out of what listen_on() hears while it speaks
         """
         self.sample_rate = sample_rate
         self.silence_threshold = silence_threshold
@@ -194,6 +211,7 @@ class AudioRecorder:
         self.chunk_duration = chunk_duration
         self.device = device
         self.turn_end = turn_end
+        self.echo = echo
         self._speech: SpeechDetector | None = None  # loaded on first listen()
         self._device_error = False  # Track if we've had a device error
 
@@ -330,11 +348,14 @@ class AudioRecorder:
     def listen_on(
         self,
         turn: str,
-        on_speech: Callable[[], None],
+        on_speech: Callable[[], bool],
         until: Callable[[], bool],
         should_stop: Callable[[], bool] | None = None,
         on_level: Callable[[float], None] | None = None,
         silence_duration: float | None = None,
+        speaking: Callable[[], bool] | None = None,
+        hold: Callable[[], None] | None = None,
+        release: Callable[[], None] | None = None,
     ) -> str | None:
         """
         Keep listening after a turn seemed over, while it is being answered.
@@ -344,25 +365,51 @@ class AudioRecorder:
         once and the rest of the turn is recorded until it ends, judged as a
         whole with what came before.
 
+        Given speaking, the user is also heard over the voice, with the echo
+        canceller taking it out of the microphone. What it leaves of the
+        voice can still sound like speech, so speech over the voice holds it
+        (hold() pauses it), and the microphone listens in the quiet: the user
+        goes on speaking, the voice's echo dies away with it. Speech more
+        certain than any echo the settled canceller leaves is the user's too.
+        Echo lets the voice go on (release()). Until the canceller has
+        learned the room, it lets too much of the voice through for that:
+        speech over the voice is not listened to then.
+
         Args:
             turn: Path to the turn recorded by listen()
-            on_speech: Called as soon as the user goes on
+            on_speech: Called as soon as the user speaks; returns whether that
+                goes on with the earlier turn (False: a new turn begins)
             until: Listening ends when this returns True, unless the user has
-                gone on by then
+                spoken by then
             should_stop: Recording aborts (returning None) when this returns True
-            on_level: Audio level callback (0.0-1.0) once the user has gone on
+            on_level: Audio level callback (0.0-1.0) once the user has spoken
             silence_duration: As for listen()
+            speaking: Whether the voice is speaking; the user is heard over it
+            hold: Pauses the voice
+            release: Lets the voice go on after a hold
 
         Returns:
-            Path to the whole turn, earlier part included, or None if the user
-            did not go on
+            Path to the turn the user spoke (with the earlier one, if it went
+            on with it), or None if the user said nothing
         """
         before, _ = sf.read(turn, dtype="float32")
         silence = self.silence_duration if silence_duration is None else silence_duration
-        tracker = TurnTracker(self._detector(), self.turn_end, silence, before=before)
+        echo = self.echo if speaking is not None else None
+
+        def new_tracker() -> TurnTracker:
+            return TurnTracker(self._detector(), self.turn_end, silence, before=before)
+
+        tracker = new_tracker()
         level = self._level_meter(on_level)
+        frame_seconds = FRAME / self.sample_rate
+        trigger = round(HOLD_TRIGGER / frame_seconds)
+        certain_frames = round(HOLD_CERTAIN_TIME / frame_seconds)
+        # Frames in a row sure, and certain, to be speech, and whether speech
+        # was certain since listening began anew; while the voice is held,
+        # frames left to listen to, and how many after it died away were speech
+        sure, certain, was_certain, held, heard = 0, 0, False, 0, 0
         try:
-            with self._microphone() as frames:
+            with self._microphone(echo) as frames:
                 while True:
                     if should_stop and should_stop():
                         return None
@@ -372,11 +419,36 @@ class AudioRecorder:
                         frame = frames.get(timeout=0.05)
                     except queue.Empty:
                         continue
-                    went_on = tracker.started
+                    spoke = tracker.started
                     ended = tracker.feed(frame)
+                    sure = sure + 1 if tracker.probability >= HOLD_THRESHOLD else 0
+                    certain = certain + 1 if tracker.probability >= HOLD_CERTAIN else 0
+                    if certain >= certain_frames and echo is not None and echo.settled:
+                        was_certain = True
+                    if held:
+                        held -= 1
+                        settled = HOLD - held * frame_seconds > HOLD_SETTLE
+                        heard += settled and tracker.probability >= SPEECH_THRESHOLD
+                        if held:
+                            continue
+                        enough = heard * frame_seconds >= HOLD_SPEECH * (HOLD - HOLD_SETTLE)
+                        if not ((enough or was_certain) and tracker.started):
+                            # The voice's echo: it goes on, and so does listening
+                            release()
+                            tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
+                            continue
+                        spoke = False  # the user's: taken up below
+                    elif echo is not None and not spoke and (sure >= trigger or tracker.started):
+                        if speaking():
+                            if echo.settled:
+                                hold()
+                                held, heard = round(HOLD / frame_seconds), 0
+                            else:
+                                tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
+                            continue
                     if tracker.started:
-                        if not went_on:
-                            on_speech()
+                        if not spoke and not on_speech():
+                            tracker.forget_before()
                         level(frame)
                     if ended:
                         break
@@ -398,20 +470,29 @@ class AudioRecorder:
         return self._speech
 
     @contextmanager
-    def _microphone(self) -> Iterator[queue.Queue]:
-        """The microphone open, its audio arriving in 32 ms frames."""
-        frames: queue.Queue[np.ndarray] = queue.Queue()
+    def _microphone(self, echo: EchoCanceller | None = None) -> Iterator["_Frames"]:
+        """The microphone open, its audio arriving in 32 ms frames; without
+        what the speaker plays, given an echo canceller."""
+        frames = _Frames(echo)
 
         def audio_callback(indata, frame_count, time_info, status):
             """Callback for audio stream."""
-            frames.put(indata[:, 0].copy())
+            # When the block was captured, on the time.monotonic() clock
+            try:
+                lag = time_info.currentTime - time_info.inputBufferAdcTime
+            except AttributeError:
+                lag = 0.0
+            if not 0.0 < lag < 1.0:  # not reported
+                lag = frame_count / self.sample_rate
+            frames.put(indata[:, 0].copy(), time.monotonic() - lag)
 
         with sd.InputStream(
             samplerate=self.sample_rate,
             channels=1,
             dtype="float32",
             callback=audio_callback,
-            blocksize=FRAME,
+            # The echo canceller works in 10 ms steps
+            blocksize=3 * STEP if echo is not None else FRAME,
             device=self.device,
         ):
             yield frames
@@ -535,6 +616,29 @@ class AudioRecorder:
         return temp_file.name
 
 
+class _Frames:
+    """The microphone's audio in 32 ms frames, as the VAD takes it: cleaned
+    of the voice, given an echo canceller, outside the audio callback."""
+
+    def __init__(self, echo: EchoCanceller | None):
+        self._echo = echo
+        self._blocks: queue.Queue[tuple[np.ndarray, float]] = queue.Queue()
+        self._pending = np.zeros(0, dtype=np.float32)
+
+    def put(self, block: np.ndarray, captured: float):
+        self._blocks.put((block, captured))
+
+    def get(self, timeout: float) -> np.ndarray:
+        """The next frame; raises queue.Empty if none came within timeout."""
+        while len(self._pending) < FRAME:
+            block, captured = self._blocks.get(timeout=timeout)
+            if self._echo is not None:
+                block = self._echo.clean(block, captured)
+            self._pending = np.concatenate([self._pending, block])
+        frame, self._pending = self._pending[:FRAME], self._pending[FRAME:]
+        return frame
+
+
 # Frames per playback buffer: large, so generation never starves playback
 PLAYBACK_BLOCK = 32768
 
@@ -554,6 +658,8 @@ class AudioPlayer:
             audio_filter: Optional AudioFilter instance to apply to audio
         """
         self.audio_filter = audio_filter
+        # Told what is played, so the microphone can hear the user over it
+        self.echo: EchoCanceller | None = None
         self._paused = threading.Event()
         self._stopped = threading.Event()
         # Where the clip playing now is: (its length and sample rate, the
@@ -565,6 +671,8 @@ class AudioPlayer:
         """Stop any currently playing audio."""
         self._stopped.set()
         sd.stop()
+        if self.echo is not None:
+            self.echo.cut(time.monotonic())
 
     def pause(self):
         """Pause playback; play() holds its place until resume()."""
@@ -667,6 +775,8 @@ class AudioPlayer:
             except Exception:
                 latency = 0.0
             self._place = (len(audio), sample_rate, position, started + latency)
+            if self.echo is not None:
+                self.echo.played(started + latency, segment, sample_rate)
 
             level_thread = None
             level_stop = threading.Event()
@@ -698,6 +808,8 @@ class AudioPlayer:
             cut_by_pause = self._paused.is_set() and not stopped()
             if cut_by_pause or stopped():
                 sd.stop()
+                if self.echo is not None:
+                    self.echo.cut(time.monotonic())
 
             if level_thread:
                 level_stop.set()
