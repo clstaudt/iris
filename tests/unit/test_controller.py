@@ -219,6 +219,26 @@ def test_history_keeps_the_visible_conversation():
     assert events[1]["data"]["text"] == "Hello"
 
 
+def test_the_conversation_before_a_restart_comes_back_marked_as_such():
+    """The app shows these turns above whatever it said meanwhile."""
+    bus = EventBus()
+    controller = AssistantController(bus)
+    turns = [
+        {"role": "user", "text": "Hi", "source": "text"},
+        {"role": "system", "text": "a note", "source": None},
+        {"role": "assistant", "text": "Hello", "source": None},
+    ]
+    store = type("Store", (), {"recent_turns": lambda self: turns})()
+    controller.assistant = type("Assistant", (), {"memory": type("Memory", (), {"store": store})()})()
+    controller._restore_thread()
+
+    events = controller.history()["events"]
+    assert events == [
+        {"type": "chat.user", "data": {"text": "Hi", "source": "text", "restored": True}},
+        {"type": "chat.done", "data": {"text": "Hello", "interrupted": False, "restored": True}},
+    ]
+
+
 def test_a_silent_microphone_is_warned_about_once(monkeypatch):
     """A real microphone always hears some noise: exact zeros for more than
     four seconds mean the system withholds it. That is said once, not with

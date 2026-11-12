@@ -548,15 +548,24 @@ class AssistantController:
         return {"ok": True}
 
     def _restore_thread(self):
-        """Show the recent part of the continuous conversation after a restart."""
+        """Show the recent part of the continuous conversation after a restart.
+
+        The turns are marked as restored: they come once the models are
+        loaded, after what the app has said meanwhile (a microphone it may
+        not use, say), and go above it.
+        """
         memory = getattr(self.assistant, "memory", None)
         if memory is None:
             return
         for turn in memory.store.recent_turns():
             if turn["role"] == "user":
-                self.bus.emit("chat.user", {"text": turn["text"], "source": turn["source"]})
+                self.bus.emit(
+                    "chat.user", {"text": turn["text"], "source": turn["source"], "restored": True}
+                )
             elif turn["role"] == "assistant":
-                self.bus.emit("chat.done", {"text": turn["text"], "interrupted": False})
+                self.bus.emit(
+                    "chat.done", {"text": turn["text"], "interrupted": False, "restored": True}
+                )
 
     def memory_topics(self) -> dict:
         """The topics Iris remembers, most recently discussed first."""

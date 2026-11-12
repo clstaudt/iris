@@ -416,6 +416,8 @@ class IrisStore {
   outputLevel = $state(0);
 
   private streamingIndex: number | null = null;
+  /** Turns from before this launch shown at the top so far */
+  private restoredCount = 0;
   /** Typed turns that started before their send() call returned. */
   private startedTurns = new Set<string>();
   private holding = false;
@@ -498,6 +500,17 @@ class IrisStore {
         break;
 
       case "chat.user": {
+        const message: ChatMessage = {
+          role: "user",
+          text: (data.text as string) ?? "",
+          source: (data.source as "voice" | "text") ?? "voice",
+          attachments: data.attachments as AttachmentInfo[] | undefined,
+          streaming: false,
+        };
+        if (data.restored) {
+          this.restore(message);
+          break;
+        }
         const id = data.id as string | undefined;
         if (id) {
           this.startedTurns.add(id);
@@ -506,13 +519,7 @@ class IrisStore {
           this.pending = this.pending.filter((p) => p.id !== id);
         }
         this.streamingIndex = null;
-        this.messages.push({
-          role: "user",
-          text: (data.text as string) ?? "",
-          source: (data.source as "voice" | "text") ?? "voice",
-          attachments: data.attachments as AttachmentInfo[] | undefined,
-          streaming: false,
-        });
+        this.messages.push(message);
         break;
       }
 
@@ -544,6 +551,10 @@ class IrisStore {
       }
 
       case "chat.done": {
+        if (data.restored) {
+          this.restore({ role: "assistant", text: (data.text as string) ?? "", streaming: false });
+          break;
+        }
         if (this.streamingIndex !== null && this.messages[this.streamingIndex]) {
           this.messages[this.streamingIndex].text = (data.text as string) ?? "";
           this.messages[this.streamingIndex].streaming = false;
@@ -596,6 +607,15 @@ class IrisStore {
         });
         break;
     }
+  }
+
+  /** A turn of the conversation before this launch, as memory kept it: it
+   *  goes above everything said since, notices included, which stay where
+   *  they are seen. */
+  private restore(message: ChatMessage) {
+    const at = this.restoredCount++;
+    this.messages.splice(at, 0, message);
+    if (this.streamingIndex !== null && this.streamingIndex >= at) this.streamingIndex++;
   }
 
   // ------------------------------------------------------------------
@@ -1083,9 +1103,10 @@ class IrisStore {
     onEvent((type, data) => this.handleEvent(type, data));
 
     const micStatus = await window.iris.micStatus();
+    let micNotice: ChatMessage | null = null;
     if (micStatus !== "granted") {
       const packaged = await window.iris.isPackaged();
-      this.messages.push({
+      micNotice = {
         role: "error",
         text: packaged
           ? `Microphone access ${micStatus}. Enable it for Iris under System ` +
@@ -1094,8 +1115,13 @@ class IrisStore {
             `Privacy & Security > Microphone for the app that launched this dev ` +
             `server (Cursor, VS Code, Terminal or iTerm), then relaunch it.`,
         streaming: false,
-      });
+      };
     }
+    // Said below the conversation rebuilt after a reload, where it is seen
+    const sayMicNotice = () => {
+      if (micNotice) this.messages.push(micNotice);
+      micNotice = null;
+    };
 
     try {
       const info = await rpc<AppInfo>("app.info");
@@ -1117,6 +1143,7 @@ class IrisStore {
           console.warn("[store] chat.history unavailable:", err);
         }
       }
+      sayMicNotice();
 
       // First launch: nothing starts (or downloads) until the user has said
       // which server, model and speech models to use
@@ -1159,6 +1186,7 @@ class IrisStore {
     } catch (err) {
       this.messages.push({ role: "error", text: `Iris could not be started again: ${err}`, streaming: false });
     }
+    sayMicNotice();
   }
 
   /** Save the first-launch choices and start Iris with them. The setup
