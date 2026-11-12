@@ -41,6 +41,10 @@ IMAGE_UNSEEN = (
 )
 # How Ollama refuses a request with tools for a model that cannot take them
 TOOLS_REFUSED = "does not support tools"
+# The source of a turn Iris opens itself, such as its greeting at the end of
+# the walkthrough: what it was asked to do is kept as a note, not as the
+# user's words
+OPENING = "opening"
 
 
 def ollama_client(host: Optional[str] = None, **kwargs):
@@ -566,19 +570,21 @@ class ConversationManager:
         self.unremembered = []
 
     def _record(self, prompt: str, answer: str, source: Optional[str]):
-        """Keep the exchange: in memory when there is one, else in history."""
+        """Keep the exchange: in memory when there is one, else in history.
+        A turn Iris opened itself keeps what it was asked as a note."""
         # Only what was said: a tool call typed out as text, left in the
         # history, would be imitated in later replies
         answer = strip_markup(answer)
+        role = "system" if source == OPENING else "user"
         if self.memory is not None and self.amnesia:
-            self.unremembered.append({"role": "user", "content": prompt})
+            self.unremembered.append({"role": role, "content": prompt})
             self.unremembered.append({"role": "assistant", "content": answer})
             return
         if self.memory is None:
-            self.conversation_history.append({"role": "user", "content": prompt})
+            self.conversation_history.append({"role": role, "content": prompt})
             self.conversation_history.append({"role": "assistant", "content": answer})
             return
-        self.memory.store.add_turn("user", prompt, source)
+        self.memory.store.add_turn(role, prompt, None if role == "system" else source)
         self.memory.store.add_turn("assistant", answer)
         self.memory.note_turn()
 
