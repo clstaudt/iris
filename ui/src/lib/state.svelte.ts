@@ -845,13 +845,16 @@ class IrisStore {
 
   /** Switch to a setup: its choices are applied one after the other. */
   async useSetup(id: string) {
-    const target = this.setups[id];
+    // As the setup holds them now: each choice applied is remembered in the
+    // setup in use, which this one is from here on
+    const target = $state.snapshot(this.setups[id]);
     if (!target) return;
     this.activeSetup = id;
     this.saveSetups();
     const config = this.config;
     if ((target.ollama_host ?? "") !== (config?.ollama_host ?? "")) {
-      await this.setOllamaHost(target.ollama_host ?? "");
+      // With the setup's model, not the one last used on that server
+      await this.setOllamaHost(target.ollama_host ?? "", target.llm_model);
     }
     if (target.llm_model && target.llm_model !== this.config?.llm_model) {
       await this.setModel(target.llm_model);
@@ -968,8 +971,9 @@ class IrisStore {
   }
 
   /** Point the core at another Ollama server ("" = default); on success the
-   *  model list is refreshed, since it differs per server. */
-  async setOllamaHost(url: string): Promise<string | null> {
+   *  model list is refreshed, since it differs per server, and a model of
+   *  that server is chosen: this one if it has it. */
+  async setOllamaHost(url: string, model?: string): Promise<string | null> {
     const result = await rpc<{ ok: boolean; error?: string; host?: string }>(
       "llm.set_host",
       { url }
@@ -988,7 +992,7 @@ class IrisStore {
       "llm.list"
     );
     this.models = llms.models;
-    await this.modelForServer(host);
+    await this.modelForServer(host, model);
     return null;
   }
 
@@ -1000,16 +1004,17 @@ class IrisStore {
     saveSettings({ servers: $state.snapshot(this.servers) });
   }
 
-  /** After switching servers: the model last used on this one, or, when the
-   *  model in use is not on it, the first it has (one that takes tools if
-   *  there is one). */
-  private async modelForServer(host: string) {
+  /** After switching servers: the model asked for if the server has it,
+   *  else the model last used on this one, or, when the model in use is not
+   *  on it, the first it has (one that takes tools if there is one). */
+  private async modelForServer(host: string, wanted?: string) {
     const names = this.models.map((m) => m.name);
     if (names.length === 0) return;
     const remembered = loadSettings().server_models?.[host];
     const current = this.config?.llm_model ?? "";
     let model: string | undefined;
-    if (remembered && names.includes(remembered)) model = remembered;
+    if (wanted && names.includes(wanted)) model = wanted;
+    else if (remembered && names.includes(remembered)) model = remembered;
     else if (!names.includes(current)) {
       model = (this.models.find((m) => m.tools) ?? this.models[0]).name;
     }
