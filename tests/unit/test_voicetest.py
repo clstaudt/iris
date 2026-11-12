@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import ollama
 import pytest
+from ddgs.exceptions import DDGSException
 
 from iris.events import EventBus
 from iris.llm import ConversationManager
@@ -562,6 +563,22 @@ class TestFakeWeb:
             assert "Real: weather (https://real.example)" in web.search("weather")["result"]
             assert fake.searches()[0].outcome == "results"
         assert web.DDGS is Network
+
+    @pytest.mark.parametrize("message, outcome", [("No results found.", "nothing"),
+                                                  ("ConnectError: Connection refused", "error")])
+    def test_the_real_web_finding_nothing_is_told_from_a_failure(self, monkeypatch, message, outcome):
+        class Network:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def text(self, query, max_results=5, **kwargs):
+                raise DDGSException(message)
+
+        monkeypatch.setattr(web, "DDGS", Network)
+        with FakeWeb(real=True) as fake:
+            web.search("weather")
+            (call,) = fake.searches()
+            assert call.outcome == outcome and call.tries == len(web.SEARCH_TRIES)
 
     def test_results_from_text(self):
         assert as_results("- Paris weather: tomorrow 22 degrees (weather.example/paris)") == [

@@ -4,7 +4,7 @@ import threading
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
-from ddgs.exceptions import DDGSException
+from ddgs.exceptions import DDGSException, TimeoutException
 
 from iris.plugins import web
 from iris.tools import Tools
@@ -324,3 +324,30 @@ class TestSearchTriedAgain:
             [{"title": "Back", "body": "up", "href": "https://b.example"}]
         ]
         assert _web().execute("search", query="anything")["success"] is True
+
+    @pytest.mark.parametrize("error", [
+        DDGSException("ConnectError: Connection refused"),
+        TimeoutException("operation timed out"),
+    ])
+    @patch("iris.plugins.web.DDGS")
+    def test_engines_out_of_reach_are_a_failure_not_nothing_found(self, mock_ddgs_cls, error):
+        """ddgs raises its own exception when it cannot reach the engines
+        or they time out: the search could not be made, which the model
+        says, rather than that nothing was found."""
+        mock_ddgs_cls.return_value.text.side_effect = error
+        result = _web().execute("search", query="weather in Lisbon")
+        assert result["success"] is False
+        assert str(error) in result["message"]
+        assert mock_ddgs_cls.return_value.text.call_count == len(web.SEARCH_TRIES)
+
+    @patch("iris.plugins.web.DDGS")
+    def test_nothing_found_by_engines_that_answered_is_nothing_found(self, mock_ddgs_cls):
+        mock_ddgs_cls.return_value.text.side_effect = [
+            DDGSException("ConnectError: Connection refused"),
+            DDGSException("No results found."),
+            TimeoutException("operation timed out"),
+            [],
+        ]
+        result = _web().execute("search", query="something nobody wrote")
+        assert result["success"] is True
+        assert result["result"] == "No results found."

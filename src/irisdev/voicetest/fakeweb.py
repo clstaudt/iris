@@ -246,7 +246,7 @@ class FakeWeb:
             found = as_results(answer)[:max_results]
             call.outcome, call.result = ("results" if found else "nothing"), found
             if not found and DDGSException is not None:
-                raise DDGSException("No results found.")
+                raise DDGSException(web.NOTHING_FOUND)
             return found
         finally:
             call.end = time.monotonic()
@@ -279,7 +279,8 @@ class FakeWeb:
                     call.outcome, call.result = ("results" if found else "nothing"), found
                     return found
                 except Exception as error:
-                    nothing = DDGSException is not None and isinstance(error, DDGSException)
+                    nothing = (DDGSException is not None and isinstance(error, DDGSException)
+                               and str(error) == web.NOTHING_FOUND)
                     call.outcome, call.result = ("nothing" if nothing else "error"), repr(error)
                     raise
                 finally:
