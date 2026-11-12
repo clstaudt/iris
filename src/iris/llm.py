@@ -223,6 +223,10 @@ class ConversationManager:
         # The client replies stream through while self.client is the ollama
         # module, whose shared client must stay open
         self._own_client = None
+        # The client of the reply being streamed: all its rounds go to the
+        # server it began on, and cancel() cuts that one off, also after a
+        # switch to another server
+        self._streaming = None
         self.memory = memory
         # Recalled topics stay in context for a few turns: {topic_id: turns left}
         self.pinned: dict[int, int] = {}
@@ -284,7 +288,8 @@ class ConversationManager:
             return []
 
     def set_host(self, host: Optional[str]):
-        """Switch to another server, keeping the conversation history."""
+        """Switch to another server, keeping the conversation history. A
+        reply being streamed goes on with the server it began on."""
         self.host = normalize_host(host)
         self.client = ollama_client(self.host)
         self.reachable = True  # set_host is only called for a server that answered
@@ -663,9 +668,14 @@ class ConversationManager:
         """
         self.reply = None
         self._cancelled.clear()
-        yield from self._reply_stream(
-            prompt, response_language, on_tool_use, source, attachments or [], on_tool_result
-        )
+        client = self._streaming = self._reply_client()
+        try:
+            yield from self._reply_stream(
+                prompt, response_language, on_tool_use, source, attachments or [], on_tool_result
+            )
+        finally:
+            if self._streaming is client:
+                self._streaming = None
         if keep:
             self._record(recorded_text(prompt, attachments or []), self.reply, source)
 
@@ -675,13 +685,15 @@ class ConversationManager:
         tool or tool round starts. The stream then ends or fails; whoever
         cancelled no longer listens to it."""
         self._cancelled.set()
-        client = self._reply_client()
+        client = self._streaming or self._reply_client()
         if client is self._own_client:
             self._own_client = None
-        else:
+        elif client is self.client:
             self.client = ollama_client(self.host)
             if getattr(client, "tools_refused", False):
                 self.client.tools_refused = True
+        # Otherwise the reply came from a server since switched away from,
+        # whose client is no longer kept
         try:
             client._client.close()  # the client's httpx.Client
         except Exception:
@@ -698,8 +710,9 @@ class ConversationManager:
         return self._own_client
 
     def _ask(self, model: str, messages: list, **extra):
-        """Ask the model for a streamed reply to these messages."""
-        return self._reply_client().chat(
+        """Ask the model for a streamed reply to these messages, on the
+        server the reply began on."""
+        return (self._streaming or self._reply_client()).chat(
             model=model, messages=system_first(messages), stream=True, **extra
         )
 
