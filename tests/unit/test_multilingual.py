@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from kokoro_onnx.config import SUPPORTED_LANGUAGES
+from kokoro_onnx.tokenizer import Tokenizer
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 
 from iris.controller import PREVIEW_LINES, AssistantController
@@ -362,6 +363,23 @@ def test_kokoro_onnx_is_only_given_languages_it_takes_and_phonemes_for_the_rest(
             if info["code"] not in SUPPORTED_LANGUAGES:
                 phonemize.assert_called_once_with("Text.", info["code"])
                 assert spoken["phonemes"] is phonemize.return_value
+
+
+@pytest.mark.parametrize(
+    "code, text, word",
+    [("fr-fr", "J'aime le football.", "fˈʊtbɔːl"), ("hi", "मैं Nova हूँ।", "nˈəʊvə"),
+     ("cmn", "我喜欢Queen的歌。", "kwˈiːn")],
+)  # fmt: skip
+def test_a_word_espeak_reads_as_english_is_said_without_the_switch(code, text, word):
+    """espeak marks where it reads a word as English, "(en)fˈʊtbɔːl(fr)";
+    Kokoro said the marks: "en football fr". Real espeak, through Kokoro's
+    tokenizer as Iris sets it up."""
+    try:
+        phonemes = Tokenizer().phonemize(text, code)
+    except RuntimeError as error:
+        pytest.skip(f"espeak cannot run here: {error}")
+    assert word in phonemes
+    assert "en" + word not in phonemes
 
 
 def test_each_pocket_language_has_a_voice_of_its_own():

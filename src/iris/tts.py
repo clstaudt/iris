@@ -44,6 +44,10 @@ class KeptEspeak:
     about 1.5 s on an M3: three times what the voice model needs for a
     sentence. This phonemizes the same way, with one espeak per language,
     loaded once and kept.
+
+    Where espeak reads a word as English ("football" in French), it marks
+    the switch, "(en)fˈʊtbɔːl(fr)". Kokoro would say the marks ("en
+    football fr"), so they are dropped, as Kokoro's own pipeline drops them.
     """
 
     def __init__(self):
@@ -58,7 +62,10 @@ class KeptEspeak:
             backend = self._backends.get(key)
             if backend is None:
                 backend = EspeakBackend(
-                    language, preserve_punctuation=preserve_punctuation, with_stress=with_stress
+                    language,
+                    preserve_punctuation=preserve_punctuation,
+                    with_stress=with_stress,
+                    language_switch="remove-flags",
                 )
                 self._backends[key] = backend
             lines = [line.strip(os.linesep) for line in str2list(text)]
