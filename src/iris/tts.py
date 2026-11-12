@@ -357,6 +357,20 @@ KOKORO_VOICE_LANGUAGES = {
     "p": ("pt", "Portuguese"),
     "z": ("zh", "Chinese"),
 }
+# A word in each language a voice speaks, said (and not played) to load what
+# speaking the language needs
+GREETINGS = {
+    "en": "Hello.",
+    "fr": "Bonjour.",
+    "it": "Ciao.",
+    "de": "Hallo.",
+    "es": "Hola.",
+    "pt": "Olá.",
+    "nl": "Hallo.",
+    "hi": "नमस्ते।",
+    "ja": "こんにちは。",
+    "zh": "你好。",
+}
 LANGUAGE_NAMES = {
     "en": "English",
     "fr": "French",
@@ -580,12 +594,9 @@ class SpeechGenerator:
         self._engines: dict[str, SpeechEngine] = {}
         # Replies and previews may ask for speech at the same time
         self._lock = threading.Lock()
-        # Told (a message for the user) when an engine, or its model for a
-        # language, cannot be loaded; once, until it speaks again
-        self.on_failure: Callable[[str], None] | None = None
-        self._failing: set[tuple[str, str]] = set()
-        if prepare:
-            self.prepare()
+        # (engine, language) prepared for their first reply
+        self._prepared: set[tuple[str, str]] = set()
+        self.prepare()
 
     def speaks(self, language: str) -> bool:
         """Whether replies in this language can be spoken in it."""
@@ -599,6 +610,30 @@ class SpeechGenerator:
         """Load the current engine now, so its first reply is not delayed."""
         with self._lock:
             self._engine(self.engine).prepare()
+
+    def prepare_language(self, language: str):
+        """Load what a reply in this language needs before it comes, while
+        the model thinks: the engine the persona borrows for it, and the
+        language's model, voice or phonemes. The first reply in a language
+        would otherwise wait seconds for them (Kokoro and espeak's Japanese,
+        for a Kyutai persona). Once per engine and language."""
+        speaker = speaking_engine(self.engine, language)
+        if speaker is None:
+            return
+        engine, voice = speaker[0], speaker[1] or self.voice
+        if (engine, language) in self._prepared:
+            return
+        with self._lock:
+            try:
+                generator = self._engine(engine)
+                generator.voice = voice
+                path = generator.generate(GREETINGS.get(language, GREETINGS["en"]), language=language)
+            except Exception:
+                logger.exception("Could not prepare the voice for %s", language)
+                return
+        if path:
+            Path(path).unlink(missing_ok=True)
+        self._prepared.add((engine, language))
 
     def _engine(self, engine: str) -> SpeechEngine:
         if engine not in self._engines:

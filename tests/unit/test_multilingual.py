@@ -401,6 +401,31 @@ def test_borrowed_pocket_tts_loads_only_the_model_of_its_language():
         assert pocket.load_model.call_args_list == [call(language="german")]
 
 
+def test_the_voice_for_a_language_is_prepared_once_ahead_of_its_first_reply():
+    """A Kyutai persona's first Japanese reply waited three seconds for
+    Kokoro and espeak's Japanese to load; prepared while the model thinks,
+    they are ready when the reply comes."""
+    with patch("iris.tts.TTSModel") as pocket, patch("iris.tts.Kokoro") as kokoro, patch.object(
+        KokoroGenerator, "_locate_models", return_value=("/m.onnx", "/v.bin")
+    ):
+        pocket.load_model.return_value.sample_rate = 24000
+        pocket.load_model.return_value.generate_audio.return_value = torch.zeros(100)
+        kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
+        generator = SpeechGenerator("kyutai", "alba")
+        assert not kokoro.called
+
+        generator.prepare_language("ja")
+        generator.prepare_language("ja")
+        [spoken] = kokoro.return_value.create.call_args_list
+        assert (spoken.kwargs["voice"], spoken.kwargs["lang"]) == ("jf_alpha", "ja")
+
+        generator.prepare_language("de")
+        assert call(language="german") in pocket.load_model.call_args_list
+        # A language no voice speaks has nothing to prepare
+        generator.prepare_language("ru")
+        assert kokoro.return_value.create.call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # The language a text is written in
 # ---------------------------------------------------------------------------
