@@ -237,7 +237,7 @@
             <option value={device.index}>{device.name}</option>
           {/each}
         </select>
-        <div class="meter" aria-hidden="true">
+        <div class="s-meter" aria-hidden="true">
           {#each Array(METER_BARS) as _, i}
             <i class:lit={i / METER_BARS < Math.min(1, store.level * 6)}></i>
           {/each}
@@ -518,7 +518,7 @@
       <section class="sec">
         <div class="s-option active">
           <button
-            class="play {store.previewing === `${config?.tts_engine}:${config?.tts_voice}` ? 'playing' : ''}"
+            class="s-play {store.previewing === `${config?.tts_engine}:${config?.tts_voice}` ? 'playing' : ''}"
             onclick={previewVoice}
             aria-label="Play"
           >
@@ -596,27 +596,6 @@
     flex-direction: column;
     gap: 0.5rem;
   }
-  .meter {
-    display: flex;
-    height: 18px;
-    align-items: flex-end;
-    gap: 3px;
-    padding-top: 0.25rem;
-  }
-  .meter i {
-    width: 4px;
-    height: 4px;
-    border-radius: 1px;
-    background: var(--color-petal-cyan);
-    opacity: 0.25;
-    transition:
-      height 120ms ease-out,
-      opacity 120ms ease-out;
-  }
-  .meter i.lit {
-    height: 14px;
-    opacity: 0.85;
-  }
   /* A server: its row picks it, beside that whether it answers and a way to
      remove it */
   .server {
@@ -648,24 +627,5 @@
   }
   .unreachable {
     color: var(--color-danger);
-  }
-  .play {
-    display: flex;
-    height: 1.6rem;
-    width: 1.6rem;
-    flex-shrink: 0;
-    align-items: center;
-    justify-content: center;
-    border-radius: 9999px;
-    background: rgb(255 255 255 / 0.06);
-    color: var(--color-ink-2);
-  }
-  .play:hover {
-    background: var(--color-hover);
-    color: var(--color-ink);
-  }
-  .play.playing {
-    background: color-mix(in srgb, var(--color-petal-warm) 22%, transparent);
-    color: var(--color-petal-warm);
   }
 </style>

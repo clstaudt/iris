@@ -388,19 +388,24 @@ if (SETUP_TEST && SETUP_TEST !== "0") {
   });
 }
 
+/** Whether the app may use the microphone; only macOS asks. */
+function microphoneStatus(): string {
+  if (process.platform !== "darwin") return "granted";
+  return systemPreferences.getMediaAccessStatus("microphone");
+}
+
 /**
  * The Python child process opens the microphone, but macOS attributes that
  * access to this app. Nothing in Electron itself touches the mic, so the
  * system would never prompt — and an app that never asks does not appear in
  * System Settings > Privacy & Security > Microphone. Asking here registers
- * the app with TCC and triggers the prompt.
+ * the app with TCC and triggers the prompt. The window asks: the
+ * walkthrough at its microphone step, a later launch as it starts.
  */
-async function ensureMicrophoneAccess(): Promise<string> {
-  if (process.platform !== "darwin") return "granted";
-
-  const status = systemPreferences.getMediaAccessStatus("microphone");
+async function askMicrophoneAccess(): Promise<string> {
+  const status = microphoneStatus();
   console.log(`[main] microphone access status: ${status}`);
-  if (status === "granted") return status;
+  if (status !== "not-determined") return status;
 
   const granted = await systemPreferences.askForMediaAccess("microphone");
   const result = granted ? "granted" : "denied";
@@ -414,7 +419,6 @@ app.whenReady().then(async () => {
   const icon = nativeImage.createFromPath(ICON_PATH);
   if (process.platform === "darwin" && !icon.isEmpty()) app.dock?.setIcon(icon);
 
-  const micStatus = await ensureMicrophoneAccess();
   const isPackaged = app.isPackaged;
   const projectRoot = isPackaged
     ? app.getAppPath()
@@ -436,7 +440,8 @@ app.whenReady().then(async () => {
     }
   );
 
-  ipcMain.handle("mic-status", () => micStatus);
+  ipcMain.handle("mic-status", () => microphoneStatus());
+  ipcMain.handle("ask-microphone", () => askMicrophoneAccess());
   // Read once by the preload, so the first frame already has the right layout
   ipcMain.on("get-presence", (event) => {
     event.returnValue = !!windowState.presence;

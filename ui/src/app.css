@@ -290,3 +290,51 @@ details.s-more[open] > summary::before {
 details.s-more > summary:hover {
   color: var(--color-ink-2);
 }
+/* A level meter: bars that light up with the microphone's level */
+.s-meter {
+  display: flex;
+  height: 18px;
+  align-items: flex-end;
+  gap: 3px;
+  padding-top: 0.25rem;
+}
+.s-meter i {
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--color-petal-cyan);
+  opacity: 0.25;
+  transition:
+    height 120ms ease-out,
+    opacity 120ms ease-out;
+}
+.s-meter i.lit {
+  height: 14px;
+  opacity: 0.85;
+}
+/* Plays a voice; warm from the click until it has been heard */
+.s-play {
+  display: flex;
+  height: 1.6rem;
+  width: 1.6rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: rgb(255 255 255 / 0.06);
+  color: var(--color-ink-2);
+  transition:
+    background-color 150ms,
+    color 150ms;
+}
+.s-play:hover:not(:disabled) {
+  background: var(--color-hover);
+  color: var(--color-ink);
+}
+.s-play:disabled {
+  opacity: 0.35;
+}
+.s-play.playing {
+  background: color-mix(in srgb, var(--color-petal-warm) 22%, transparent);
+  color: var(--color-petal-warm);
+}
