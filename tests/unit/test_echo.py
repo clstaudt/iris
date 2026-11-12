@@ -193,3 +193,22 @@ def test_with_nothing_to_cancel_it_counts_as_cancelling():
     assert canceller.settled
     assert canceller.suppression is None
     assert canceller.cancelling is True
+
+
+def test_the_users_speech_before_the_voice_is_not_taken_for_the_rooms_noise():
+    """The user spoke on for 2 s, then the voice answered, its echo through
+    the room 0.8 s late: more than the canceller finds, so it comes through.
+    That is judged against the room's noise, not the user's speech."""
+    voice = _voice(6.0)
+    canceller = EchoCanceller()
+    canceller.played(3.0, voice, RATE)
+    rng = np.random.default_rng(5)
+    mic = (rng.standard_normal(10 * RATE) * 0.003).astype(np.float32)
+    t = np.arange(int(2.2 * RATE)) / RATE
+    user = 0.05 * sum(np.sin(2 * np.pi * k * 180 * t) / k for k in range(1, 10))
+    mic[RATE // 2 : RATE // 2 + len(user)] += user.astype(np.float32)
+    echo = _echo_of(voice, 0.8)
+    mic[3 * RATE : 3 * RATE + len(echo)] += echo[: len(mic) - 3 * RATE]
+    _clean_all(canceller, mic)
+    assert canceller.settled
+    assert canceller.cancelling is False
