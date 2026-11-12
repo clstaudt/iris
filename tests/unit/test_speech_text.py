@@ -1,6 +1,8 @@
 """Unit tests for preparing reply text for speech: lists must be read with
 a pause after each item, not run together as one sentence."""
 
+import pytest
+
 from iris.llm import (
     PIECE_GROWTH,
     PIECE_SENTENCE_FROM,
@@ -34,6 +36,35 @@ class TestListPauses:
 
     def test_emoji_only_line_dropped(self):
         assert clean("Done\n\n😀") == "Done."
+
+
+class TestEveryLanguageIsKept:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "東京の明日の天気は晴れで、最高気温は十八度です。",
+            "あしたは、はれるでしょう！",
+            "カタカナのテキストですか？",
+            "北京明天是晴天，最高气温十八度左右。",
+            "你好！你想知道什么？",
+            "（全角の括弧）と「かぎ括弧」です。",
+            "Ein Satz auf Deutsch, mit Umlauten: schön.",
+            "Uma frase em português, não é?",
+            "कल दिल्ली में मौसम साफ़ रहेगा।",
+        ],
+    )
+    def test_text_in_every_language_iris_speaks_is_spoken_whole(self, text):
+        """The emoji filter took U+24C2 to U+1F251 for emoji: every kanji,
+        kana and Chinese character and the full-width punctuation, so a
+        Japanese or Chinese reply was never spoken."""
+        assert clean(text) == text
+
+    @pytest.mark.parametrize(
+        "emoji", ["😀", "🎉", "🚀", "🇯🇵", "☀️", "✨", "❤️", "🤖", "🥳", "🫶", "⭐", "👍🏽", "👩‍💻", "Ⓜ️"]
+    )
+    def test_emoji_are_dropped_in_any_language(self, emoji):
+        assert clean(f"晴れです{emoji}。") == "晴れです。"
+        assert clean(f"Sunny {emoji} today.") == "Sunny  today."
 
 
 class TestSpeechBreak:
