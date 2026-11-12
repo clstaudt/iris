@@ -1,6 +1,7 @@
 """Unit tests for multilingual support."""
 
 import os
+import re
 import tempfile
 from unittest.mock import MagicMock, call, patch
 
@@ -599,3 +600,27 @@ class TestLLMLanguageInstruction:
             if m["role"] == "system" and "speaking in" in m.get("content", "").lower()
         ]
         assert len(lang_instructions) == 0
+
+    @patch("iris.llm.ollama")
+    def test_back_in_english_the_model_is_told_to_answer_in_english(self, mock_ollama):
+        """After German turns, the model went on answering in German: the
+        conversation it is given is German, and nothing named English."""
+        mock_ollama.show.return_value = MagicMock(modelinfo={}, details=MagicMock(family="test"))
+        mock_ollama.list.return_value = []
+        mock_ollama.chat.side_effect = lambda **kwargs: iter([{"message": {"content": "Gut."}}])
+
+        from iris.llm import ConversationManager
+
+        cm = ConversationManager(model="test", tools=None)
+
+        def told(prompt, language):
+            list(cm.chat_stream(prompt, response_language=language))
+            messages = mock_ollama.chat.call_args.kwargs["messages"]
+            return re.findall(r"Respond in ([\w ()]+)\.", messages[-1]["content"])
+
+        assert told("Hi", "en") == []
+        assert told("Wie spät ist es?", "de") == ["German"]
+        assert told("Und morgen?", "de") == ["German"]
+        assert told("Back to English, please. What time is it?", "en") == ["English"]
+        # Once back, English goes on without a note, as at the start
+        assert told("And tomorrow?", "en") == []

@@ -281,6 +281,9 @@ class ConversationManager:
         self._no_tools: set[str] = set()
         self.model = model
         self.vision_model = vision_model
+        # The language the user spoke or typed last (Whisper code), so the
+        # model is told when the user goes back to English
+        self.language = "en"
         self.conversation_history = []
         # The last complete reply, as it is kept in the conversation
         self.reply: Optional[str] = None
@@ -826,13 +829,16 @@ class ConversationManager:
         # Get managed conversation context
         messages = self.manage_context(with_tools=use_tools)
 
-        # Inject a language instruction so the LLM replies in the right language
-        if response_language != "en":
+        # Inject a language instruction so the LLM replies in the right
+        # language: any but English, and English when the user goes back to
+        # it, or the model carries on in the language the conversation was in
+        if response_language != "en" or self.language != "en":
             lang_name = _lang_names.get(response_language, response_language)
             messages.append({
                 "role": "system",
                 "content": f"The user is speaking in {lang_name}. Respond in {lang_name}.",
             })
+        self.language = response_language
 
         # Add current user message, with the files still in context
         user_message = {"role": "user", "content": prompt + self._files_context(attachments)}

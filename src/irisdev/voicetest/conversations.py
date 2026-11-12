@@ -2092,8 +2092,6 @@ LANGUAGES = [
                  checks=[asks_for_english()]),
         ],
         tools={"web": True}, web=LANGUAGE_WEB, stub_rules=LANGUAGE_RULES,
-        # llm.py adds a language note only for languages other than English
-        expected_failures=["T7:english_note"],
         tags=["hearing", "languages", "mixed"],
     ),
 ]
