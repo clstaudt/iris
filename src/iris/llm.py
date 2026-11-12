@@ -233,6 +233,8 @@ class ConversationManager:
         self.model = model
         self.vision_model = vision_model
         self.conversation_history = []
+        # The last complete reply, as it is kept in the conversation
+        self.reply: Optional[str] = None
         self.quiet = quiet
         self.persona = persona if persona else get_persona("iris")
         self.tools = tools
@@ -622,7 +624,12 @@ class ConversationManager:
         return managed_messages
 
     def chat_stream(
-        self, prompt: str, response_language: str = "en", on_tool_use=None, source=None
+        self,
+        prompt: str,
+        response_language: str = "en",
+        on_tool_use=None,
+        source=None,
+        keep: bool = True,
     ):
         """
         Send prompt to LLM and stream response with tool support.
@@ -633,17 +640,29 @@ class ConversationManager:
             response_language: Language the assistant should respond in
                 (Whisper ISO 639-1 code, e.g. 'en', 'fr', 'ja')
             on_tool_use: Optional callback(tool_name, tool_args) called before each tool executes
+            keep: Keep the exchange in the conversation once the reply is
+                complete. False leaves that to the caller (keep()), which
+                knows how much of the reply was heard; the complete reply,
+                as it would be kept, is then in self.reply.
 
         Yields:
             Chunks of response text, without reasoning or tool calls a model
             wrote out as text
         """
+        self.reply = None
         unspoken = UnspokenFilter()
         for chunk in self._reply_stream(prompt, response_language, on_tool_use, source):
             if text := unspoken.feed(chunk):
                 yield text
         if rest := unspoken.flush():
             yield rest
+        if keep:
+            self._record(prompt, self.reply, source)
+
+    def keep(self, prompt: str, answer: str, source: Optional[str] = None):
+        """Keep an exchange streamed with keep=False: its reply as far as
+        the user heard it, or self.reply when it was heard to the end."""
+        self._record(prompt, answer, source)
 
     def _reply_stream(self, prompt: str, response_language: str, on_tool_use, source):
         """The model's reply as it streams in, tool rounds included."""
@@ -796,11 +815,11 @@ class ConversationManager:
 
                 # Store in history
                 answer = "".join(spoken)
-                self._record(prompt, answer, source)
+                self.reply = answer
                 return
             else:
                 answer = "".join(full_response)
-                self._record(prompt, answer, source)
+                self.reply = answer
                 return
 
         # No tools - standard streaming
@@ -812,8 +831,5 @@ class ConversationManager:
             full_response.append(chunk_text)
             yield chunk_text
 
-        # Store in conversation history (cleaned version)
-        answer = "".join(full_response)
-        answer_clean = self.clean_markdown(answer)
-
-        self._record(prompt, answer_clean, source)
+        # Kept in the conversation history as cleaned text
+        self.reply = self.clean_markdown("".join(full_response))
