@@ -159,13 +159,17 @@ class ScriptedConversations:
         for index, turn in enumerate(conversation.turns):
             following = conversation.turns[index + 1] if index + 1 < len(conversation.turns) else None
             hand_over = following is not None and following.interrupt_after is not None
-            result = self.turn(conversation.name, index + 1, turn, hand_over)
+            # The next turn answers as soon as the reply has been heard
+            answer_next = following is not None and following.answer_after is not None
+            result = self.turn(conversation.name, index + 1, turn, hand_over, answer_next)
             self.report(result.line())
             results.append(result)
         wait_until(lambda: finished(self.assistant), self.reply_timeout)
         return results
 
-    def turn(self, conversation: str, number: int, turn: Turn, hand_over: bool) -> TurnResult:
+    def turn(
+        self, conversation: str, number: int, turn: Turn, hand_over: bool, answer_next: bool = False
+    ) -> TurnResult:
         result = TurnResult(conversation, number, turn.text)
         log, speaker = self.assistant.log, self.assistant.endpoint.speaker
         audio = self.voice.utterance(turn.parts, turn.speed)
@@ -178,16 +182,11 @@ class ScriptedConversations:
         elif turn.answer_after is not None:
             since = self._said_end
 
-            def heard_to_its_end() -> bool:
-                last = speaker.last_sound(since)
-                return (
-                    bool(log.since(since, "chat.done"))
-                    and last is not None
-                    and not speaker.audible()
-                    and time.monotonic() - last >= turn.answer_after
-                )
+            def answer_now() -> bool:
+                last = self._reply_heard(since)
+                return last is not None and time.monotonic() - last >= turn.answer_after
 
-            wait_until(heard_to_its_end, self.reply_timeout)
+            wait_until(answer_now, self.reply_timeout)
         else:
             wait_until(lambda: finished(self.assistant), self.reply_timeout)
             time.sleep(GAP)
@@ -210,7 +209,12 @@ class ScriptedConversations:
 
         def answered() -> bool:
             users = log.since(said.speech_end, "chat.user")
-            return bool(users) and bool(log.since(users[-1][0], "chat.done")) and finished(self.assistant)
+            if not users or not log.since(users[-1][0], "chat.done"):
+                return False
+            # Before an answer at once, until the reply has been heard
+            if answer_next:
+                return self._reply_heard(said.speech_end) is not None
+            return finished(self.assistant)
 
         if turn.no_reply:
             time.sleep(max(0.0, said.speech_end + NO_REPLY_WATCH - time.monotonic()))
@@ -230,6 +234,16 @@ class ScriptedConversations:
         self._measure(result, turn, said, pressed[0], end)
         self._judge(result, turn, hand_over)
         return result
+
+    def _reply_heard(self, since: float) -> Optional[float]:
+        """When the reply to what was said since then was last heard, once it
+        has been spoken to its end (its text all written, the assistant done
+        speaking, the speaker quiet); None until then."""
+        log, speaker = self.assistant.log, self.assistant.endpoint.speaker
+        speaking = getattr(self.assistant, "speaking", lambda: False)
+        if not log.since(since, "chat.done") or speaking() or speaker.audible():
+            return None
+        return speaker.last_sound(since)
 
     def _measure(self, result: TurnResult, turn: Turn, said, pressed: Optional[float], end: float):
         log, speaker = self.assistant.log, self.assistant.endpoint.speaker

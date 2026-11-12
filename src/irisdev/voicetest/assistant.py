@@ -160,6 +160,12 @@ class IrisUnderTest:
     def clear_conversation(self):
         self.assistant.conversation.conversation_history.clear()
 
+    def speaking(self) -> bool:
+        """Whether it is still speaking its reply (optional for an assistant
+        under test: without it, a pause between two sentences can pass for
+        the end of the reply)."""
+        return self.assistant.speech_pipeline.is_active
+
 
 def busy(assistant: AssistantUnderTest) -> bool:
     last = assistant.log.last("state")
