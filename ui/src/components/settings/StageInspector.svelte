@@ -1,0 +1,549 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { store, type TurnDetection } from "../../lib/state.svelte";
+  import Icon from "../Icon.svelte";
+  import Switch from "../Switch.svelte";
+
+  let { stage }: { stage: string } = $props();
+
+  const TITLES: Record<string, string> = {
+    mic: "Microphone",
+    wake: "Wake word",
+    turn: "Turn end",
+    stt: "Recognition",
+    llm: "Language model",
+    persona: "Persona",
+    tools: "Tools",
+    memory: "Memory",
+    voice: "Voice",
+    output: "Output",
+  };
+
+  const config = $derived(store.config);
+
+  onMount(() => {
+    if (stage === "stt") store.loadRecognitionModels().catch(() => {});
+    if (stage === "persona") store.refreshPersonas().catch(() => {});
+    if (stage === "voice" && !store.voices) store.loadVoices().catch(() => {});
+  });
+
+  const title = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+  const fail = (what: string) => (err: unknown) => console.error(`[settings] ${what} failed:`, err);
+
+  // Microphone ------------------------------------------------------------
+
+  const selectedMic = $derived(
+    store.inputDevices.find((d) => d.name === config?.input_device)?.index ?? -1
+  );
+
+  function onMicChange(event: Event) {
+    const index = Number((event.target as HTMLSelectElement).value);
+    store.setMic(index < 0 ? null : index).catch(fail("audio.set_input"));
+  }
+
+  const METER_BARS = 24;
+
+  // Wake word: the word stays in the field when switched off, so switching
+  // back on restores it ----------------------------------------------------
+
+  const DEFAULT_WAKE_WORD = "Iris";
+  const DEFAULT_SLEEP_WORD = "That's all";
+  const STAY_AWAKE = [15, 30, 60, 120];
+  let wakeDraft = $state<string | null>(null);
+  let sleepDraft = $state<string | null>(null);
+  const wakeOn = $derived(!!config?.wake_word);
+  const wakeValue = $derived(wakeDraft ?? (config?.wake_word || DEFAULT_WAKE_WORD));
+  const sleepValue = $derived(sleepDraft ?? config?.sleep_word ?? DEFAULT_SLEEP_WORD);
+
+  function applyWakeWord(on: boolean) {
+    const word = wakeValue.trim() || DEFAULT_WAKE_WORD;
+    store.setWakeWord(on ? word : "").catch(fail("wake.set"));
+  }
+
+  function applySleepWord() {
+    if (sleepDraft === null) return;
+    store.setWakeOptions({ sleep_word: sleepValue.trim() }).catch(fail("wake.options"));
+    sleepDraft = null;
+  }
+
+  function onStayAwake(event: Event) {
+    const window = Number((event.target as HTMLSelectElement).value);
+    store.setWakeOptions({ window }).catch(fail("wake.options"));
+  }
+
+  // Turn end --------------------------------------------------------------
+
+  const turnModes = $derived<{ id: TurnDetection; name: string; meta: string }[]>([
+    { id: "smart_turn", name: "Smart Turn", meta: "Pipecat Smart Turn v3" },
+    { id: "silence", name: "Silence", meta: `After ${config?.silence_duration ?? 3.5} s` },
+  ]);
+
+  // Recognition -------------------------------------------------------------
+
+  let switching = $state<string | null>(null);
+  let recognitionError = $state("");
+  const whisper = $derived((config?.recognition_engine ?? "whisper") === "whisper");
+  const folderName = $derived(
+    store.recognitionModels?.folder.split(/[\\/]/).filter(Boolean).pop() ?? ""
+  );
+  const download = $derived(store.setup?.model === "stt" ? store.setup : null);
+
+  // The switch is over once the core reports the new model in use
+  $effect(() => {
+    if (switching && config?.whisper_model === switching && !config.stt_model_path) {
+      switching = null;
+    }
+  });
+
+  function sizeLabel(mb: number | null) {
+    if (!mb) return "Download";
+    return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`;
+  }
+
+  async function chooseRecognition(model: string) {
+    recognitionError = "";
+    switching = model;
+    const error = await store.setRecognitionModel(model);
+    if (error) {
+      recognitionError = error;
+      switching = null;
+    }
+  }
+
+  // Model folders the user already has, instead of downloads
+  let folderError = $state("");
+
+  async function chooseFolder(kind: "stt" | "tts") {
+    const folder = await window.iris.chooseFolder(
+      kind === "stt" ? "Speech recognition model folder" : "Voice model folder"
+    );
+    if (!folder) return;
+    folderError =
+      (await store.setModelPaths(kind === "stt" ? { stt_path: folder } : { tts_dir: folder })) ??
+      "";
+  }
+
+  async function useDownloaded(kind: "stt" | "tts") {
+    folderError =
+      (await store.setModelPaths(kind === "stt" ? { stt_path: "" } : { tts_dir: "" })) ?? "";
+  }
+
+  // Language model: the server is edited as a draft, applied on Enter or
+  // Connect ---------------------------------------------------------------
+
+  let hostDraft = $state<string | null>(null);
+  let hostError = $state("");
+  let connecting = $state(false);
+  const hostValue = $derived(hostDraft ?? config?.ollama_host ?? "");
+  const modelMissing = $derived(
+    !!config && store.models.length > 0 && !store.models.some((m) => m.name === config?.llm_model)
+  );
+
+  async function connect() {
+    connecting = true;
+    hostError = "";
+    try {
+      const error = await store.setOllamaHost(hostValue.trim());
+      if (error) hostError = error;
+      else hostDraft = null;
+    } catch (err) {
+      hostError = String(err);
+    } finally {
+      connecting = false;
+    }
+  }
+
+  // Tools -----------------------------------------------------------------
+
+  const tools = $derived(
+    Object.entries(config?.tools ?? {}).map(([id, state]) => ({ id, ...state }))
+  );
+  const modelHasTools = $derived(
+    store.models.find((m) => m.name === config?.llm_model)?.tools ?? true
+  );
+  const plugins = $derived(config?.plugins ?? []);
+
+  // Voice -----------------------------------------------------------------
+
+  const voiceName = $derived(
+    store.voices?.engines[config?.tts_engine ?? ""]?.find((v) => v.id === config?.tts_voice)
+      ?.name ??
+      config?.tts_voice ??
+      ""
+  );
+  const speechEngines = $derived(config?.engines?.tts ?? []);
+
+  async function previewVoice() {
+    const persona = await store.loadPersona(store.persona);
+    if (persona) store.previewVoice(persona).catch(fail("persona.preview"));
+  }
+</script>
+
+<aside
+  class="flex w-[320px] shrink-0 flex-col overflow-hidden rounded-[14px] border border-line bg-panel"
+>
+  <div class="flex h-12 shrink-0 items-center justify-between border-b border-line pl-5 pr-2.5">
+    <h2 class="text-[13px] font-semibold text-ink">{TITLES[stage] ?? stage}</h2>
+    <button onclick={() => (store.stage = null)} class="s-icon-btn" title="Close">
+      <Icon name="close" size={15} />
+    </button>
+  </div>
+
+  <div class="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto px-5 pb-6 pt-4">
+    {#if stage === "mic"}
+      <section class="sec">
+        <label class="s-section" for="stage-mic">Input</label>
+        <select id="stage-mic" class="s-field" value={selectedMic} onchange={onMicChange}>
+          {#each store.inputDevices as device}
+            <option value={device.index}>{device.name}</option>
+          {/each}
+        </select>
+        <div class="meter" aria-hidden="true">
+          {#each Array(METER_BARS) as _, i}
+            <i class:lit={i / METER_BARS < Math.min(1, store.level * 6)}></i>
+          {/each}
+        </div>
+      </section>
+    {:else if stage === "wake"}
+      <section class="sec">
+        <div class="flex items-center gap-3">
+          <input
+            value={wakeValue}
+            oninput={(e) => (wakeDraft = (e.target as HTMLInputElement).value)}
+            onkeydown={(e) => e.key === "Enter" && wakeOn && applyWakeWord(true)}
+            onblur={() => wakeOn && wakeDraft !== null && applyWakeWord(true)}
+            spellcheck="false"
+            aria-label="Wake word"
+            class="s-field min-w-0 flex-1"
+          />
+          <Switch label="Wake word" checked={wakeOn} onchange={(on) => applyWakeWord(on)} />
+        </div>
+      </section>
+      {#if wakeOn}
+        <section class="sec">
+          <label class="s-section" for="sleep-word">Sleep word</label>
+          <input
+            id="sleep-word"
+            value={sleepValue}
+            oninput={(e) => (sleepDraft = (e.target as HTMLInputElement).value)}
+            onkeydown={(e) => e.key === "Enter" && applySleepWord()}
+            onblur={applySleepWord}
+            spellcheck="false"
+            class="s-field"
+          />
+        </section>
+        <section class="sec">
+          <label class="s-section" for="stay-awake">Stay awake</label>
+          <select
+            id="stay-awake"
+            class="s-field"
+            value={config?.wake_window ?? 30}
+            onchange={onStayAwake}
+          >
+            {#each STAY_AWAKE as seconds}
+              <option value={seconds}>{seconds < 60 ? `${seconds} s` : `${seconds / 60} min`}</option>
+            {/each}
+          </select>
+        </section>
+      {/if}
+    {:else if stage === "turn"}
+      <section class="sec">
+        {#each turnModes as mode}
+          <button
+            onclick={() => store.setTurnDetection(mode.id).catch(fail("turn.set"))}
+            class="s-option {(config?.turn_detection ?? 'smart_turn') === mode.id ? 'active' : ''}"
+          >
+            <span class="radio"></span>
+            <span class="flex min-w-0 flex-col">
+              <span class="name">{mode.name}</span>
+              <span class="meta">{mode.meta}</span>
+            </span>
+          </button>
+        {/each}
+      </section>
+    {:else if stage === "stt"}
+      {#if !whisper}
+        <p class="s-status">
+          {config?.engines?.stt?.find((e) => e.id === config?.recognition_engine)?.label ??
+            config?.recognition_engine}
+        </p>
+      {:else}
+        <section class="sec">
+          {#if store.recognitionModels?.folder}
+            <div class="s-option active">
+              <span class="radio"></span>
+              <span class="flex min-w-0 flex-col">
+                <span class="name truncate">{folderName}</span>
+                <span class="meta">Model folder</span>
+              </span>
+            </div>
+          {/if}
+          {#each store.recognitionModels?.models ?? [] as model}
+            <button
+              onclick={() => chooseRecognition(model.id)}
+              disabled={switching !== null}
+              class="s-option {model.active ? 'active' : ''}"
+            >
+              <span class="radio"></span>
+              <span class="flex min-w-0 flex-1 flex-col">
+                <span class="name">Whisper {model.id}</span>
+                <span class="meta">{model.cached ? "Downloaded" : sizeLabel(model.size_mb)}</span>
+              </span>
+              {#if switching === model.id}
+                <span class="s-status tabular-nums">
+                  {download && download.total
+                    ? `${Math.round((download.done / download.total) * 100)} %`
+                    : "Loading"}
+                </span>
+              {/if}
+            </button>
+          {/each}
+          {#if recognitionError}
+            <p class="s-status error">{recognitionError}</p>
+          {/if}
+        </section>
+        <details class="s-more">
+          <summary>Model folder</summary>
+          <div class="mt-3 flex items-center gap-2">
+            <button class="s-btn" onclick={() => chooseFolder("stt")}>Choose…</button>
+            {#if config?.stt_model_path}
+              <button class="s-btn" onclick={() => useDownloaded("stt")}>Use a download</button>
+            {/if}
+          </div>
+          {#if folderError}
+            <p class="s-status error mt-2">{folderError}</p>
+          {/if}
+        </details>
+      {/if}
+    {:else if stage === "llm"}
+      <section class="sec">
+        <label class="s-section" for="stage-server">Server</label>
+        <div class="flex gap-1.5">
+          <input
+            id="stage-server"
+            value={hostValue}
+            oninput={(e) => (hostDraft = (e.target as HTMLInputElement).value)}
+            onkeydown={(e) => e.key === "Enter" && connect()}
+            placeholder={config?.ollama_url ?? "http://localhost:11434"}
+            spellcheck="false"
+            class="s-field min-w-0 flex-1"
+          />
+          <button
+            onclick={connect}
+            disabled={connecting || hostDraft === null}
+            class="s-btn h-9"
+          >
+            {connecting ? "Connecting" : "Connect"}
+          </button>
+        </div>
+        {#if hostError}
+          <p class="s-status error">{hostError}</p>
+        {/if}
+      </section>
+      <section class="sec">
+        <h3 class="s-section">Model</h3>
+        {#if modelMissing}
+          <div class="s-option active">
+            <span class="radio"></span>
+            <span class="flex min-w-0 flex-col">
+              <span class="name">{config?.llm_model}</span>
+              <span class="meta">Not installed</span>
+            </span>
+          </div>
+        {/if}
+        {#each store.models as model}
+          <button
+            onclick={() => store.setModel(model.name).catch(fail("llm.set"))}
+            class="s-option {model.name === config?.llm_model ? 'active' : ''}"
+          >
+            <span class="radio"></span>
+            <span class="name min-w-0 flex-1 truncate">{model.name}</span>
+            {#if model.vision}<span class="s-chip">vision</span>{/if}
+            {#if model.tools}<span class="s-chip">tools</span>{/if}
+          </button>
+        {/each}
+        {#if store.models.length === 0}
+          <p class="s-status">Asking the server for its models</p>
+        {/if}
+      </section>
+    {:else if stage === "persona"}
+      <section class="sec">
+        {#each store.personas as id}
+          <button
+            onclick={() => store.setPersona(id).catch(fail("persona.set"))}
+            class="s-option {id === store.persona ? 'active' : ''}"
+          >
+            <span class="radio"></span>
+            <span class="name">{store.personaNames[id] ?? id}</span>
+          </button>
+        {/each}
+      </section>
+      <button class="s-btn self-start" onclick={() => store.editPersona(store.persona)}>
+        <Icon name="pencil" size={12} />
+        Edit {config?.persona}
+      </button>
+    {:else if stage === "tools"}
+      <section class="sec">
+        {#each tools as tool}
+          <div class="flex items-center justify-between gap-3 py-1">
+            <div class="flex min-w-0 items-baseline gap-2">
+              <span class="text-[12.5px] text-ink">{tool.name ?? title(tool.id)}</span>
+              {#if !tool.available}<span class="s-status">Not installed</span>{/if}
+            </div>
+            <Switch
+              label={tool.name ?? tool.id}
+              checked={!!tool.enabled}
+              disabled={!tool.available}
+              onchange={(on) => store.setTool(tool.id, on).catch(fail("tools.set"))}
+            />
+          </div>
+        {/each}
+        {#if !modelHasTools}
+          <p class="s-status">Not supported by this model</p>
+        {/if}
+      </section>
+      {#if plugins.length}
+        <section class="sec">
+          <h3 class="s-section">Plugins</h3>
+          {#each plugins as plugin}
+            <div class="flex items-center justify-between gap-3 text-[12.5px]">
+              <span class={plugin.active ? "text-ink" : "text-ink-3"}>{plugin.label}</span>
+              {#if plugin.available === false}
+                <span class="s-status">Not installed</span>
+              {:else if plugin.source && plugin.source !== "built-in"}
+                <span class="s-status">{plugin.source}</span>
+              {/if}
+            </div>
+          {/each}
+        </section>
+      {/if}
+    {:else if stage === "memory"}
+      <section class="sec">
+        <div class="flex items-center justify-between gap-3">
+          <span class="text-[12.5px] text-ink">Remember conversations</span>
+          <Switch
+            label="Remember conversations"
+            checked={!!config?.memory && !store.amnesia}
+            disabled={!config?.memory}
+            onchange={() => store.toggleAmnesia().catch(fail("memory.set_amnesia"))}
+          />
+        </div>
+      </section>
+      {#if config?.memory}
+        <button class="s-btn self-start" onclick={() => store.togglePanel("memory")}>
+          <Icon name="brain" size={13} />
+          Open memory
+        </button>
+      {/if}
+    {:else if stage === "voice"}
+      <section class="sec">
+        <div class="s-option active">
+          <button class="play" onclick={previewVoice} aria-label="Play">
+            <Icon name="play" size={11} />
+          </button>
+          <span class="flex min-w-0 flex-col">
+            <span class="name">{voiceName}</span>
+            <span class="meta">{config?.persona}</span>
+          </span>
+        </div>
+        <button class="s-btn self-start" onclick={() => store.editPersona(store.persona)}>
+          <Icon name="pencil" size={12} />
+          Change {config?.persona}'s voice
+        </button>
+      </section>
+      {#if speechEngines.length}
+        <section class="sec">
+          <h3 class="s-section">Engines</h3>
+          {#each speechEngines as engine}
+            <div class="flex items-center justify-between gap-3 text-[12.5px]">
+              <span class={engine.active ? "text-ink" : "text-ink-2"}>{engine.label}</span>
+              {#if engine.active}
+                <span class="s-chip accent">In use</span>
+              {:else if engine.available === false}
+                <span class="s-status">Not installed</span>
+              {/if}
+            </div>
+          {/each}
+        </section>
+      {/if}
+      <details class="s-more">
+        <summary>Voice model folder</summary>
+        <div class="mt-3 flex items-center gap-2">
+          <button class="s-btn" onclick={() => chooseFolder("tts")}>Choose…</button>
+          {#if config?.tts_models_dir}
+            <button class="s-btn" onclick={() => useDownloaded("tts")}>Use a download</button>
+          {/if}
+        </div>
+        {#if folderError}
+          <p class="s-status error mt-2">{folderError}</p>
+        {/if}
+      </details>
+    {:else if stage === "output"}
+      <section class="sec">
+        <div class="flex items-center justify-between gap-3">
+          <span class="text-[12.5px] text-ink">Speak replies</span>
+          <Switch
+            label="Speak replies"
+            checked={store.speakReplies}
+            onchange={() => store.toggleVoice().catch(fail("voice.set_output"))}
+          />
+        </div>
+        {#if config?.barge_in_available}
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-[12.5px] text-ink">Interrupt by voice</span>
+            <Switch
+              label="Interrupt by voice"
+              checked={config?.barge_in ?? true}
+              disabled={!store.speakReplies}
+              onchange={(on) => store.setBargeIn(on).catch(fail("voice.set_barge_in"))}
+            />
+          </div>
+        {/if}
+      </section>
+    {/if}
+  </div>
+</aside>
+
+<style>
+  .sec {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .meter {
+    display: flex;
+    height: 18px;
+    align-items: flex-end;
+    gap: 3px;
+    padding-top: 0.25rem;
+  }
+  .meter i {
+    width: 4px;
+    height: 4px;
+    border-radius: 1px;
+    background: var(--color-petal-cyan);
+    opacity: 0.25;
+    transition:
+      height 120ms ease-out,
+      opacity 120ms ease-out;
+  }
+  .meter i.lit {
+    height: 14px;
+    opacity: 0.85;
+  }
+  .play {
+    display: flex;
+    height: 1.6rem;
+    width: 1.6rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    background: rgb(255 255 255 / 0.06);
+    color: var(--color-ink-2);
+  }
+  .play:hover {
+    background: var(--color-hover);
+    color: var(--color-ink);
+  }
+</style>
