@@ -709,7 +709,8 @@ class ConversationManager:
         finally:
             if self._streaming is client:
                 self._streaming = None
-        if keep:
+        # A reply cut off (cancel()) never completed: there is nothing to keep
+        if keep and self.reply is not None:
             self._record(recorded_text(prompt, attachments or []), self.reply, source)
 
     def cancel(self):
