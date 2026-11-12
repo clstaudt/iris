@@ -1,6 +1,8 @@
 /** Central reactive store, fed by Python events over the RPC bridge. */
 
-import { onEvent, rpc, type AppInfo } from "./bridge";
+import { onEvent, rpc, type AppInfo, type TurnTiming } from "./bridge";
+
+export type { TurnTiming };
 
 export type AssistantState =
   | "idle"
@@ -186,6 +188,29 @@ export interface ModuleInfo {
   source?: string;
 }
 
+/** A named set of choices for how Iris works: the model server and model,
+ *  the recognition model, the turn detection and the tools. Who it is (the
+ *  persona) is not part of it. */
+export interface Setup {
+  name: string;
+  ollama_host?: string;
+  llm_model?: string;
+  whisper_model?: string;
+  stt_model_path?: string;
+  turn_detection?: TurnDetection;
+  tools?: Record<string, boolean>;
+}
+
+/** The settings a setup holds. */
+const SETUP_KEYS = [
+  "ollama_host",
+  "llm_model",
+  "whisper_model",
+  "stt_model_path",
+  "turn_detection",
+  "tools",
+] as const;
+
 /** The pages of the settings window. */
 export type SettingsPage = "pipeline" | "personas";
 
@@ -268,6 +293,9 @@ interface SavedSettings {
   /** Whisper size chosen in the pipeline; none for the best this computer runs */
   whisper_model?: string;
   turn_detection?: TurnDetection;
+  /** Named setups by id, and the one in use */
+  setups?: Record<string, Setup>;
+  active_setup?: string;
   /** Model folders chosen by the user; empty means download as usual */
   stt_model_path?: string;
   tts_models_dir?: string;
@@ -283,6 +311,8 @@ export interface SetupInfo {
 }
 
 const SETTINGS_KEY = "iris.settings";
+/** Turn timings kept, as many as the core keeps */
+const TIMINGS_KEPT = 20;
 
 /** The file's contents as base64, for the trip to the core. */
 function readBase64(file: File): Promise<string> {
@@ -338,6 +368,11 @@ class IrisStore {
   stage = $state<string | null>(null);
   /** Whisper's sizes for the recognition stage, once asked for */
   recognitionModels = $state<RecognitionModels | null>(null);
+  /** The latest turns' timings, newest last */
+  timings = $state<TurnTiming[]>([]);
+  /** Named setups by id; the active one follows every change made */
+  setups = $state<Record<string, Setup>>(loadSettings().setups ?? {});
+  activeSetup = $state(loadSettings().active_setup ?? "");
   /** Presence: the window shows only the orb, for voice and vision */
   presence = $state(window.iris?.presence ?? false);
   /** The persona open in the persona editor; "" for a new one */
@@ -429,6 +464,10 @@ class IrisStore {
         this.running = this.state !== "idle";
         // Started, or failed before its models were fetched
         if (this.state !== "starting") this.leaveSetup();
+        break;
+
+      case "turn.timing":
+        this.timings = [...this.timings, data as unknown as TurnTiming].slice(-TIMINGS_KEPT);
         break;
 
       case "audio.level":
@@ -688,7 +727,115 @@ class IrisStore {
   /** Open the settings window on a page, or close it (null). */
   openSettings(page: SettingsPage | null) {
     this.settingsPage = page;
-    if (page) this.panel = null;
+    if (page) {
+      this.panel = null;
+      this.ensureSetup();
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Setups
+  // ------------------------------------------------------------------
+
+  /** The setup's settings as they are now. */
+  private currentSetup(name: string): Setup {
+    const saved = loadSettings();
+    const tools = Object.fromEntries(
+      Object.entries(this.config?.tools ?? {}).map(([id, state]) => [id, !!state.enabled])
+    );
+    return {
+      name,
+      ollama_host: saved.ollama_host ?? this.config?.ollama_host ?? "",
+      llm_model: saved.llm_model ?? this.config?.llm_model,
+      whisper_model: saved.whisper_model ?? this.config?.whisper_model,
+      stt_model_path: saved.stt_model_path ?? this.config?.stt_model_path ?? "",
+      turn_detection: saved.turn_detection ?? this.config?.turn_detection,
+      tools: { ...tools, ...saved.tools },
+    };
+  }
+
+  private saveSetups() {
+    saveSettings({ setups: $state.snapshot(this.setups), active_setup: this.activeSetup });
+  }
+
+  /** There is always a setup to follow the choices made. */
+  private ensureSetup() {
+    if (this.setups[this.activeSetup]) return;
+    const first = Object.keys(this.setups)[0];
+    if (first) {
+      this.activeSetup = first;
+    } else {
+      this.setups = { default: this.currentSetup("My setup") };
+      this.activeSetup = "default";
+    }
+    this.saveSetups();
+  }
+
+  /** Remember a choice, and keep it in the active setup. */
+  private remember(patch: SavedSettings) {
+    saveSettings(patch);
+    const setup = this.setups[this.activeSetup];
+    if (!setup) return;
+    const choices: Partial<Setup> = {};
+    for (const key of SETUP_KEYS) {
+      if (patch[key] !== undefined) Object.assign(choices, { [key]: patch[key] });
+    }
+    Object.assign(setup, choices);
+    this.saveSetups();
+  }
+
+  /** Keep the current choices as a new setup, and make it the active one. */
+  newSetup(name: string) {
+    const id = `setup-${Date.now().toString(36)}`;
+    this.setups[id] = this.currentSetup(name.trim() || "New setup");
+    this.activeSetup = id;
+    this.saveSetups();
+  }
+
+  renameSetup(name: string) {
+    const setup = this.setups[this.activeSetup];
+    if (!setup || !name.trim()) return;
+    setup.name = name.trim();
+    this.saveSetups();
+  }
+
+  /** Delete the active setup and switch to another; the last one stays. */
+  async deleteSetup() {
+    const others = Object.keys(this.setups).filter((id) => id !== this.activeSetup);
+    if (others.length === 0) return;
+    delete this.setups[this.activeSetup];
+    await this.useSetup(others[0]);
+  }
+
+  /** Switch to a setup: its choices are applied one after the other. */
+  async useSetup(id: string) {
+    const target = this.setups[id];
+    if (!target) return;
+    this.activeSetup = id;
+    this.saveSetups();
+    const config = this.config;
+    if ((target.ollama_host ?? "") !== (config?.ollama_host ?? "")) {
+      await this.setOllamaHost(target.ollama_host ?? "");
+    }
+    if (target.llm_model && target.llm_model !== this.config?.llm_model) {
+      await this.setModel(target.llm_model);
+    }
+    if (target.stt_model_path && target.stt_model_path !== config?.stt_model_path) {
+      await this.setModelPaths({ stt_path: target.stt_model_path });
+    } else if (
+      !target.stt_model_path &&
+      target.whisper_model &&
+      (target.whisper_model !== config?.whisper_model || config?.stt_model_path)
+    ) {
+      await this.setRecognitionModel(target.whisper_model);
+    }
+    if (target.turn_detection && target.turn_detection !== config?.turn_detection) {
+      await this.setTurnDetection(target.turn_detection);
+    }
+    for (const [name, enabled] of Object.entries(target.tools ?? {})) {
+      const state = this.config?.tools?.[name];
+      if (state && state.available && !!state.enabled !== enabled) await this.setTool(name, enabled);
+    }
   }
 
   toggleSettings() {
@@ -710,12 +857,12 @@ class IrisStore {
   async setRecognitionModel(model: string): Promise<string | null> {
     const result = await rpc<{ ok: boolean; error?: string }>("stt.set", { model });
     if (!result.ok) return result.error ?? "Could not switch the model";
-    saveSettings({ whisper_model: model, stt_model_path: "" });
+    this.remember({ whisper_model: model, stt_model_path: "" });
     return null;
   }
 
   async setTurnDetection(mode: TurnDetection) {
-    saveSettings({ turn_detection: mode });
+    this.remember({ turn_detection: mode });
     await rpc("turn.set", { mode });
   }
 
@@ -757,7 +904,7 @@ class IrisStore {
     const result = await rpc<{ ok: boolean; error?: string }>(method, paths);
     if (!result.ok) return result.error ?? "Not a model folder";
     if (!this.needsSetup) {
-      saveSettings({
+      this.remember({
         ...(paths.stt_path !== undefined ? { stt_model_path: paths.stt_path } : {}),
         ...(paths.tts_dir !== undefined ? { tts_models_dir: paths.tts_dir } : {}),
       });
@@ -771,7 +918,7 @@ class IrisStore {
   }
 
   async setTool(name: string, enabled: boolean) {
-    saveSettings({ tools: { ...loadSettings().tools, [name]: enabled } });
+    this.remember({ tools: { ...loadSettings().tools, [name]: enabled } });
     await rpc("tools.set", { name, enabled });
   }
 
@@ -792,7 +939,7 @@ class IrisStore {
       { url }
     );
     if (!result.ok) return result.error ?? "Could not connect";
-    saveSettings({ ollama_host: result.host ?? "" });
+    this.remember({ ollama_host: result.host ?? "" });
     this.models = [];
     const llms = await rpc<{ models: { name: string; tools: boolean; vision: boolean }[] }>(
       "llm.list"
@@ -802,7 +949,7 @@ class IrisStore {
   }
 
   async setModel(name: string) {
-    saveSettings({ llm_model: name });
+    this.remember({ llm_model: name });
     await rpc("llm.set", { name });
   }
 
@@ -847,6 +994,7 @@ class IrisStore {
       this.state = info.state as AssistantState;
       this.running = info.running;
       if (info.config) this.config = info.config;
+      this.timings = info.timings ?? [];
 
       // After a reload the core still holds the conversation; rebuild it
       if (info.running) {

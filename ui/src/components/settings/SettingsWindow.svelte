@@ -3,6 +3,7 @@
   import Icon from "../Icon.svelte";
   import Personas from "./Personas.svelte";
   import Pipeline from "./Pipeline.svelte";
+  import SetupSwitcher from "./SetupSwitcher.svelte";
   import StageInspector from "./StageInspector.svelte";
 
   const PAGES: { id: SettingsPage; label: string; icon: string }[] = [
@@ -18,6 +19,7 @@
     class="flex w-[188px] shrink-0 flex-col gap-0.5 rounded-[14px] border border-line bg-panel p-2"
     aria-label="Settings"
   >
+    <SetupSwitcher />
     {#each PAGES as item}
       <button
         onclick={() => store.openSettings(item.id)}
