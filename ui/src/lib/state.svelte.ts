@@ -1135,6 +1135,8 @@ class IrisStore {
       this.messages[this.streamingIndex].streaming = false;
     }
     this.streamingIndex = null;
+    // The microphone chosen is chosen again in the new core
+    this.micRestored = false;
     try {
       if (this.needsSetup && !this.installing) {
         this.setupInfo = await rpc<SetupInfo>("setup.info");
