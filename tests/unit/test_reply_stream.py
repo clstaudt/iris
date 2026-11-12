@@ -1,6 +1,7 @@
 """Unit tests for streamed replies: tool rounds, and nothing unspoken."""
 
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from iris.assistant import VoiceAssistant
@@ -326,7 +327,7 @@ class Voice:
     def begin_reply(self):
         pass
 
-    def queue_speech(self, text):
+    def queue_speech(self, text, language=None, sound=None):
         self.spoken.append(text)
 
     def wait_for_speech(self):
@@ -345,6 +346,7 @@ def test_neither_the_voice_nor_the_transcript_gets_any_markup():
     assistant.speak_replies = True
     assistant.conversation = conversation
     assistant.speech_pipeline = Voice()
+    assistant.tts_generator = SimpleNamespace(languages=lambda: frozenset({"en"}))
     assistant.interrupt_event = threading.Event()
     assistant.suspend_event = threading.Event()
     assistant.tools = MagicMock()

@@ -7,6 +7,7 @@ import json
 import socket
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -47,7 +48,7 @@ class Pipeline:
     def begin_reply(self):
         pass
 
-    def queue_speech(self, text):
+    def queue_speech(self, text, language=None, sound=None):
         self.spoken.append(text)
 
     def stop(self):
@@ -66,6 +67,7 @@ def _assistant(conversation) -> VoiceAssistant:
     assistant.speak_replies = True
     assistant.conversation = conversation
     assistant.speech_pipeline = Pipeline()
+    assistant.tts_generator = SimpleNamespace(languages=lambda: frozenset({"en"}))
     assistant.interrupt_event = threading.Event()
     assistant.suspend_event = threading.Event()
     assistant.tools = MagicMock()
