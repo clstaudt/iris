@@ -110,7 +110,9 @@ def main():
         "llm.list": lambda params: controller.list_models(),
         "llm.set": lambda params: controller.set_model(params.get("name", "")),
         "llm.set_host": lambda params: controller.set_ollama_host(params.get("url", "")),
-        "chat.send_text": lambda params: controller.send_text(params.get("text", "")),
+        "chat.send_text": lambda params: controller.send_text(
+            params.get("text", ""), params.get("attachments")
+        ),
         "chat.history": lambda params: controller.history(),
         "memory.topics": lambda params: controller.memory_topics(),
         "memory.topic": lambda params: controller.memory_topic(params.get("id", -1)),

@@ -1,7 +1,9 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { renderMarkdown } from "../lib/markdown";
-  import { store } from "../lib/state.svelte";
+  import { fade } from "svelte/transition";
+  import { store, type AttachmentInfo } from "../lib/state.svelte";
+  import Attachments from "./Attachments.svelte";
   import Icon from "./Icon.svelte";
 
   const TOOLS: Record<string, { icon: string; label: string }> = {
@@ -38,6 +40,12 @@
 
   let scrollEl: HTMLDivElement;
   let pinned = true;
+  /** An image opened from the conversation, shown large */
+  let viewing = $state<AttachmentInfo | null>(null);
+
+  function onViewerKey(event: KeyboardEvent) {
+    if (viewing && event.key === "Escape") viewing = null;
+  }
 
   function onScroll() {
     const distance =
@@ -73,7 +81,14 @@
       {#if message.role === "user"}
         <div class="row justify-end">
           <span class="gutter"></span>
-          <div class="bubble user selectable whitespace-pre-wrap">{message.text}</div>
+          <div class="sent">
+            {#if message.attachments?.length}
+              <Attachments items={message.attachments} onOpen={(image) => (viewing = image)} />
+            {/if}
+            {#if message.text}
+              <div class="bubble user selectable whitespace-pre-wrap">{message.text}</div>
+            {/if}
+          </div>
           <span class="gutter" title={message.source === "text" ? "Typed" : "Spoken"}>
             <Icon name={message.source === "text" ? "keyboard" : "mic"} size={13} />
           </span>
@@ -119,7 +134,14 @@
     {#each store.pending as turn (turn.id)}
       <div class="row justify-end opacity-55">
         <span class="gutter"></span>
-        <div class="bubble pending whitespace-pre-wrap">{turn.text}</div>
+        <div class="sent">
+          {#if turn.attachments.length}
+            <Attachments items={turn.attachments} onOpen={(image) => (viewing = image)} />
+          {/if}
+          {#if turn.text}
+            <div class="bubble pending whitespace-pre-wrap">{turn.text}</div>
+          {/if}
+        </div>
         <span class="gutter" title="Waiting for the current reply">
           <Icon name="clock" size={13} />
         </span>
@@ -127,6 +149,19 @@
     {/each}
   </div>
 </div>
+
+<svelte:window onkeydown={onViewerKey} />
+
+{#if viewing}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div
+    class="viewer"
+    onclick={() => (viewing = null)}
+    transition:fade={{ duration: 150 }}
+  >
+    <img src={viewing.preview} alt={viewing.name} />
+  </div>
+{/if}
 
 <style>
   /* One bubble family: same shape and padding, mirrored tails, the speaker
@@ -151,6 +186,35 @@
     border: 1px solid var(--color-line);
     padding: 0.6rem 1rem;
     overflow-wrap: anywhere;
+  }
+  /* A user turn: its files above the text, both aligned right */
+  .sent {
+    display: flex;
+    max-width: 85%;
+    min-width: 0;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.4rem;
+  }
+  .sent .bubble {
+    max-width: 100%;
+  }
+  .viewer {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    background: color-mix(in srgb, var(--color-frame) 88%, transparent);
+    cursor: zoom-out;
+  }
+  .viewer img {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 0.8rem;
+    object-fit: contain;
   }
   .bubble.user {
     border-bottom-right-radius: 0.35rem;

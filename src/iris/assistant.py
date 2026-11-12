@@ -17,6 +17,7 @@ from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
 
+from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus
@@ -288,12 +289,13 @@ class VoiceAssistant:
         self.set_wake_word(wake_word, engine=whisper_engine)
 
         # Initialize conversation manager with tools
-        # If vision OR screen capture is enabled, pass the vision model for automatic switching
+        # The vision model answers when the camera, the screen or an attached
+        # image is involved and the primary model cannot see
         self.conversation = ConversationManager(
             llm_model,
             persona=self.persona,
             tools=self.tools,
-            vision_model=vision_model if (enable_vision or enable_screen_capture) else None,
+            vision_model=vision_model,
             quiet=quiet,
             host=ollama_host,
             memory=self.memory,
@@ -533,18 +535,33 @@ class VoiceAssistant:
 
     def _answer_typed(self, turn: dict):
         text = turn["text"]
-        self.display_manager.show_user_message(text)
+        attachments = turn.get("attachments") or []
+        self.display_manager.show_user_message(recorded_text(text, attachments))
         if self.event_bus:
-            self.event_bus.emit(
-                "chat.user",
-                {
-                    "text": text,
-                    "language": self.conversation_language,
-                    "source": "text",
-                    "id": turn.get("id"),
-                },
-            )
-        self.chat(text, response_language=self.conversation_language, source="text")
+            event = {
+                "text": text,
+                "language": self.conversation_language,
+                "source": "text",
+                "id": turn.get("id"),
+            }
+            if attachments:
+                event["attachments"] = [a.describe() for a in attachments]
+            self.event_bus.emit("chat.user", event)
+            if any(a.kind == "image" for a in attachments) and not self.conversation.image_model():
+                self.event_bus.emit(
+                    "error",
+                    {
+                        "message": "None of the installed models can see images. Install "
+                        "one with vision, such as qwen3-vl, to talk about pictures.",
+                        "kind": "no_vision",
+                    },
+                )
+        self.chat(
+            text,
+            response_language=self.conversation_language,
+            source="text",
+            attachments=attachments,
+        )
         if self.wake_word:
             self._stay_awake()
 
@@ -612,13 +629,20 @@ class VoiceAssistant:
         if kept.strip():
             self.conversation.keep(prompt, kept, source)
 
-    def chat(self, prompt: str, response_language: str = "en", source: Optional[str] = None) -> str:
+    def chat(
+        self,
+        prompt: str,
+        response_language: str = "en",
+        source: Optional[str] = None,
+        attachments: Optional[list[Attachment]] = None,
+    ) -> str:
         """
         Send prompt to LLM, stream response, and speak it.
 
         Args:
             prompt: User prompt text
             response_language: Language to respond in (Whisper code)
+            attachments: Files sent with the prompt
 
         Returns:
             LLM response text
@@ -654,6 +678,7 @@ class VoiceAssistant:
                     response_language=response_language,
                     on_tool_use=on_tool_use,
                     source=source,
+                    attachments=attachments,
                     keep=False,  # kept below, once it is known what was heard
                 )
                 for chunk_text in stream:
@@ -731,7 +756,7 @@ class VoiceAssistant:
 
             # Stopped while streaming, or while speaking after the stream
             cut = interrupted or self.interrupt_event.is_set()
-            self._keep_exchange(prompt, answer, source, cut)
+            self._keep_exchange(recorded_text(prompt, attachments or []), answer, source, cut)
             return answer
 
         except Exception as e:
