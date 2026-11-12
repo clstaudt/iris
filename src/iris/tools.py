@@ -56,15 +56,13 @@ TOOL_GROUPS = {
 class Tools:
     """Simple container for LLM tools."""
 
-    def __init__(self, console=None, status_manager=None):
+    def __init__(self, status_manager=None):
         """
         Initialize tools.
 
         Args:
-            console: Optional Rich console for status messages
             status_manager: Optional StatusManager for UI updates
         """
-        self.console = console
         self.status_manager = status_manager
         self._camera = None
         self._memory: MemoryStore | None = None

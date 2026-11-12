@@ -5,7 +5,6 @@ import queue
 import re
 import tempfile
 import threading
-import urllib.request
 import warnings
 from pathlib import Path
 
@@ -19,8 +18,6 @@ from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
 from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn
 
 from iris.audio import get_filter
 
@@ -132,7 +129,6 @@ class KokoroGenerator:
         self,
         voice: str = "af_bella",
         speed: float = 1.25,
-        quiet: bool = True,
         models_dir: str | Path | None = None,
     ):
         """
@@ -141,188 +137,34 @@ class KokoroGenerator:
         Args:
             voice: Voice to use for generation
             speed: Speech speed multiplier
-            quiet: If True, skip interactive prompts (setup wizard handles downloads)
+            models_dir: Folder holding the Kokoro files; None looks in the
+                usual places (IRIS_MODELS_DIR, ~/.iris/models, ...)
         """
         self.voice = voice
         self.speed = speed
-        self.quiet = quiet
 
         # A folder chosen by the user, or the usual locations
         self.models_dir = Path(models_dir).expanduser() if models_dir else None
-        if self.models_dir is not None:
-            if not kokoro_files_in(self.models_dir):
-                raise FileNotFoundError(
-                    f"{self.models_dir} does not hold {KOKORO_MODEL_FILE} and {KOKORO_VOICES_FILE}"
-                )
-            self.model_path = self.models_dir / KOKORO_MODEL_FILE
-            self.voices_path = self.models_dir / KOKORO_VOICES_FILE
-        else:
-            self.model_path, self.voices_path = self._locate_models()
+        self.model_path, self.voices_path = self._locate_models()
 
         # Initialize Kokoro
         self.kokoro = Kokoro(model_path=str(self.model_path), voices_path=str(self.voices_path))
 
     def _locate_models(self) -> tuple[Path, Path]:
-        """
-        Locate kokoro model files.
-
-        Searches in order:
-        1. IRIS_MODELS_DIR environment variable
-        2. ~/.iris/models/
-        3. ~/.local/share/iris/models/
-        4. ./models/ (relative to current directory)
-
-        If models are not found and not in quiet mode, prompts the user to download them.
-
-        Returns:
-            Tuple of (model_path, voices_path)
+        """The Kokoro files, in the chosen folder or the first of the usual
+        places that holds them.
 
         Raises:
-            FileNotFoundError: If models cannot be found and user declines download
+            FileNotFoundError: If they are not there. The app downloads them
+                during setup.
         """
-        model_file = "kokoro-v1.0.onnx"
-        voices_file = "voices-v1.0.bin"
-
-        # Check environment variable first
-        if env_dir := os.environ.get("IRIS_MODELS_DIR"):
-            model_path = Path(env_dir) / model_file
-            voices_path = Path(env_dir) / voices_file
-            if model_path.exists() and voices_path.exists():
-                return model_path, voices_path
-
-        # Check standard locations
-        search_paths = [
-            Path.home() / ".iris" / "models",
-            Path.home() / ".local" / "share" / "iris" / "models",
-            Path.cwd() / "models",
-        ]
-
-        for search_dir in search_paths:
-            model_path = search_dir / model_file
-            voices_path = search_dir / voices_file
-            if model_path.exists() and voices_path.exists():
-                return model_path, voices_path
-
-        # Models not found - prompt user to download (unless in quiet mode)
-        default_dir = search_paths[0]  # ~/.iris/models
-
-        if not self.quiet and self._prompt_download(default_dir, model_file, voices_file):
-            return default_dir / model_file, default_dir / voices_file
-
-        # Models not found
-        raise FileNotFoundError(
-            f"Could not find kokoro models ({model_file}, {voices_file}).\n"
-            f"Please run 'iris' without --skip-setup to download models,\n"
-            f"or download them manually and place in one of:\n"
-            + "\n".join(f"  - {p}" for p in search_paths)
-            + f"\nOr set IRIS_MODELS_DIR environment variable."
-        )
-
-    def _prompt_download(self, target_dir: Path, model_file: str, voices_file: str) -> bool:
-        """
-        Prompt the user to download kokoro models.
-
-        Args:
-            target_dir: Directory to download models to
-            model_file: Name of the model file
-            voices_file: Name of the voices file
-
-        Returns:
-            True if download succeeded, False if user declined or download failed
-        """
-        console = Console()
-
-        console.print()
-        console.print("[bold yellow]Kokoro TTS models not found![/bold yellow]")
-        console.print()
-        console.print("The following files are required for text-to-speech:")
-        console.print(f"  • {model_file} (~350 MB)")
-        console.print(f"  • {voices_file} (~8 MB)")
-        console.print()
-        console.print(f"They will be downloaded to: [cyan]{target_dir}[/cyan]")
-        console.print()
-
-        try:
-            response = console.input("[bold]Download models now? [Y/n]: [/bold]").strip().lower()
-            if response in ("", "y", "yes"):
-                return self._download_models(target_dir, model_file, voices_file)
-            else:
-                console.print("[dim]Download cancelled.[/dim]")
-                return False
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]Download cancelled.[/dim]")
-            return False
-
-    def _download_models(self, target_dir: Path, model_file: str, voices_file: str) -> bool:
-        """
-        Download kokoro models from Hugging Face.
-
-        Args:
-            target_dir: Directory to save models to
-            model_file: Name of the model file
-            voices_file: Name of the voices file
-
-        Returns:
-            True if download succeeded, False otherwise
-        """
-        console = Console()
-
-        # Create target directory
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        downloads = [
-            (KOKORO_MODEL_URL, target_dir / model_file, "Kokoro model"),
-            (KOKORO_VOICES_URL, target_dir / voices_file, "Voice data"),
-        ]
-
-        console.print()
-
-        try:
-            for url, path, description in downloads:
-                self._download_file(console, url, path, description)
-
-            console.print()
-            console.print("[bold green]✓ Models downloaded successfully![/bold green]")
-            console.print()
-            return True
-
-        except Exception as e:
-            console.print(f"\n[bold red]Download failed: {e}[/bold red]")
-            console.print("Please download manually from:")
-            console.print(f"  {KOKORO_MODEL_URL}")
-            console.print(f"  {KOKORO_VOICES_URL}")
-            return False
-
-    def _download_file(self, console: Console, url: str, path: Path, description: str):
-        """
-        Download a single file with progress bar.
-
-        Args:
-            console: Rich Console instance
-            url: URL to download from
-            path: Path to save to
-            description: Description for progress display
-        """
-        # Get file size from headers
-        with urllib.request.urlopen(url, timeout=30) as response:
-            total_size = int(response.headers.get("Content-Length", 0))
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]{task.description}"),
-                BarColumn(),
-                DownloadColumn(),
-                console=console,
-            ) as progress:
-                task = progress.add_task(description, total=total_size)
-
-                with open(path, "wb") as f:
-                    while True:
-                        chunk = response.read(8192)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        progress.update(task, advance=len(chunk))
+        folder = self.models_dir or find_kokoro_models()
+        if folder is None or not kokoro_files_in(folder):
+            raise FileNotFoundError(
+                f"{folder or DEFAULT_KOKORO_DIR} does not hold "
+                f"{KOKORO_MODEL_FILE} and {KOKORO_VOICES_FILE}"
+            )
+        return folder / KOKORO_MODEL_FILE, folder / KOKORO_VOICES_FILE
 
     def voice_for(self, language: str) -> tuple[str, str]:
         """Pick (Kokoro language code, voice) for a reply in this language.
@@ -614,7 +456,6 @@ class SpeechGenerator:
         engine: str = "kyutai",
         voice: str = "alba",
         speed: float = 1.0,
-        quiet: bool = True,
         models_dir: str | Path | None = None,
     ):
         """
@@ -622,13 +463,11 @@ class SpeechGenerator:
             engine: "kyutai" or "kokoro"
             voice: A voice of that engine
             speed: Speech speed multiplier, for Kokoro
-            quiet: If True, skip interactive prompts (setup wizard handles downloads)
             models_dir: Kokoro model folder chosen by the user
         """
         self.engine = engine
         self.voice = voice
         self.speed = speed
-        self.quiet = quiet
         self.models_dir = Path(models_dir).expanduser() if models_dir else None
         self._kokoro: KokoroGenerator | None = None
         self._pocket: PocketGenerator | None = None
@@ -648,7 +487,7 @@ class SpeechGenerator:
     def _engine(self, engine: str) -> KokoroGenerator | PocketGenerator:
         if engine == "kokoro":
             if self._kokoro is None:
-                self._kokoro = KokoroGenerator(quiet=self.quiet, models_dir=self.models_dir)
+                self._kokoro = KokoroGenerator(models_dir=self.models_dir)
             return self._kokoro
         if self._pocket is None:
             self._pocket = PocketGenerator()

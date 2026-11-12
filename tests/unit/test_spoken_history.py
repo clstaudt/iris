@@ -158,7 +158,7 @@ def _conversation(reply):
     with patch("iris.llm.ollama") as mock_ollama:
         mock_ollama.show.return_value = MagicMock(modelinfo={}, details=MagicMock(family="test"))
         mock_ollama.list.return_value = []
-        conversation = ConversationManager(model="test", quiet=True)
+        conversation = ConversationManager(model="test")
     conversation.client = MagicMock()
     conversation.client.chat.return_value = iter([{"message": {"content": reply}}])
     return conversation

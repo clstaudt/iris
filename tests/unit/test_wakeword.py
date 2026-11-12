@@ -174,14 +174,6 @@ class QuietStatus:
     status_lock = threading.Lock()
     status_understanding = False
 
-    def update_status_bar(self, *args):
-        pass
-
-
-class QuietDisplay:
-    def show_user_message(self, text):
-        pass
-
 
 def _awake_assistant(monkeypatch, heard):
     """Runs the real path from a recorded utterance to the reply."""
@@ -191,7 +183,6 @@ def _awake_assistant(monkeypatch, heard):
     a.interrupt_event = threading.Event()
     a.transcriber = Transcribes(heard)
     a.status_manager = QuietStatus()
-    a.display_manager = QuietDisplay()
     a.speech_pipeline = None
     a.tts_generator = SpeechGenerator.__new__(SpeechGenerator)
     a.tts_generator.engine = "kyutai"

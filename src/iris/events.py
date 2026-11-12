@@ -1,8 +1,7 @@
-"""Thread-safe pub/sub event bus used to stream assistant activity to a GUI.
+"""Thread-safe pub/sub event bus that streams assistant activity to the app.
 
-The terminal UI (Rich) does not use this bus; it is attached only when an
-external UI (e.g. the Electron shell) is driving the assistant. Subscribers
-must be fast and non-blocking: events are emitted synchronously, sometimes
+The controller attaches it so the Electron app can follow the assistant.
+Subscribers must be fast and non-blocking: events are emitted synchronously, sometimes
 while StatusManager.status_lock is held.
 
 Event types:

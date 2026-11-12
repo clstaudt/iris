@@ -99,7 +99,6 @@ class WhisperTranscriber:
         self,
         model: str = "auto",
         device: str = "auto",
-        quiet: bool = True,
         engine: str = "auto",
     ):
         """
@@ -109,7 +108,6 @@ class WhisperTranscriber:
             model: Whisper model size (tiny, base, small, medium, large-v3,
                 large-v3-turbo) or "auto" for the best one the hardware runs fast
             device: Device for faster-whisper (cpu, cuda, or auto)
-            quiet: If True, suppress verbose output (setup wizard handles this)
             engine: "auto", "mlx" or "faster-whisper"; MLX needs Apple Silicon
                 and falls back to faster-whisper elsewhere
         """
@@ -135,8 +133,6 @@ class WhisperTranscriber:
             self.model_name = resolve_model(model, self.engine, self.device)
         self._transcription_lock = threading.Lock()
 
-        if not quiet:
-            print(f"Loading Whisper {self.model_name} ({self.engine}, {self.device})...")
         if self.engine == "mlx":
             local = str(self.model_path) if self.model_path else None
             self.repo = local or model_repo(self.model_name, "mlx")
@@ -151,8 +147,6 @@ class WhisperTranscriber:
                 device=self.device,
                 compute_type="float16" if self.device == "cuda" else "int8",
             )
-        if not quiet:
-            print("Whisper model loaded")
 
     def _segments(self, audio_path: str) -> tuple[list[tuple[str, float]], str]:
         """Decode speech into (text, no_speech_prob) segments and a language.

@@ -32,7 +32,6 @@ dependencies = [
 ]
 
 [project.scripts]
-iris = "iris.cli:main"
 iris-benchmark = "irisdev.benchmark:main"
 iris-gui = "iris.rpc_server:main"
 

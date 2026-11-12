@@ -50,7 +50,7 @@ def _conversation(replies):
     with patch("iris.llm.ollama") as mock_ollama:
         mock_ollama.show.return_value = MagicMock(modelinfo={}, details=MagicMock(family="test"))
         mock_ollama.list.return_value = []
-        conversation = ConversationManager(model="test", tools=tools, quiet=True)
+        conversation = ConversationManager(model="test", tools=tools)
     conversation.client = FakeClient(replies)
     return conversation, tools
 

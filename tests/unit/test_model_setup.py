@@ -27,7 +27,7 @@ def test_the_transcriber_loads_a_local_folder(tmp_path, monkeypatch):
     (folder / "model.bin").write_bytes(b"")
     loaded = []
     monkeypatch.setattr(transcription, "WhisperModel", lambda path, **kw: loaded.append(path))
-    t = WhisperTranscriber(str(folder), quiet=True)
+    t = WhisperTranscriber(str(folder))
     assert t.engine == "faster-whisper"
     assert t.model_path == folder and t.model_name == "faster-whisper-small"
     assert loaded == [str(folder)]
@@ -35,7 +35,7 @@ def test_the_transcriber_loads_a_local_folder(tmp_path, monkeypatch):
 
 def test_a_folder_without_a_model_is_refused(tmp_path):
     with pytest.raises(ValueError, match="holds no Whisper model"):
-        WhisperTranscriber(str(tmp_path), quiet=True)
+        WhisperTranscriber(str(tmp_path))
 
 
 def test_kokoro_files_are_found_where_they_usually_live(tmp_path, monkeypatch):

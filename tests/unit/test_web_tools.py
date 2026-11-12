@@ -280,7 +280,7 @@ class TestLLMSearchPrompt:
         tools = Tools()
         tools.enable_web_search()
 
-        cm = ConversationManager(model="test", tools=tools, quiet=True)
+        cm = ConversationManager(model="test", tools=tools)
         messages = cm.manage_context()
         system = messages[0]["content"]
 
@@ -296,7 +296,7 @@ class TestLLMSearchPrompt:
 
         from iris.llm import ConversationManager
 
-        cm = ConversationManager(model="test", tools=None, quiet=True)
+        cm = ConversationManager(model="test", tools=None)
         messages = cm.manage_context()
         system = messages[0]["content"]
 
