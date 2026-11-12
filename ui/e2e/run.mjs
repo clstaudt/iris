@@ -1,13 +1,12 @@
 // End-to-end test of the app's UI against the real Python core.
 //
 // The built UI (ui/dist) runs in headless Chrome; window.iris, which Electron's
-// preload provides in the app, is bridged to a core started for the test,
-// through the app's own bridge (electron/python-bridge.ts), which reports a
-// core that stops and starts it again. The core gets a home folder of its
-// own, so the tester's personas, memory and settings are left alone; the
-// speech models already on this computer are used.
-// It listens only for a wake word nobody says, and it does speak: voice
-// previews and replies are heard on the speakers while the test runs.
+// preload provides in the app, is bridged to a core started for the test. The
+// core gets a home folder of its own, so the tester's personas, memory and
+// settings are left alone; the speech models already on this computer are used.
+// Its microphone and speaker are a virtual room (irisdev.e2e_core), which
+// holds only Iris's own voice coming back: the real room is never heard, and
+// nothing sounds on the speakers. Iris sleeps until a wake word nobody says.
 //
 //   npm run build && npm run e2e
 //
@@ -48,17 +47,10 @@ const realHome = os.homedir();
 const python =
   process.env.E2E_PYTHON ??
   path.join(REPO, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
-const coreLog = fs.createWriteStream(path.join(OUT, "core.log"));
-
-/** Every event the core pushed, and the bridge told, in order. */
-const events = [];
-let pushEvent = () => {};
-
-const bridge = new PythonBridge(
-  REPO,
-  false,
-  "",
-  {
+const core = spawn(python, ["-m", "irisdev.e2e_core"], {
+  cwd: REPO,
+  env: {
+    ...process.env,
     HOME: home,
     USERPROFILE: home,
     HF_HOME: process.env.HF_HOME ?? path.join(realHome, ".cache", "huggingface"),
@@ -224,8 +216,7 @@ try {
     await eventAfter("config", 0, () => true, 180_000);
     await until("the conversation", () => page.locator("textarea").count());
     check(config().wake_word === WAKE_WORD, "the test core must sleep until its wake word");
-    // The room is not part of the test: a typed turn keeps Iris awake for a
-    // while, and it would answer whatever it hears. Typed turns need no mic.
+    // Typed turns need no microphone; the steps that listen switch it on
     await rpc("mic.set", { on: false });
   });
 
