@@ -33,6 +33,20 @@ LEAD = 0.05
 KEEP = 20.0
 # Voice heard by the canceller before it has learned the room (seconds)
 SETTLE = 3.0
+# How much quieter the voice must come out of the canceller than it went in
+# (dB) for it to count as cancelling. A working canceller takes out 20 dB
+# or more; one that has lost the voice's timing takes out little, and the
+# voice comes through as speech (listening then holds the voice less often)
+CANCELLING = 10.0
+# It is judged over the last CANCELLING_WINDOWS stretches of WINDOW seconds
+# of voice, all of which must show it but the CANCELLING_SPARED worst: the
+# voice that leaks through does so in some stretches only, and the user who
+# speaks over the voice (which no canceller takes out) is in a few of them
+WINDOW = 0.25
+CANCELLING_WINDOWS = 12
+CANCELLING_SPARED = 2
+# Below this level (RMS) of what was played, the voice counts as silent
+PLAYING = 0.01
 
 
 def _int16(audio: np.ndarray) -> bytes:
@@ -53,11 +67,32 @@ class EchoCanceller:
         self._played: deque[tuple[float, np.ndarray]] = deque()
         # How much of the voice it has cancelled so far (seconds)
         self._voice_heard = 0.0
+        # How much quieter the voice came out, by window (dB), and the energy
+        # of the microphone before and after cancelling in the window so far
+        self._suppressions: deque[float] = deque(maxlen=CANCELLING_WINDOWS)
+        self._window = [0.0, 0.0, 0]
 
     @property
     def settled(self) -> bool:
         """Whether it has heard enough of the voice to have learned the room."""
         return self._voice_heard >= SETTLE
+
+    @property
+    def suppression(self) -> float | None:
+        """How much quieter the voice came out than it went in, lately, in
+        all stretches but the CANCELLING_SPARED worst (dB); None before any
+        voice was heard."""
+        if not self._suppressions:
+            return None
+        ordered = sorted(self._suppressions)
+        return ordered[min(CANCELLING_SPARED, len(ordered) - 1)]
+
+    @property
+    def cancelling(self) -> bool:
+        """Whether it is taking the voice out, as measured: settled, and the
+        voice lately came out at least CANCELLING dB quieter."""
+        suppression = self.suppression
+        return self.settled and suppression is not None and suppression >= CANCELLING
 
     def played(self, start: float, audio: np.ndarray, sample_rate: int):
         """Audio that leaves the speaker from start (time.monotonic()) on."""
@@ -111,4 +146,17 @@ class EchoCanceller:
             capture = AudioFrame(_int16(audio[i : i + STEP]), RATE, 1, STEP)
             self._apm.process_stream(capture)
             cleaned[i : i + STEP] = np.frombuffer(capture.data, dtype=np.int16) / 32768.0
+            if float(np.sqrt(np.mean(reference**2))) >= PLAYING:
+                self._measure(audio[i : i + STEP], cleaned[i : i + STEP])
         return cleaned
+
+    def _measure(self, heard: np.ndarray, cleaned: np.ndarray):
+        """Count a step of the voice towards how much it is taken out."""
+        window = self._window
+        window[0] += float(np.mean(heard**2))
+        window[1] += float(np.mean(cleaned**2))
+        window[2] += 1
+        if window[2] * STEP >= WINDOW * RATE:
+            if window[0] > 0.0:
+                self._suppressions.append(10.0 * float(np.log10(window[0] / max(window[1], 1e-12))))
+            self._window = [0.0, 0.0, 0]

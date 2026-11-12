@@ -49,11 +49,19 @@ HOLD_TRIGGER = 0.13
 HOLD = 0.55
 HOLD_SETTLE = 0.25
 HOLD_SPEECH = 0.5
-# A short "Stop" is over before the voice has died away. Speech this certain
-# and this long is the user's all the same: the echo canceller, once settled,
-# leaves nothing of the voice that sure.
+# Speech this certain and this long over the voice needs to go on for only
+# HOLD_CERTAIN_GOES_ON frames while the voice is held to be the user's: a
+# "Stop" said once is nearly over by then. Something must go on all the
+# same, as an echo canceller that lets the voice through (one that has lost
+# the voice's timing does) makes the voice itself certain speech, and that
+# stops with the voice.
 HOLD_CERTAIN = 0.9
 HOLD_CERTAIN_TIME = 0.1
+HOLD_CERTAIN_GOES_ON = 2
+# While the echo canceller measurably lets the voice through, the voice is
+# not held again this long (seconds) after a hold that heard only its echo:
+# held at every leak, it would stutter
+HOLD_BACKOFF = 2.0
 # Audio kept from before speech was recognized, so a turn starts with its
 # first syllable
 PRE_SPEECH = 0.5

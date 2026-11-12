@@ -115,3 +115,55 @@ def test_the_player_says_when_its_sound_leaves_the_speaker(monkeypatch):
 
     player.stop()
     assert registered[-1][0] == "cut"
+
+
+def _clean_all(canceller, mic):
+    block = 3 * STEP
+    for i in range(0, len(mic) - block + 1, block):
+        canceller.clean(mic[i : i + block], i / RATE)
+
+
+def _echo_of(played, delay):
+    """The voice reaching the microphone delay seconds after it was played."""
+    rng = np.random.default_rng(0)
+    room = rng.standard_normal(int(0.2 * RATE)) * np.exp(-np.arange(int(0.2 * RATE)) / 600)
+    room[0] = 1.0
+    room /= np.sqrt(np.sum(room**2))
+    echo = fftconvolve(played, room)[: len(played)].astype(np.float32)
+    mic = np.zeros(len(played) + int(delay * RATE), dtype=np.float32)
+    mic[int(delay * RATE) :] += echo
+    return mic
+
+
+def test_it_says_when_it_is_taking_the_voice_out():
+    played = _voice(8.0)
+    canceller = EchoCanceller()
+    canceller.played(0.0, played, RATE)
+    assert canceller.suppression is None and canceller.cancelling is False
+    _clean_all(canceller, _echo_of(played, 0.03))
+    assert canceller.cancelling is True
+    assert canceller.suppression > 15
+
+
+def test_and_when_the_voice_came_out_late_it_says_it_is_not():
+    """Playback that stalled (a busy computer): the voice reaches the
+    microphone far later than the canceller was told, and comes through."""
+    played = _voice(8.0)
+    canceller = EchoCanceller()
+    canceller.played(0.0, played, RATE)
+    _clean_all(canceller, _echo_of(played, 1.0))
+    assert canceller.settled
+    assert not canceller.cancelling
+    assert canceller.suppression < 10
+
+
+def test_the_user_speaking_over_the_voice_leaves_it_cancelling():
+    played = _voice(8.0)
+    canceller = EchoCanceller()
+    canceller.played(0.0, played, RATE)
+    mic = _echo_of(played, 0.03)
+    # Half a second of a louder user, at the end
+    user = 3 * _voice(0.5, seed=7)
+    mic[-len(user) - RATE // 10 : -RATE // 10] += user
+    _clean_all(canceller, mic)
+    assert canceller.cancelling

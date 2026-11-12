@@ -21,7 +21,9 @@ from iris.echo import STEP, EchoCanceller
 from iris.turns import (
     FRAME,
     HOLD,
+    HOLD_BACKOFF,
     HOLD_CERTAIN,
+    HOLD_CERTAIN_GOES_ON,
     HOLD_CERTAIN_TIME,
     HOLD_SETTLE,
     HOLD_SPEECH,
@@ -486,10 +488,12 @@ class AudioRecorder:
         frame_seconds = FRAME / self.sample_rate
         trigger = round(HOLD_TRIGGER / frame_seconds)
         certain_frames = round(HOLD_CERTAIN_TIME / frame_seconds)
+        backoff = round(HOLD_BACKOFF / frame_seconds)
         # Frames in a row sure, and certain, to be speech, and whether speech
         # was certain since listening began anew; while the voice is held,
-        # frames left to listen to, and how many after it died away were speech
-        sure, certain, was_certain, held, heard = 0, 0, False, 0, 0
+        # frames left to listen to, and how many after it died away were
+        # speech; frames until the voice may be held again
+        sure, certain, was_certain, held, heard, calm = 0, 0, False, 0, 0, 0
         try:
             with self._microphone(echo, go_on=True) as frames:
                 while True:
@@ -507,6 +511,7 @@ class AudioRecorder:
                     certain = certain + 1 if tracker.probability >= HOLD_CERTAIN else 0
                     if certain >= certain_frames and echo is not None and echo.settled:
                         was_certain = True
+                    calm = max(0, calm - 1)
                     if held:
                         held -= 1
                         settled = HOLD - held * frame_seconds > HOLD_SETTLE
@@ -514,15 +519,23 @@ class AudioRecorder:
                         if held:
                             continue
                         enough = heard * frame_seconds >= HOLD_SPEECH * (HOLD - HOLD_SETTLE)
-                        if not ((enough or was_certain) and tracker.started):
+                        # Speech the VAD was certain of needs to go on for
+                        # a moment only. The canceller's own measure cannot
+                        # spare it that: the moment it starts letting the
+                        # voice through looks to it like the user starting
+                        # to speak
+                        sure_users = was_certain and heard >= HOLD_CERTAIN_GOES_ON
+                        if not ((enough or sure_users) and tracker.started):
                             # The voice's echo: it goes on, and so does listening
                             release()
                             tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
+                            if not getattr(echo, "cancelling", True):
+                                calm = backoff
                             continue
                         spoke = False  # the user's: taken up below
                     elif echo is not None and not spoke and (sure >= trigger or tracker.started):
                         if speaking():
-                            if echo.settled:
+                            if echo.settled and not calm:
                                 hold()
                                 held, heard = round(HOLD / frame_seconds), 0
                             else:

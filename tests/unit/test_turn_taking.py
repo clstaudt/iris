@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 from faster_whisper.vad import get_vad_model
 
@@ -244,11 +245,11 @@ class TestOverTheVoice:
     """Speech over the voice holds it; in the quiet the user goes on, while
     the voice's echo dies away with it."""
 
-    def _listen(self, monkeypatch, recording, answered_after=None, settled=True):
+    def _listen(self, monkeypatch, recording, answered_after=None, settled=True, cancelling=None):
         monkeypatch.setattr(audio_module, "SpeechDetector", ScriptedSpeech)
         FakeStream.recording = recording.astype(np.float32)
         monkeypatch.setattr(audio_module.sd, "InputStream", FakeStream)
-        recorder = AudioRecorder(turn_end=Verdict(0.9), echo=PassThrough(settled))
+        recorder = AudioRecorder(turn_end=Verdict(0.9), echo=PassThrough(settled, cancelling))
         voice, spoke, frames = Voice(), [], [0]
 
         def until():
@@ -279,15 +280,45 @@ class TestOverTheVoice:
         # All of what the user said, from just before it
         assert abs(len(turn) / SAMPLE_RATE - (PRE_SPEECH + 2.0 + 0.2)) < 0.15
 
-    def test_a_short_stop_is_the_users_too(self, monkeypatch):
-        # Over before the voice has died away, but surer than any echo the
-        # settled canceller leaves
+    def test_a_stop_that_goes_on_a_moment_while_held_is_the_users(self, monkeypatch):
+        # Certain speech, half a second: going on just past the voice's dying
+        # away is enough
         recording = np.concatenate(
-            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.8), np.zeros(SAMPLE_RATE * 4)]
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE // 2, 0.8), np.zeros(SAMPLE_RATE * 4)]
         )
         path, voice, spoke = self._listen(monkeypatch, recording)
         Path(path).unlink()
         assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+
+    def test_certain_speech_that_stops_with_the_voice_is_its_echo(self, monkeypatch):
+        # An echo canceller that lets the voice through makes the voice
+        # certain speech; it stops as the voice is held
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.8), np.zeros(SAMPLE_RATE * 2)]
+        )
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(2.5))
+        assert path is None
+        assert (voice.holds, voice.releases, spoke) == (1, 1, [])
+
+    def test_speech_that_goes_on_is_the_users_while_the_canceller_leaks(self, monkeypatch):
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.8), np.zeros(SAMPLE_RATE * 4)]
+        )
+        path, voice, spoke = self._listen(monkeypatch, recording, cancelling=False)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+
+    @pytest.mark.parametrize("cancelling, holds", [(False, 1), (True, 2)])
+    def test_a_leaking_canceller_does_not_hold_the_voice_at_every_leak(self, monkeypatch, cancelling, holds):
+        burst = np.full(SAMPLE_RATE * 3 // 10, 0.8)
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), burst, np.zeros(SAMPLE_RATE), burst, np.zeros(SAMPLE_RATE * 2)]
+        )
+        path, voice, spoke = self._listen(
+            monkeypatch, recording, answered_after=frames(4.0), cancelling=cancelling
+        )
+        assert path is None
+        assert (voice.holds, voice.releases, spoke) == (holds, holds, [])
 
     def test_the_echo_dies_away_and_the_voice_goes_on(self, monkeypatch):
         # A quarter second of echo, sure to be speech, gone once the voice is held
@@ -310,10 +341,13 @@ class TestOverTheVoice:
 
 
 class PassThrough:
-    """An echo canceller with nothing to cancel."""
+    """An echo canceller with nothing to cancel; cancelling says whether it
+    measurably takes the voice out (None: it does not say)."""
 
-    def __init__(self, settled=False):
+    def __init__(self, settled=False, cancelling=None):
         self.settled = settled
+        if cancelling is not None:
+            self.cancelling = cancelling
 
     def clean(self, audio, captured):
         return audio
