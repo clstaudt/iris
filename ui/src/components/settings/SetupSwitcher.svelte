@@ -6,6 +6,7 @@
   // applies another one's choices
 
   let open = $state(false);
+  let root: HTMLElement;
   let naming = $state<"new" | "rename" | null>(null);
   let name = $state("");
 
@@ -48,11 +49,13 @@
 
 <svelte:window
   onclick={(event) => {
-    if (open && !(event.target as Element).closest(".switcher")) close();
+    // composedPath, not closest(): a menu item replaced by its click (New
+    // setup turning into the name field) is no longer in the document
+    if (open && !event.composedPath().includes(root)) close();
   }}
 />
 
-<div class="switcher">
+<div class="switcher" bind:this={root}>
   <button
     class="current"
     onclick={() => (open ? close() : (open = true))}

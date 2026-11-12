@@ -57,6 +57,8 @@
 
   function applyWakeWord(on: boolean) {
     const word = wakeValue.trim() || DEFAULT_WAKE_WORD;
+    // Kept in the field while off, so switching back on restores it
+    if (!on) wakeDraft = word;
     store.setWakeWord(on ? word : "").catch(fail("wake.set"));
   }
 
@@ -173,9 +175,11 @@
   );
   const speechEngines = $derived(config?.engines?.tts ?? []);
 
+  let voiceError = $state("");
+
   async function previewVoice() {
     const persona = await store.loadPersona(store.persona);
-    if (persona) store.previewVoice(persona).catch(fail("persona.preview"));
+    if (persona) voiceError = (await store.previewVoice(persona)) ?? "";
   }
 </script>
 
@@ -438,7 +442,11 @@
     {:else if stage === "voice"}
       <section class="sec">
         <div class="s-option active">
-          <button class="play" onclick={previewVoice} aria-label="Play">
+          <button
+            class="play {store.previewing === `${config?.tts_engine}:${config?.tts_voice}` ? 'playing' : ''}"
+            onclick={previewVoice}
+            aria-label="Play"
+          >
             <Icon name="play" size={11} />
           </button>
           <span class="flex min-w-0 flex-col">
@@ -446,6 +454,9 @@
             <span class="meta">{config?.persona}</span>
           </span>
         </div>
+        {#if voiceError}
+          <p class="s-status error">{voiceError}</p>
+        {/if}
         <button class="s-btn self-start" onclick={() => store.editPersona(store.persona)}>
           <Icon name="pencil" size={12} />
           Change {config?.persona}'s voice
@@ -545,5 +556,9 @@
   .play:hover {
     background: var(--color-hover);
     color: var(--color-ink);
+  }
+  .play.playing {
+    background: color-mix(in srgb, var(--color-petal-warm) 22%, transparent);
+    color: var(--color-petal-warm);
   }
 </style>

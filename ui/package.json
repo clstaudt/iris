@@ -12,6 +12,7 @@
     "build:electron": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outdir=dist-electron --out-extension:.js=.cjs",
     "build": "npm run build:electron && vite build",
     "preview": "vite preview",
+    "e2e": "node e2e/run.mjs",
     "icon": "esbuild scripts/icon/render.ts --bundle --format=iife --outfile=dist-electron/icon-render.js && ELECTRON_RUN_AS_NODE= electron scripts/icon/make-icon.cjs",
     "dist:mac": "bash scripts/package-mac.sh"
   },
@@ -22,6 +23,7 @@
     "electron": "^33.0.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.24.0",
+    "playwright-core": "^1.56.1",
     "svelte": "^5.0.0",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.6.0",

@@ -84,11 +84,9 @@
 
   const filterLabel = (name: string) => name.charAt(0).toUpperCase() + name.slice(1);
 
-  function preview(voice: string) {
+  async function preview(voice: string) {
     if (!draft) return;
-    store
-      .previewVoice({ ...$state.snapshot(draft), voice })
-      .catch((err) => console.error("[persona] preview failed:", err));
+    error = (await store.previewVoice({ ...$state.snapshot(draft), voice })) ?? "";
   }
 
   async function save() {
@@ -192,7 +190,7 @@
             {#each list as voice}
               <div class="voice {draft.voice === voice.id ? 'active' : ''}">
                 <button
-                  class="play"
+                  class="play {store.previewing === `${draft.engine}:${voice.id}` ? 'playing' : ''}"
                   onclick={() => preview(voice.id)}
                   aria-label="Play {voice.name}"
                 >
@@ -326,6 +324,11 @@
   .play:hover {
     background: var(--color-hover);
     color: var(--color-ink);
+  }
+  /* From the click until the voice has been heard: loading it can take a while */
+  .play.playing {
+    background: color-mix(in srgb, var(--color-petal-warm) 22%, transparent);
+    color: var(--color-petal-warm);
   }
   .pick {
     min-width: 0;
