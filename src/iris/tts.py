@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import torch
+import yaml
 from kokoro_onnx import Kokoro
 from kokoro_onnx import tokenizer as kokoro_tokenizer
 from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
@@ -25,7 +26,8 @@ from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
 from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
-from pykakasi import kakasi
+from pocket_tts.utils.config import CONFIGS_DIR as POCKET_CONFIGS
+from pocket_tts.utils.utils import get_predefined_voice
 
 from iris.audio import get_filter
 from iris.engines import (
@@ -514,6 +516,38 @@ def pocket_sentences(text: str) -> list[str]:
         else:
             sentences.append(part)
     return sentences
+
+
+def _hub_paths(node) -> list[str]:
+    """Every hf:// path in a Pocket TTS config, however deep."""
+    if isinstance(node, dict):
+        return [path for value in node.values() for path in _hub_paths(value)]
+    if isinstance(node, list):
+        return [path for value in node for path in _hub_paths(value)]
+    return [node] if isinstance(node, str) and node.startswith("hf://") else []
+
+
+def pocket_files(voices=("alba",), language: str = "english") -> list[str]:
+    """The files Pocket TTS loads for a language and these voices of it, as
+    hf:// paths, so they can be fetched with progress before it loads them.
+
+    Its model comes in two forms: one that clones voices, which Hugging Face
+    hands out only to an account that accepted its terms, and the open one
+    without cloning that Pocket TTS falls back to. The open one is fetched.
+    """
+    config = yaml.safe_load((POCKET_CONFIGS / f"{language}.yaml").read_text())
+    weights = config.get("weights_path_without_voice_cloning") or config.get("weights_path")
+    others = {
+        key: value
+        for key, value in config.items()
+        if key not in ("weights_path", "weights_path_without_voice_cloning")
+    }
+    known = POCKET_ENGLISH_VOICES if language == "english" else ()
+    return (
+        ([weights] if weights else [])
+        + _hub_paths(others)
+        + [get_predefined_voice(language, voice) for voice in voices if voice in known]
+    )
 
 
 class PocketGenerator(SpeechEngine):

@@ -881,6 +881,102 @@ class _Frames:
         return frame
 
 
+# The sound check: seconds of speech it needs to hear to say a voice comes
+# through, seconds of nothing but exact zeros after which the microphone
+# counts as silenced (on macOS: access not given), how often it reports, and
+# how long a check left open runs before it closes by itself
+HEARD_AFTER = 0.3
+SILENT_AFTER = 3.0
+SOUND_CHECK_REPORT = 0.05
+SOUND_CHECK_LIMIT = 300.0
+
+
+class SoundCheck:
+    """The microphone on its own, before Iris listens, for the walkthrough's
+    sound check: its level, whether a voice is in it (the VAD Iris hears
+    turns with), and whether it gives nothing but silence. Reports about 20
+    times a second as {"level": 0-1, "heard": bool, "silent": bool}."""
+
+    def __init__(
+        self,
+        on_update: Callable[[dict], None],
+        device: int | None = None,
+        audio: SoundDevice | None = None,
+        detector: Callable[[np.ndarray], float] | None = None,
+    ):
+        """
+        Args:
+            on_update: Told each report
+            device: Input device index (None = system default)
+            audio: The device listened to; the computer's microphone if None
+            detector: Speech probability of a frame; Silero VAD if None
+        """
+        self.on_update = on_update
+        self.device = device
+        self.audio = audio or SYSTEM
+        self._detector = detector
+        self._stopped = threading.Event()
+        self._capture: _Capture | None = None
+        self._thread: threading.Thread | None = None
+
+    def device_name(self) -> str:
+        """The name of the microphone listened to."""
+        try:
+            if self.device is not None:
+                return self.audio.query_devices()[self.device]["name"]
+            return self.audio.query_devices(kind="input")["name"]
+        except Exception:
+            return "Unknown microphone"
+
+    def start(self):
+        """Open the microphone, raising if it cannot be, and listen to it."""
+        self._capture = _Capture(self.audio, SAMPLE_RATE, self.device)
+        self._thread = threading.Thread(target=self._listen, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Close the microphone."""
+        self._stopped.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2)
+
+    def _listen(self):
+        capture = self._capture
+        frames = _Frames(None, capture)
+        detector = self._detector or SpeechDetector()
+        started = last = time.monotonic()
+        speech, level, zeros_since = 0.0, 0.0, None
+        try:
+            while not self._stopped.is_set() and time.monotonic() - started < SOUND_CHECK_LIMIT:
+                try:
+                    frame = frames.get(0.25)
+                except queue.Empty:
+                    continue
+                rms = float(np.sqrt(np.mean(frame**2)))
+                # The loudest moment since the last report, scaled as the
+                # level meter of listen() scales it
+                level = max(level, min(1.0, rms / 0.15))
+                if detector(frame) >= SPEECH_THRESHOLD:
+                    speech += FRAME / SAMPLE_RATE
+                now = time.monotonic()
+                if rms > 0:
+                    zeros_since = None
+                elif zeros_since is None:
+                    zeros_since = now
+                if now - last >= SOUND_CHECK_REPORT:
+                    last = now
+                    self.on_update(
+                        {
+                            "level": level,
+                            "heard": speech >= HEARD_AFTER,
+                            "silent": zeros_since is not None and now - zeros_since >= SILENT_AFTER,
+                        }
+                    )
+                    level = 0.0
+        finally:
+            capture.close()
+
+
 # Seconds of the microphone's audio kept for the next listener
 KEEP_CAPTURED = 30.0
 # A new listen takes up the microphone's audio where the last one stopped if

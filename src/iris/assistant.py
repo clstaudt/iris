@@ -18,14 +18,8 @@ from iris import engines, language
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
-from iris.events import EventBus, brief
-from iris.llm import (
-    ConversationManager,
-    effective_host,
-    failure_message,
-    model_missing,
-    split_speech,
-)
+from iris.events import EventBus
+from iris.llm import OPENING, ConversationManager, effective_host, failure_message, split_speech
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.plugin import Plugin, PluginContext
@@ -61,13 +55,13 @@ GOODBYE_SETTLE = 1.0
 # to fall quiet
 PREVIEW_SETTLE = 0.4
 
-# Told the user when an image (attached, or from the camera or the screen)
-# has no model to see it
-NO_VISION = (
-    "None of the installed models can see images. Install one with vision, "
-    "such as qwen3-vl, to talk about pictures."
+# What Iris is asked at the end of the walkthrough: to open the conversation
+# with a greeting of its own, in the persona's manner
+GREETING = (
+    "(The user has just finished setting you up and is with you now. Greet them "
+    "the way you would greet someone in person, in your own manner, and let them "
+    "know they can simply talk to you.)"
 )
-
 
 def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
     """Soft tones in sequence, each swelling in and out."""
@@ -837,6 +831,21 @@ class VoiceAssistant:
         if self.wake_word and self.awake_until > 0:
             self._stay_awake()
 
+    def _greet(self):
+        """Say hello at the end of the walkthrough: the model words it in the
+        persona's manner, and it opens the conversation with no turn of the
+        user's before it. Iris stays awake for the answer, as after a turn."""
+        self._turn_active.set()
+        try:
+            if self.wake_word:
+                self._stay_awake()
+            self._timing = None
+            self.chat(GREETING, response_language=self.conversation_language, source=OPENING)
+            if self.wake_word and self.awake_until > 0:
+                self._stay_awake()
+        finally:
+            self._turn_active.clear()
+
     def _run_voice_turn(self, audio_path: str):
         """Transcribe recorded speech and answer it."""
         self._turn_active.set()
@@ -1187,6 +1196,8 @@ class VoiceAssistant:
                     try:
                         if "audio" in turn:
                             self._handle_heard(turn["audio"], self.dormant)
+                        elif turn.get("greet"):
+                            self._greet()
                         else:
                             self._run_text_turn(turn)
                     except Exception:
