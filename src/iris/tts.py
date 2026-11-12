@@ -16,6 +16,7 @@ import soundfile as sf
 import torch
 from kokoro_onnx import Kokoro
 from kokoro_onnx import tokenizer as kokoro_tokenizer
+from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 from phonemizer.backend import EspeakBackend
 from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
@@ -79,17 +80,21 @@ KOKORO_VOICES_URL = (
     "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin"
 )
 
-# Mapping from Whisper language codes to Kokoro TTS language/voice settings.
-# kokoro-onnx speaks these espeak languages only: en-us, en-gb, fr-fr, it, ja,
-# cmn. It has Spanish, Portuguese and Hindi voices too, but refuses to speak
-# those languages; German, Spanish, Portuguese and Dutch are left to Pocket TTS.
+# Mapping from Whisper language codes to Kokoro TTS language/voice settings:
+# the espeak language Kokoro's phonemes come from, and its voices for it.
 # A Kokoro voice name starts with its language ("af_bella": American English,
-# "bm_lewis": British English, "ff_siwis": French...). A persona keeps its own
-# voice for languages that voice speaks, and borrows the default otherwise.
+# "bm_lewis": British English, "ef_dora": Spanish...). Every Kokoro voice
+# speaks English well, so a persona keeps its own voice in English; another
+# language is spoken by the persona's voice when it was made for it, by that
+# language's default voice otherwise. Kokoro has no German or Dutch voices:
+# those are left to Pocket TTS.
 LANGUAGE_VOICE_MAP = {
     "en": {"code": "en-us", "default_voice": "af_bella", "voice_prefixes": "ab"},
     "fr": {"code": "fr-fr", "default_voice": "ff_siwis", "voice_prefixes": "f"},
     "it": {"code": "it", "default_voice": "if_sara", "voice_prefixes": "i"},
+    "es": {"code": "es", "default_voice": "ef_dora", "voice_prefixes": "e"},
+    "pt": {"code": "pt-br", "default_voice": "pf_dora", "voice_prefixes": "p"},
+    "hi": {"code": "hi", "default_voice": "hf_alpha", "voice_prefixes": "h"},
     "ja": {"code": "ja", "default_voice": "jf_alpha", "voice_prefixes": "j"},
     "zh": {"code": "cmn", "default_voice": "zf_xiaoni", "voice_prefixes": "z"},
 }
@@ -143,8 +148,8 @@ class KokoroGenerator(SpeechEngine):
     name = "Kokoro"
     languages = frozenset(LANGUAGE_VOICE_MAP)
     takes_speed = True
-    # German, Spanish, Portuguese and Dutch are left to Pocket TTS, whose
-    # voices for them are native: Kokoro would read them as English
+    # German and Dutch, which Kokoro has no voices for, are left to Pocket
+    # TTS, whose voices for them are native: Kokoro would read them as English
     borrows = ("kyutai",)
 
     def __init__(
@@ -226,14 +231,16 @@ class KokoroGenerator(SpeechEngine):
         """Pick (Kokoro language code, voice) for a reply in this language.
 
         The persona's voice is used whenever it speaks the language, so
-        personas sound different from each other; for a language it cannot
-        speak, that language's default voice takes over.
+        personas sound different from each other: in English always (a
+        Spanish or Japanese voice speaks English as clearly as an American
+        one), in another language when it was made for it. Otherwise that
+        language's default voice takes over.
         """
         lang_info = get_language_info(language)
         if lang_info is None:
             # Unsupported language – fall back to English with the own voice
             kokoro_lang, voice = "en-us", self.voice
-        elif self.voice[:1] in lang_info["voice_prefixes"]:
+        elif language == "en" or self.voice[:1] in lang_info["voice_prefixes"]:
             kokoro_lang, voice = lang_info["code"], self.voice
         else:
             kokoro_lang, voice = lang_info["code"], lang_info["default_voice"]
@@ -264,9 +271,19 @@ class KokoroGenerator(SpeechEngine):
             temp_audio.close()
 
             # Generate audio using kokoro-onnx Python API
-            audio_data, sample_rate = self.kokoro.create(
-                text=text, voice=voice, speed=self.speed, lang=kokoro_lang
-            )
+            if kokoro_lang in KOKORO_ONNX_LANGUAGES:
+                audio_data, sample_rate = self.kokoro.create(
+                    text=text, voice=voice, speed=self.speed, lang=kokoro_lang
+                )
+            else:
+                # kokoro-onnx takes only some languages by name. Kokoro
+                # speaks Spanish, Portuguese and Hindi from espeak's
+                # phonemes, as Kokoro's own pipeline does; the language
+                # named is only there to pass kokoro-onnx's check
+                phonemes = self.kokoro.tokenizer.phonemize(text, kokoro_lang)
+                audio_data, sample_rate = self.kokoro.create(
+                    text=text, voice=voice, speed=self.speed, lang="en-us", phonemes=phonemes
+                )
 
             # Save audio to file
             sf.write(temp_audio.name, audio_data, sample_rate)
@@ -301,8 +318,8 @@ def heard_part(text: str, fraction: float) -> str:
     return text[:end].rstrip()
 
 
-# Whisper language codes Pocket TTS speaks, and the model for each. Japanese
-# and Chinese are left to Kokoro.
+# Whisper language codes Pocket TTS speaks, and the model for each. Hindi,
+# Japanese and Chinese are left to Kokoro.
 POCKET_LANGUAGES = {
     "en": "english",
     "fr": "french",
@@ -408,7 +425,7 @@ class PocketGenerator(SpeechEngine):
     id = "kyutai"
     name = "Kyutai"
     languages = frozenset(POCKET_LANGUAGES)
-    # Japanese and Chinese are left to Kokoro
+    # Hindi, Japanese and Chinese are left to Kokoro
     borrows = ("kokoro",)
 
     def __init__(self, voice: str = "alba", models_dir: str | Path | None = None):
@@ -522,9 +539,8 @@ class SpeechGenerator:
     The engines are those registered in iris.engines: Kyutai's Pocket TTS
     and Kokoro, and any a plugin adds. Each loads the first time it is
     needed. A reply in a language the persona's engine lacks is spoken by an
-    engine it borrows from: Kyutai personas by Kokoro for Japanese and
-    Chinese, Kokoro personas by Pocket TTS for German, Spanish, Portuguese
-    and Dutch.
+    engine it borrows from: Kyutai personas by Kokoro for Hindi, Japanese
+    and Chinese, Kokoro personas by Pocket TTS for German and Dutch.
     """
 
     def __init__(

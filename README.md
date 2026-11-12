@@ -181,7 +181,7 @@ description: |
   You have the personality and speaking style of HAL 9000.
 ```
 
-Kyutai's Pocket TTS sounds the most natural and speaks English, French, German, Italian, Spanish, Portuguese and Dutch; replies in Japanese or Chinese borrow a Kokoro voice. Kokoro speaks English, French, Italian, Japanese and Chinese; a Kokoro persona's replies in German, Spanish, Portuguese or Dutch fall back to Pocket TTS. Each part of a reply is spoken in the language it is written in, told from its words, so an Italian answer to an English question is not read with an English accent. A Kyutai voice can also be the path to a short audio file of a voice to clone.
+Kyutai's Pocket TTS sounds the most natural and speaks English, French, German, Italian, Spanish, Portuguese and Dutch; replies in Hindi, Japanese or Chinese fall back to Kokoro. Kokoro speaks English, French, Italian, Spanish, Portuguese, Hindi, Japanese and Chinese; a Kokoro persona's replies in German or Dutch fall back to Pocket TTS. A persona speaks English in its own voice, and another language in its own voice when that voice was made for it, in a native voice otherwise. Each part of a reply is spoken in the language it is written in, told from its words, so an Italian answer to an English question is not read with an English accent. A Kyutai voice can also be the path to a short audio file of a voice to clone.
 
 ### Settings
 

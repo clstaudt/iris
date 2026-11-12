@@ -63,6 +63,7 @@ PREVIEW_LINES = {
     "nl": "Hallo, ik ben {name}. Zo klink ik als we praten.",
     "ja": "こんにちは、{name}です。こんな声で話します。",
     "zh": "你好，我是{name}。这就是我说话的声音。",
+    "hi": "नमस्ते, मैं {name} हूँ। मेरी आवाज़ ऐसी है।",
 }
 
 # When several status flags are set simultaneously, the earliest match wins.
