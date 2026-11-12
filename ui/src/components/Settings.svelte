@@ -53,8 +53,35 @@
     );
   }
 
-  // Advanced: model folders the user already has, instead of downloads
-  let advancedOpen = $state(false);
+  // Great defaults first; further and expert options one step at a time
+  const showMore = $derived(store.settingsLevel !== "essentials");
+  const showExpert = $derived(store.settingsLevel === "expert");
+
+  function toggleMore() {
+    store.setSettingsLevel(showMore ? "essentials" : "more");
+  }
+
+  function toggleExpert() {
+    store.setSettingsLevel(showExpert ? "more" : "expert");
+  }
+
+  // Swappable engines and plugins, listed once the core reports them
+  const SLOT_LABELS: Record<string, string> = {
+    stt: "Recognition",
+    tts: "Voice",
+    turns: "Turn taking",
+    vision: "Vision",
+  };
+  const engineSlots = $derived(
+    Object.entries(store.config?.engines ?? {}).filter(([, list]) => list.length > 0)
+  );
+  const plugins = $derived(store.config?.plugins ?? []);
+
+  function slotLabel(slot: string) {
+    return SLOT_LABELS[slot] ?? slot.charAt(0).toUpperCase() + slot.slice(1);
+  }
+
+  // Model folders the user already has, instead of downloads
   let modelError = $state("");
 
   async function chooseModelFolder(kind: "stt" | "tts") {
@@ -154,30 +181,6 @@
     </section>
 
     <section class="flex flex-col gap-2">
-      <h3 class="section">Ollama server</h3>
-      <div class="flex gap-1.5">
-        <input
-          value={hostValue}
-          oninput={(e) => (hostDraft = (e.target as HTMLInputElement).value)}
-          onkeydown={(e) => e.key === "Enter" && connect()}
-          placeholder={store.config?.ollama_url ?? "http://localhost:11434"}
-          spellcheck="false"
-          class="field min-w-0 flex-1 !pr-3"
-        />
-        <button
-          onclick={connect}
-          disabled={connecting || hostDraft === null}
-          class="h-9 shrink-0 rounded-lg border border-line px-3 text-[12.5px] text-ink-2 transition-colors hover:bg-hover hover:text-ink disabled:opacity-40"
-        >
-          {connecting ? "Connecting" : "Connect"}
-        </button>
-      </div>
-      {#if hostError}
-        <p class="hint !text-danger">{hostError}</p>
-      {/if}
-    </section>
-
-    <section class="flex flex-col gap-2">
       <h3 class="section">Language model</h3>
       <div class="relative">
         <select value={store.config?.llm_model ?? ""} onchange={onModelChange} class="field">
@@ -197,6 +200,33 @@
       {#if store.models.length === 0}
         <p class="hint">Asking Ollama for its models…</p>
       {/if}
+    </section>
+
+    <section class="flex flex-col gap-2">
+      <h3 class="section">Microphone</h3>
+      <div class="relative">
+        <select value={selectedMic} onchange={onMicChange} class="field">
+          {#each store.inputDevices as device}
+            <option value={device.index}>{device.name}</option>
+          {/each}
+        </select>
+        <Icon name="chevron" size={14} class="chevron" />
+      </div>
+    </section>
+
+    <section class="flex flex-col gap-2">
+      <h3 class="section">Wake word</h3>
+      <div class="flex items-center gap-3">
+        <input
+          value={wakeValue}
+          oninput={(e) => (wakeDraft = (e.target as HTMLInputElement).value)}
+          onkeydown={(e) => e.key === "Enter" && wakeOn && applyWakeWord(true)}
+          onblur={() => wakeOn && wakeDraft !== null && applyWakeWord(true)}
+          spellcheck="false"
+          class="field min-w-0 flex-1 !pr-3"
+        />
+        <Switch label="Wake word" checked={wakeOn} onchange={(on) => applyWakeWord(on)} />
+      </div>
     </section>
 
     <section class="flex flex-col gap-2">
@@ -225,117 +255,171 @@
       {/if}
     </section>
 
-    <section class="flex flex-col gap-2">
-      <h3 class="section">Wake word</h3>
-      <div class="flex items-center gap-3">
-        <input
-          value={wakeValue}
-          oninput={(e) => (wakeDraft = (e.target as HTMLInputElement).value)}
-          onkeydown={(e) => e.key === "Enter" && wakeOn && applyWakeWord(true)}
-          onblur={() => wakeOn && wakeDraft !== null && applyWakeWord(true)}
-          spellcheck="false"
-          class="field min-w-0 flex-1 !pr-3"
-        />
-        <Switch label="Wake word" checked={wakeOn} onchange={(on) => applyWakeWord(on)} />
-      </div>
-      {#if wakeOn}
-        <div class="grid grid-cols-[5.5rem_1fr] items-center gap-x-3 gap-y-2 pt-1">
-          <label for="sleep-word" class="text-[12.5px] text-ink-2">Sleep word</label>
-          <input
-            id="sleep-word"
-            value={sleepValue}
-            oninput={(e) => (sleepDraft = (e.target as HTMLInputElement).value)}
-            onkeydown={(e) => e.key === "Enter" && applySleepWord()}
-            onblur={applySleepWord}
-            spellcheck="false"
-            class="field !pr-3"
-          />
-          <label for="stay-awake" class="text-[12.5px] text-ink-2">Stay awake</label>
-          <div class="relative">
-            <select
-              id="stay-awake"
-              value={store.config?.wake_window ?? 30}
-              onchange={onStayAwake}
-              class="field"
-            >
-              {#each STAY_AWAKE as seconds}
-                <option value={seconds}>{seconds < 60 ? `${seconds} s` : `${seconds / 60} min`}</option>
-              {/each}
-            </select>
-            <Icon name="chevron" size={14} class="chevron" />
-          </div>
-        </div>
-      {/if}
-    </section>
+    <button onclick={toggleMore} class="disclosure" aria-expanded={showMore}>
+      More
+      <Icon name="chevron" size={13} class={showMore ? "" : "-rotate-90"} />
+    </button>
 
-    <section class="flex flex-col gap-2">
-      <h3 class="section">Microphone</h3>
-      <div class="relative">
-        <select value={selectedMic} onchange={onMicChange} class="field">
-          {#each store.inputDevices as device}
-            <option value={device.index}>{device.name}</option>
-          {/each}
-        </select>
-        <Icon name="chevron" size={14} class="chevron" />
-      </div>
-      {#if store.config?.barge_in_available}
-        <div class="flex items-center justify-between gap-3 py-1.5">
-          <span class="text-[12.5px] text-ink">Interrupt by voice</span>
-          <Switch
-            label="Interrupt by voice"
-            checked={store.config?.barge_in ?? true}
-            onchange={(on) => store.setBargeIn(on)}
-          />
-        </div>
-      {/if}
-    </section>
-
-    {#if store.config}
-      <section class="flex flex-col gap-2">
-        <h3 class="section">Speech</h3>
-        <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
-          <dt class="text-ink-3">Recognition</dt>
-          <dd class="text-ink-2">
-            Whisper {store.config.whisper_model} ·
-            {store.config.whisper_engine === "mlx" ? "MLX" : store.config.whisper_device}
-          </dd>
-          <dt class="text-ink-3">Voice</dt>
-          <dd class="text-ink-2">
-            {store.config.tts_engine === "kokoro" ? "Kokoro" : "Kyutai"} · {store.config.tts_voice}
-          </dd>
-        </dl>
-      </section>
-
-      <section class="flex flex-col gap-2">
-        <button
-          onclick={() => (advancedOpen = !advancedOpen)}
-          class="flex items-center gap-1.5 self-start text-[12.5px] text-ink-3 transition-colors hover:text-ink-2"
-        >
-          <Icon name="chevron" size={13} class={advancedOpen ? "" : "-rotate-90"} />
-          Advanced
-        </button>
-        {#if advancedOpen}
-          <h3 class="section pt-1">Model folders</h3>
-          {#each [{ kind: "stt" as const, label: "Recognition", path: store.config.stt_model_path }, { kind: "tts" as const, label: "Voice", path: store.config.tts_models_dir }] as row}
-            <div class="flex items-center gap-2">
-              <span class="w-[5.5rem] shrink-0 text-[12.5px] text-ink-2">{row.label}</span>
-              <span
-                class="min-w-0 flex-1 truncate text-[12px] {row.path ? 'text-ink' : 'text-ink-3'}"
-                title={row.path}
-              >
-                {row.path || "Downloaded"}
+    {#if showMore}
+      {#if store.config?.barge_in_available || wakeOn}
+        <section class="flex flex-col gap-2">
+          <h3 class="section">Conversation</h3>
+          <div class="grid grid-cols-[5.5rem_1fr] items-center gap-x-3 gap-y-2">
+            {#if store.config?.barge_in_available}
+              <span class="col-span-2 flex items-center justify-between gap-3 py-0.5">
+                <span class="text-[12.5px] text-ink">Interrupt by voice</span>
+                <Switch
+                  label="Interrupt by voice"
+                  checked={store.config?.barge_in ?? true}
+                  onchange={(on) => store.setBargeIn(on)}
+                />
               </span>
-              <button class="small" onclick={() => chooseModelFolder(row.kind)}>Choose…</button>
-              {#if row.path}
-                <button class="small" onclick={() => useDownloaded(row.kind)}>Download</button>
-              {/if}
-            </div>
-          {/each}
-          {#if modelError}
-            <p class="hint !text-danger">{modelError}</p>
+            {/if}
+            {#if wakeOn}
+              <label for="sleep-word" class="text-[12.5px] text-ink-2">Sleep word</label>
+              <input
+                id="sleep-word"
+                value={sleepValue}
+                oninput={(e) => (sleepDraft = (e.target as HTMLInputElement).value)}
+                onkeydown={(e) => e.key === "Enter" && applySleepWord()}
+                onblur={applySleepWord}
+                spellcheck="false"
+                class="field !pr-3"
+              />
+              <label for="stay-awake" class="text-[12.5px] text-ink-2">Stay awake</label>
+              <div class="relative">
+                <select
+                  id="stay-awake"
+                  value={store.config?.wake_window ?? 30}
+                  onchange={onStayAwake}
+                  class="field"
+                >
+                  {#each STAY_AWAKE as seconds}
+                    <option value={seconds}>
+                      {seconds < 60 ? `${seconds} s` : `${seconds / 60} min`}
+                    </option>
+                  {/each}
+                </select>
+                <Icon name="chevron" size={14} class="chevron" />
+              </div>
+            {/if}
+          </div>
+        </section>
+      {/if}
+
+      {#if store.config}
+        <section class="flex flex-col gap-2">
+          <h3 class="section">Speech</h3>
+          <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
+            <dt class="text-ink-3">Recognition</dt>
+            <dd class="text-ink-2">
+              Whisper {store.config.whisper_model} ·
+              {store.config.whisper_engine === "mlx" ? "MLX" : store.config.whisper_device}
+            </dd>
+            <dt class="text-ink-3">Voice</dt>
+            <dd class="text-ink-2">
+              {store.config.tts_engine === "kokoro" ? "Kokoro" : "Kyutai"} · {store.config.tts_voice}
+            </dd>
+          </dl>
+        </section>
+      {/if}
+
+      <button onclick={toggleExpert} class="disclosure" aria-expanded={showExpert}>
+        Expert
+        <Icon name="chevron" size={13} class={showExpert ? "" : "-rotate-90"} />
+      </button>
+
+      {#if showExpert}
+        <section class="flex flex-col gap-2">
+          <h3 class="section">Ollama server</h3>
+          <div class="flex gap-1.5">
+            <input
+              value={hostValue}
+              oninput={(e) => (hostDraft = (e.target as HTMLInputElement).value)}
+              onkeydown={(e) => e.key === "Enter" && connect()}
+              placeholder={store.config?.ollama_url ?? "http://localhost:11434"}
+              spellcheck="false"
+              class="field min-w-0 flex-1 !pr-3"
+            />
+            <button
+              onclick={connect}
+              disabled={connecting || hostDraft === null}
+              class="h-9 shrink-0 rounded-lg border border-line px-3 text-[12.5px] text-ink-2 transition-colors hover:bg-hover hover:text-ink disabled:opacity-40"
+            >
+              {connecting ? "Connecting" : "Connect"}
+            </button>
+          </div>
+          {#if hostError}
+            <p class="hint !text-danger">{hostError}</p>
           {/if}
+        </section>
+
+        {#if store.config}
+          <section class="flex flex-col gap-2">
+            <h3 class="section">Model folders</h3>
+            {#each [{ kind: "stt" as const, label: "Recognition", path: store.config.stt_model_path }, { kind: "tts" as const, label: "Voice", path: store.config.tts_models_dir }] as row}
+              <div class="flex items-center gap-2">
+                <span class="w-[5rem] shrink-0 text-[12.5px] text-ink-2">{row.label}</span>
+                <span
+                  class="min-w-0 flex-1 truncate text-[12px] {row.path ? 'text-ink' : 'text-ink-3'}"
+                  title={row.path}
+                >
+                  {row.path || "Downloaded"}
+                </span>
+                <button class="small" onclick={() => chooseModelFolder(row.kind)}>Choose…</button>
+                {#if row.path}
+                  <button class="small" onclick={() => useDownloaded(row.kind)}>Download</button>
+                {/if}
+              </div>
+            {/each}
+            {#if modelError}
+              <p class="hint !text-danger">{modelError}</p>
+            {/if}
+          </section>
         {/if}
-      </section>
+
+        {#if engineSlots.length > 0}
+          <section class="flex flex-col gap-2">
+            <h3 class="section">Engines</h3>
+            <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
+              {#each engineSlots as [slot, list]}
+                <dt class="text-ink-3">{slotLabel(slot)}</dt>
+                <dd class="flex flex-wrap gap-x-2 gap-y-0.5">
+                  {#each list as engine}
+                    <span
+                      class={engine.active
+                        ? "text-ink"
+                        : engine.available === false
+                          ? "text-ink-3 line-through"
+                          : "text-ink-3"}
+                    >
+                      {engine.label}
+                    </span>
+                  {/each}
+                </dd>
+              {/each}
+            </dl>
+          </section>
+        {/if}
+
+        {#if plugins.length > 0}
+          <section class="flex flex-col gap-2">
+            <h3 class="section">Plugins</h3>
+            <div class="flex flex-col">
+              {#each plugins as plugin}
+                <div class="flex items-baseline justify-between gap-3 py-1">
+                  <span class="text-[12.5px] {plugin.active ? 'text-ink' : 'text-ink-2'}">
+                    {plugin.label}
+                  </span>
+                  {#if plugin.available === false}
+                    <span class="hint">Not installed</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          </section>
+        {/if}
+      {/if}
     {/if}
   </div>
 </aside>
@@ -347,6 +431,20 @@
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--color-ink-3);
+  }
+  .disclosure {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    border-top: 1px solid var(--color-line);
+    padding-top: 1rem;
+    font-size: 12.5px;
+    color: var(--color-ink-3);
+    transition: color 150ms;
+  }
+  .disclosure:hover {
+    color: var(--color-ink-2);
   }
   .small {
     height: 1.9rem;

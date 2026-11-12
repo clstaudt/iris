@@ -156,7 +156,26 @@ export interface AssistantConfig {
   memory?: boolean;
   amnesia?: boolean;
   tools?: Record<string, ToolState>;
+  /** Swappable engines per slot (speech recognition, voice, ...), once the
+   *  core reports them */
+  engines?: Record<string, ModuleInfo[]>;
+  /** Plugins the core has loaded, once it reports them */
+  plugins?: ModuleInfo[];
 }
+
+/** An engine or plugin, as listed in the expert settings. */
+export interface ModuleInfo {
+  id: string;
+  label: string;
+  /** The engine in use for its slot, or a plugin switched on */
+  active?: boolean;
+  /** False when its dependencies are missing */
+  available?: boolean;
+}
+
+/** How much of the settings is shown: great defaults first, expert options
+ *  one step at a time. */
+export type SettingsLevel = "essentials" | "more" | "expert";
 
 export type SpeechEngine = "kyutai" | "kokoro";
 
@@ -202,6 +221,8 @@ interface SavedSettings {
   wake_word?: string;
   wake_window?: number;
   sleep_word?: string;
+  /** How much of the settings is shown */
+  settings_level?: SettingsLevel;
   /** Model folders chosen by the user; empty means download as usual */
   stt_model_path?: string;
   tts_models_dir?: string;
@@ -266,6 +287,8 @@ class IrisStore {
   speakReplies = $state(true);
   /** The side panel beside the conversation, if one is open */
   panel = $state<"settings" | "memory" | "persona" | null>(null);
+  /** How much of the settings and the persona editor is shown */
+  settingsLevel = $state<SettingsLevel>(loadSettings().settings_level ?? "essentials");
   /** The persona open in the persona editor; "" for a new one */
   editingPersona = $state("");
   /** Each speech engine's voices, for the persona editor */
@@ -588,6 +611,11 @@ class IrisStore {
   /** Say a line in a voice as it is being edited. */
   async previewVoice(settings: PersonaSettings) {
     await rpc("persona.preview", { ...settings });
+  }
+
+  setSettingsLevel(level: SettingsLevel) {
+    this.settingsLevel = level;
+    saveSettings({ settings_level: level });
   }
 
   togglePanel(name: "settings" | "memory") {
