@@ -6,12 +6,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from iris.language import language_of
 from iris.tts import (
     LANGUAGE_VOICE_MAP,
     KokoroGenerator,
     get_language_info,
     is_language_supported,
 )
+
+# The languages Iris speaks its replies in, as Whisper codes
+SPOKEN = ("en", "fr", "it", "de", "es", "pt", "nl", "ja", "zh")
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +165,73 @@ class TestPersonaVoice:
         gen = self._generator("af_sarah")
         gen.voice = "bm_lewis"
         assert gen.voice_for("en") == ("en-gb", "bm_lewis")
+
+
+# ---------------------------------------------------------------------------
+# The language a text is written in
+# ---------------------------------------------------------------------------
+
+
+class TestLanguageOf:
+    @pytest.mark.parametrize(
+        "language, text",
+        [
+            ("en", "What would you like to talk about today?"),
+            ("fr", "De quoi voulez-vous parler aujourd'hui ?"),
+            ("it", "Di cosa vorresti parlare oggi?"),
+            ("de", "Worüber möchtest du heute sprechen?"),
+            ("es", "¿De qué quieres hablar hoy?"),
+            ("pt", "Sobre o que você quer falar hoje?"),
+            ("nl", "Waar wil je vandaag over praten?"),
+            ("ja", "今日は何について話したいですか？"),
+            ("zh", "你今天想聊些什么？"),
+        ],
+    )
+    def test_each_language_is_told(self, language, text):
+        assumed = "de" if language == "en" else "en"
+        assert language_of(text, assumed, SPOKEN) == language
+
+    def test_italian_heard_as_portuguese_is_italian(self):
+        assert language_of("Parliamo italiano.", "pt", SPOKEN) == "it"
+
+    @pytest.mark.parametrize(
+        "piece",
+        [
+            "Sì, certamente.",
+            "Posso parlare italiano.",
+            "Va bene, parliamo italiano.",
+            "Di cosa vorresti parlare?",
+        ],
+    )
+    def test_an_italian_reply_to_english_is_italian(self, piece):
+        assert language_of(piece, "en", SPOKEN) == "it"
+
+    @pytest.mark.parametrize(
+        "text, assumed",
+        [("Okay.", "de"), ("Ciao!", "en"), ("Sure.", "it"), ("Fitzcarraldo.", "en"),
+         ("42", "fr"), ("...", "en"), ("", "en")],
+    )  # fmt: skip
+    def test_a_word_or_two_keep_the_language(self, text, assumed):
+        assert language_of(text, assumed, SPOKEN) == assumed
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Werner Herzog is a German director, born in Munich in 1942.",
+            "Who is Jürgen Klopp?",
+            "Look up tickets for the Musée d'Orsay.",
+            "Search for the opening hours of Schloss Neuschwanstein.",
+        ],
+    )
+    def test_names_from_elsewhere_keep_a_sentence_english(self, text):
+        assert language_of(text, "en", SPOKEN) == "en"
+
+    @pytest.mark.parametrize("text", ["Опиши себя коротко.", "안녕하세요, 잘 지내세요?"])
+    def test_a_language_none_speaks_is_not_taken_for_one_of_them(self, text):
+        assert language_of(text, "en", SPOKEN) == "en"
+
+    def test_only_the_languages_given_are_told(self):
+        assert language_of("Worüber möchtest du heute sprechen?", "en", {"en", "fr"}) == "en"
 
 
 # ---------------------------------------------------------------------------

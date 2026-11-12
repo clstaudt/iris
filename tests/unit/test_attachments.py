@@ -15,6 +15,7 @@ from iris.attachments import AttachmentError, prepare, prepare_all, recorded_tex
 from iris.controller import AssistantController
 from iris.events import EventBus
 from iris.llm import ConversationManager
+from iris.tts import SpeechGenerator
 
 
 def _upload(name, mime, data: bytes) -> dict:
@@ -149,6 +150,8 @@ def test_a_spoken_reply_keeps_only_the_names_too(mock_ollama):
     assistant.conversation = _manager(mock_ollama, ["completion"])
     assistant.status_manager = MagicMock()
     assistant.speech_pipeline = MagicMock()
+    assistant.tts_generator = SpeechGenerator.__new__(SpeechGenerator)
+    assistant.tts_generator.engine = "kyutai"
     assistant.event_bus = None
     assistant.memory = None
     assistant.speak_replies = True

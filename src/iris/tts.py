@@ -28,6 +28,7 @@ from iris.engines import (
     register_speech_engine,
     speaking_engine,
     speech_engine,
+    spoken_languages,
 )
 
 warnings.filterwarnings("ignore")
@@ -539,6 +540,10 @@ class SpeechGenerator:
     def speaks(self, language: str) -> bool:
         """Whether replies in this language can be spoken in it."""
         return engine_speaks(self.engine, language)
+
+    def languages(self) -> frozenset[str]:
+        """The languages replies can be spoken in, as Whisper codes."""
+        return spoken_languages(self.engine)
 
     def prepare(self):
         """Load the current engine now, so its first reply is not delayed."""
