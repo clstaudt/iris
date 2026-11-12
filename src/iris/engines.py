@@ -67,6 +67,13 @@ class SpeechEngine:
         """Its voice for a language, used when another engine borrows it."""
         return None
 
+    def prepare(self):
+        """Load what its first reply needs, when it is the persona's engine.
+
+        An engine only borrowed for a language loads what that language
+        needs when it is first spoken, and nothing else.
+        """
+
     def generate(self, text: str, language: str = "en") -> Optional[str]:
         """Speak text in the current voice into a WAV file.
 

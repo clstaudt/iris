@@ -218,9 +218,10 @@ def test_a_preview_without_effect_plays_unfiltered():
 def test_which_languages_an_engine_speaks():
     assert engine_speaks("kyutai", "de") and engine_speaks("kyutai", "nl")
     assert engine_speaks("kyutai", "ja")  # through Kokoro
-    assert not engine_speaks("kokoro", "de")
+    assert engine_speaks("kokoro", "de")  # through Kyutai
     assert engine_speaks("kokoro", "fr")
     assert not engine_speaks("kyutai", "ru")
+    assert not engine_speaks("kokoro", "ru")
 
 
 # ---------------------------------------------------------------------------

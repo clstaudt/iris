@@ -126,9 +126,14 @@ def test_a_kyutai_persona_answers_german_in_german():
     assert _answer_heard("kyutai", "Beschreibe dich kurz.", "de") == "de"
 
 
-def test_a_kokoro_persona_keeps_to_languages_it_speaks():
-    assert _answer_heard("kokoro", "Beschreibe dich kurz.", "de") == "en"
+def test_a_kokoro_persona_answers_german_through_kyutai():
+    assert _answer_heard("kokoro", "Beschreibe dich kurz.", "de") == "de"
     assert _answer_heard("kokoro", "Bonjour.", "fr") == "fr"
+
+
+def test_a_language_no_voice_speaks_keeps_to_english():
+    assert _answer_heard("kokoro", "Опиши себя коротко.", "ru") == "en"
+    assert _answer_heard("kyutai", "Опиши себя коротко.", "ru") == "en"
 
 
 def test_a_kyutai_persona_answers_japanese_through_kokoro():
@@ -156,6 +161,13 @@ def test_each_piece_of_the_reply_is_spoken_in_the_language_it_is_in():
     assistant._speak("Sorry, back to English: what would you like to talk about?")
 
     assert assistant.speech_pipeline.languages == ["it", "it", "it", "en"]
+
+
+def test_a_kokoro_persona_speaks_a_german_reply_in_german():
+    assistant = _bare_assistant()
+    assistant.tts_generator.engine = "kokoro"
+    assistant._speak("Ja, natürlich, das mache ich gern.")
+    assert assistant.speech_pipeline.languages == ["de"]
 
 
 def test_a_reply_in_a_language_no_voice_speaks_keeps_the_conversations():

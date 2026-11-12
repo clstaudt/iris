@@ -80,7 +80,9 @@ KOKORO_VOICES_URL = (
 )
 
 # Mapping from Whisper language codes to Kokoro TTS language/voice settings.
-# Kokoro supports: en-us, en-gb, fr-fr, it, ja, cmn
+# kokoro-onnx speaks these espeak languages only: en-us, en-gb, fr-fr, it, ja,
+# cmn. It has Spanish, Portuguese and Hindi voices too, but refuses to speak
+# those languages; German, Spanish, Portuguese and Dutch are left to Pocket TTS.
 # A Kokoro voice name starts with its language ("af_bella": American English,
 # "bm_lewis": British English, "ff_siwis": French...). A persona keeps its own
 # voice for languages that voice speaks, and borrows the default otherwise.
@@ -141,6 +143,9 @@ class KokoroGenerator(SpeechEngine):
     name = "Kokoro"
     languages = frozenset(LANGUAGE_VOICE_MAP)
     takes_speed = True
+    # German, Spanish, Portuguese and Dutch are left to Pocket TTS, whose
+    # voices for them are native: Kokoro would read them as English
+    borrows = ("kyutai",)
 
     def __init__(
         self,
@@ -340,7 +345,8 @@ LANGUAGE_NAMES = {
 def engine_speaks(engine: str, language: str) -> bool:
     """Whether a persona on this engine can speak its replies in a language,
     with its own voice or one it borrows (Kyutai personas leave the
-    languages Pocket TTS lacks to Kokoro)."""
+    languages Pocket TTS lacks to Kokoro, and Kokoro personas those Kokoro
+    lacks to Pocket TTS)."""
     return speaking_engine(engine, language) is not None
 
 
@@ -394,8 +400,9 @@ def pocket_sentences(text: str) -> list[str]:
 class PocketGenerator(SpeechEngine):
     """Generates speech audio with Kyutai's Pocket TTS, on the CPU.
 
-    Pocket TTS has one model per language: English loads right away, the
-    others the first time a reply is in that language.
+    Pocket TTS has one model per language: English loads when the persona
+    speaks with Pocket TTS, the others the first time a reply is in that
+    language.
     """
 
     id = "kyutai"
@@ -413,6 +420,11 @@ class PocketGenerator(SpeechEngine):
         self.voice = voice
         self._models: dict[str, TTSModel] = {}
         self._voice_states: dict[tuple[str, str], object] = {}
+
+    def prepare(self):
+        """English, which a conversation starts in, loads at once. Borrowed
+        by a Kokoro persona for German, say, Pocket TTS loads the German
+        model only."""
         self._model("english")
 
     def _model(self, pocket_lang: str) -> TTSModel:
@@ -510,8 +522,9 @@ class SpeechGenerator:
     The engines are those registered in iris.engines: Kyutai's Pocket TTS
     and Kokoro, and any a plugin adds. Each loads the first time it is
     needed. A reply in a language the persona's engine lacks is spoken by an
-    engine it borrows from (Kyutai personas by Kokoro, for Japanese and
-    Chinese).
+    engine it borrows from: Kyutai personas by Kokoro for Japanese and
+    Chinese, Kokoro personas by Pocket TTS for German, Spanish, Portuguese
+    and Dutch.
     """
 
     def __init__(
@@ -548,7 +561,7 @@ class SpeechGenerator:
     def prepare(self):
         """Load the current engine now, so its first reply is not delayed."""
         with self._lock:
-            self._engine(self.engine)
+            self._engine(self.engine).prepare()
 
     def _engine(self, engine: str) -> SpeechEngine:
         if engine not in self._engines:

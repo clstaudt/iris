@@ -169,9 +169,10 @@ def test_an_engine_id_that_is_taken_fails_the_plugin_whole(tmp_path, monkeypatch
 def test_the_built_in_engines_are_registered():
     assert list(engines.speech_engines())[:2] == ["kyutai", "kokoro"]
     assert "whisper" in engines.recognition_engines()
-    # Kyutai borrows Kokoro's voice for Japanese; Kokoro borrows nothing
+    # Kyutai borrows Kokoro's voice for Japanese, Kokoro Kyutai's for German
     assert engines.speaking_engine("kyutai", "ja") == ("kokoro", "jf_alpha")
-    assert engines.speaking_engine("kokoro", "de") is None
+    assert engines.speaking_engine("kokoro", "de") == ("kyutai", "juergen")
+    assert engines.speaking_engine("kokoro", "ru") is None
 
 
 def test_the_example_plugin_loads_from_its_folder(monkeypatch):
