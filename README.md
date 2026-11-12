@@ -143,7 +143,7 @@ Iris starts listening as soon as the models are loaded. Speaking and typing shar
 
 ### Presence mode
 
-For using Iris by voice and vision alone, the shrink button beside Memory and Settings turns the window into presence mode: a small window with only the orb, floating above other windows. Drag it anywhere; a click on the orb still pauses and resumes. Escape, or the button that appears at the top right when you hover, brings the conversation back. When something needs your attention, such as a microphone that delivers only silence, the message appears under the orb, and a click on it opens the conversation. Iris remembers the mode and where the small window was.
+For using Iris by voice and vision alone, the shrink button beside Memory and Settings turns Iris into presence mode: only the orb, round and without a window around it, floating above other windows. Clicks beside it go to whatever is underneath. Drag it anywhere; a click on the orb still pauses and resumes. A double click, or Escape, brings the conversation back. When something needs your attention, such as a microphone that delivers only silence, the orb turns red and shows the message when you point at it, and a click opens the conversation. Iris remembers the mode and where the orb was.
 
 ### Tools and files
 
