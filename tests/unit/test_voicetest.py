@@ -13,6 +13,7 @@ import numpy as np
 import ollama
 import pytest
 from ddgs.exceptions import DDGSException
+from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 
 from iris.events import EventBus
 from iris.llm import ConversationManager
@@ -67,6 +68,7 @@ from irisdev.voicetest.stub_llm import (
     results,
     search,
 )
+from irisdev.voicetest.voices import VOICES, UserVoice, kokoro_language
 
 
 def tone(seconds: float, level: float = 0.5, rate: int = RATE) -> np.ndarray:
@@ -297,6 +299,40 @@ class TestStubModel:
             assert again.list().models
         finally:
             stub.close()
+
+
+class NamedLanguagesOnly:
+    """Kokoro as kokoro-onnx is: it takes only some languages by name, and
+    any other spoken from phonemes given with it. Notes what it was asked."""
+
+    def __init__(self):
+        self.asked = []
+        self.tokenizer = SimpleNamespace(phonemize=lambda text, code: f"<{code}:{text}>")
+
+    def create(self, text, voice, speed=1.0, lang="en-us", phonemes=None):
+        assert lang in KOKORO_ONNX_LANGUAGES, f"Language must be one of them. Got {lang}"
+        self.asked.append((voice, lang, phonemes))
+        return np.zeros(2400, dtype=np.float32), 24000
+
+
+@pytest.mark.parametrize("name", [n for n, v in VOICES.items() if v["engine"] == "kokoro"])
+def test_every_kokoro_voice_of_the_user_can_speak(name, monkeypatch, tmp_path):
+    """The Spanish user could not say a word: kokoro-onnx refuses Spanish,
+    Portuguese and Hindi by name, so "across languages" could not be held."""
+    kokoro = NamedLanguagesOnly()
+    monkeypatch.setattr(UserVoice, "_kokoro", kokoro)
+    voice = UserVoice.named(tmp_path, name)
+    assert len(voice.utterance(["Hello there."])) > 0
+    [(spoken, lang, phonemes)] = kokoro.asked
+    code = kokoro_language(voice.voice, voice.language)
+    assert spoken == voice.voice
+    assert (lang, phonemes) == ((code, None) if code in KOKORO_ONNX_LANGUAGES else
+                                ("en-us", f"<{code}:Hello there.>"))
+
+
+def test_the_user_speaks_every_language_iris_speaks():
+    spoken = {v["language"] for v in VOICES.values()}
+    assert {"en", "fr", "it", "es", "ja", "de", "nl", "pt", "zh", "hi"} <= spoken
 
 
 def test_heard_share_counts_the_words_said():

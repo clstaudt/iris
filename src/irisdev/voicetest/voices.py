@@ -6,10 +6,13 @@ given in seconds, for a user who stops mid-sentence or thinks aloud.
 
 Other users are other voices (VOICES): British and American, an Indian and
 a French voice speaking English, a Pocket TTS voice close to Iris's own,
-and voices speaking French, Italian, Spanish, Japanese, German and Dutch.
-Kokoro is called directly with the language to speak, so a French voice can
-speak English with its accent. German and Dutch are spoken by Pocket TTS,
-cloning a voice from a prompt (not Pocket's default voices, which Iris uses).
+and voices speaking each language Iris speaks: French, Italian, Spanish,
+Portuguese, Japanese, Chinese, Hindi, German and Dutch. Kokoro is called
+directly with the language to speak, so a French voice can speak English
+with its accent; Spanish, Portuguese and Hindi, which kokoro-onnx does not
+take by name, it speaks from espeak's phonemes, as Iris does. German and
+Dutch are spoken by Pocket TTS, cloning a voice from a prompt (not Pocket's
+default voices, which Iris uses).
 
 Said as pieces, a sentence with pauses ends each piece with a sentence's
 fall in pitch. Spliced, it is synthesized whole and the pauses are cut into
@@ -26,6 +29,7 @@ import numpy as np
 import soundfile as sf
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
+from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 from pocket_tts import TTSModel
 
 from iris.tts import KOKORO_MODEL_FILE, KOKORO_VOICES_FILE, POCKET_LANGUAGES, find_kokoro_models
@@ -66,6 +70,9 @@ VOICES = {
     "it": {"engine": "kokoro", "voice": "im_nicola", "language": "it"},
     "es": {"engine": "kokoro", "voice": "em_alex", "language": "es"},
     "ja": {"engine": "kokoro", "voice": "jm_kumo", "language": "ja"},
+    "pt": {"engine": "kokoro", "voice": "pm_alex", "language": "pt"},
+    "zh": {"engine": "kokoro", "voice": "zf_xiaobei", "language": "zh"},
+    "hi": {"engine": "kokoro", "voice": "hm_omega", "language": "hi"},
     "de": {"engine": "kyutai", "voice": "clone:af_nicole", "language": "de"},
     "nl": {"engine": "kyutai", "voice": "clone:am_adam", "language": "nl"},
     # Another person in the room, for asides not from the user
@@ -130,9 +137,13 @@ class UserVoice:
 
     def _synthesize(self, text: str) -> tuple[np.ndarray, int]:
         if self.engine == "kokoro":
-            audio, rate = self._kokoro_engine().create(
-                text, voice=self.voice, speed=self.speed, lang=kokoro_language(self.voice, self.language)
-            )
+            kokoro, code = self._kokoro_engine(), kokoro_language(self.voice, self.language)
+            if code in KOKORO_ONNX_LANGUAGES:
+                audio, rate = kokoro.create(text, voice=self.voice, speed=self.speed, lang=code)
+            else:
+                # Named only to pass kokoro-onnx's check: the phonemes say it all
+                audio, rate = kokoro.create(text, voice=self.voice, speed=self.speed, lang="en-us",
+                                            phonemes=kokoro.tokenizer.phonemize(text, code))
             return np.asarray(audio, dtype=np.float32), int(rate)
         if self.engine == "kyutai":
             model, state = self._pocket_voice()
