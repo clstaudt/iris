@@ -29,6 +29,16 @@ MAX_TOOL_ROUNDS = 3
 # one asked again after a reply that was nothing but a call it cannot make
 NO_MORE_TOOLS_NOTE = "Answer the user now from what you have. No more tools can be used."
 NO_TOOLS_NOTE = "No tools can be used now. Answer the user in words."
+# Told the model in place of images no model at hand can see: shared by
+# the user, or captured by a tool (the camera, the screen)
+IMAGES_UNSEEN = (
+    "(The images cannot be shown to you: no model that can see images is "
+    "installed. Let the user know.)"
+)
+IMAGE_UNSEEN = (
+    "(The image cannot be shown to you: no model that can see images is "
+    "installed. Let the user know.)"
+)
 # How Ollama refuses a request with tools for a model that cannot take them
 TOOLS_REFUSED = "does not support tools"
 
@@ -628,6 +638,7 @@ class ConversationManager:
         source=None,
         attachments: Optional[list[Attachment]] = None,
         keep: bool = True,
+        on_tool_result=None,
     ):
         """
         Send prompt to LLM and stream response with tool support.
@@ -638,6 +649,7 @@ class ConversationManager:
             response_language: Language the assistant should respond in
                 (Whisper ISO 639-1 code, e.g. 'en', 'fr', 'ja')
             on_tool_use: Optional callback(tool_name, tool_args) called before each tool executes
+            on_tool_result: Optional callback(tool_name, result) called after each tool ran
             attachments: Files sent with the message; they stay in context for
                 a few turns, and only their names are recorded
             keep: Keep the exchange in the conversation once the reply is
@@ -652,7 +664,7 @@ class ConversationManager:
         self.reply = None
         self._cancelled.clear()
         yield from self._reply_stream(
-            prompt, response_language, on_tool_use, source, attachments or []
+            prompt, response_language, on_tool_use, source, attachments or [], on_tool_result
         )
         if keep:
             self._record(recorded_text(prompt, attachments or []), self.reply, source)
@@ -733,6 +745,7 @@ class ConversationManager:
         on_tool_use,
         source,
         attachments: list[Attachment],
+        on_tool_result=None,
     ):
         """The model's reply as it streams in, tool rounds included."""
         # Language names for the LLM instruction
@@ -772,10 +785,7 @@ class ConversationManager:
         if sees:
             user_message["images"] = images
         elif images:
-            user_message["content"] += (
-                "\n\n(The images cannot be shown to you: no model that can see "
-                "images is installed. Let the user know.)"
-            )
+            user_message["content"] += "\n\n" + IMAGES_UNSEEN
         messages.append(user_message)
 
         # The reply streams as it comes, so the voice can start before the
@@ -822,7 +832,7 @@ class ConversationManager:
             messages.append(
                 {"role": "assistant", "content": "".join(said), "tool_calls": tool_calls}
             )
-            ran = self._run_tools(tool_calls, messages, on_tool_use)
+            ran = self._run_tools(tool_calls, messages, on_tool_use, on_tool_result)
             if ran is None:
                 return  # cancelled
             uses_vision, ends = ran
@@ -831,8 +841,10 @@ class ConversationManager:
             # Said nothing yet, it answers once more, without tools.
             if ends and "".join(spoken).strip():
                 break
-            # A tool that returned an image is answered by the vision model
-            response_model = self.vision_model if (uses_vision and self.vision_model) else model
+            # A tool's image is answered by a model that sees it: the model
+            # of the conversation if it can, else the vision model. Without
+            # either, the image was left out and the model answers in words.
+            response_model = (self.image_model() or model) if uses_vision else model
 
             # Tools stay on offer, so a search can be followed by reading
             # a page: without them a model writes its next call out as
@@ -860,11 +872,14 @@ class ConversationManager:
             return None
         return [{"function": {"name": c.name, "arguments": c.arguments}} for c in runnable]
 
-    def _run_tools(self, tool_calls: list, messages: list, on_tool_use) -> Optional[tuple[bool, bool]]:
+    def _run_tools(
+        self, tool_calls: list, messages: list, on_tool_use, on_tool_result=None
+    ) -> Optional[tuple[bool, bool]]:
         """Run a round's tool calls, adding their results to the messages.
-        Returns whether one returned an image and whether every call ends
-        the reply (going to sleep), or None if the reply was cancelled
-        before all had run."""
+        Returns whether one returned an image a model can see and whether
+        every call ends the reply (going to sleep), or None if the reply was
+        cancelled before all had run. An image no model at hand can see is
+        left out, and the model is told so."""
         uses_vision = False
         ends = True
         for tool_call in tool_calls:
@@ -878,6 +893,8 @@ class ConversationManager:
 
             # Execute the tool (it shows its activity meanwhile)
             result = self.tools.execute(tool_name, **tool_args)
+            if on_tool_result:
+                on_tool_result(tool_name, result)
             ends = ends and bool(result.get("success") and result.get("ends_reply"))
             if result.get("success") and result.get("pin_topic") is not None:
                 self.pinned[result["pin_topic"]] = PIN_TURNS
@@ -886,6 +903,8 @@ class ConversationManager:
             tool_msg = {"role": "tool", "content": ""}
             if not result.get("success"):
                 tool_msg["content"] = f"Error: {result.get('message', 'Tool execution failed')}"
+            elif result.get("image") and self.image_model() is None:
+                tool_msg["content"] = result.get("message", "Image captured") + " " + IMAGE_UNSEEN
             elif result.get("image"):
                 uses_vision = True
                 tool_msg["images"] = [result["image"]]

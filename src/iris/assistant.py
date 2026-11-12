@@ -55,6 +55,14 @@ GOODBYE_SETTLE = 1.0
 # to fall quiet
 PREVIEW_SETTLE = 0.4
 
+# Told the user when an image (attached, or from the camera or the screen)
+# has no model to see it
+NO_VISION = (
+    "None of the installed models can see images. Install one with vision, "
+    "such as qwen3-vl, to talk about pictures."
+)
+
+
 def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
     """Soft tones in sequence, each swelling in and out."""
     rate = 24000
@@ -735,14 +743,7 @@ class VoiceAssistant:
                 event["attachments"] = [a.describe() for a in attachments]
             self.event_bus.emit("chat.user", event)
             if any(a.kind == "image" for a in attachments) and not self.conversation.image_model():
-                self.event_bus.emit(
-                    "error",
-                    {
-                        "message": "None of the installed models can see images. Install "
-                        "one with vision, such as qwen3-vl, to talk about pictures.",
-                        "kind": "no_vision",
-                    },
-                )
+                self.event_bus.emit("error", {"message": NO_VISION, "kind": "no_vision"})
         self.chat(
             text,
             response_language=self.conversation_language,
@@ -916,6 +917,13 @@ class VoiceAssistant:
                         "tool.use", {"tool": tool_name, "label": label, "detail": detail}
                     )
 
+            def on_tool_result(tool_name, result):
+                # An image no model can see was left out: the user is told why
+                if not self.event_bus:
+                    return
+                if result.get("image") and not self.conversation.image_model():
+                    self.event_bus.emit("error", {"message": NO_VISION, "kind": "no_vision"})
+
             interrupted = False
             try:
                 stream = self.conversation.chat_stream(
@@ -925,6 +933,7 @@ class VoiceAssistant:
                     source=source,
                     attachments=attachments,
                     keep=False,  # kept below, once it is known what was heard
+                    on_tool_result=on_tool_result,
                 )
                 for chunk_text in self._reply_chunks(stream):
                     # Paused: stop consuming the reply until resumed (or stopped)
