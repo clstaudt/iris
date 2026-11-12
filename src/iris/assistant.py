@@ -1106,6 +1106,14 @@ class VoiceAssistant:
             logger.exception("Reply failed")
             return error_msg
 
+    def _mic_lost(self):
+        """Switch the microphone off after it failed, and show it off."""
+        self.pause_event.set()
+        self.recorder._device_error = False
+        self.recorder.close_microphone()
+        if self.event_bus:
+            self.event_bus.emit("config", self.config_info())
+
     def _error(self, message: str):
         """Tell the app about a problem it should show."""
         if self.event_bus:
@@ -1116,8 +1124,10 @@ class VoiceAssistant:
         """Listen and answer until stop_event is set."""
         devices_ok, device_msg = self.recorder.check_audio_devices()
         if not devices_ok:
+            # Typed messages are still answered; the microphone is off until
+            # the user switches it on again
             self._error(f"No microphone: {device_msg}")
-            return
+            self._mic_lost()
 
         try:
             while True:
@@ -1234,13 +1244,16 @@ class VoiceAssistant:
                         self.status_manager.status_listening = False
                         self.status_manager.status_dormant = False
 
-                    # Check if we had a device error
+                    # The microphone went away: typed messages are still
+                    # answered, and the microphone is off until switched on
                     if self.recorder._device_error:
                         self.speech_pipeline.stop()
                         self._error(
-                            "The microphone was disconnected. Connect one and start Iris again."
+                            "The microphone was disconnected. Connect one and switch "
+                            "the microphone on again."
                         )
-                        break
+                        self._mic_lost()
+                        continue
 
                     if not audio_path:
                         continue
