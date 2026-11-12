@@ -23,6 +23,7 @@ from iris.memory import MemoryStore
 from iris.plugins import web
 from iris.status import StatusManager
 from iris.tools import Tools
+from iris.tts import POCKET_LANGUAGES, PocketGenerator
 from iris.turns import SmartTurn
 from irisdev.voicetest import assistant as under_test
 from irisdev.voicetest import scripted, sounds, voices, wording
@@ -352,16 +353,18 @@ class PocketWithoutCloning:
         return torch.zeros(2400)
 
 
-@pytest.mark.parametrize("name, own", [("de", "juergen"), ("nl", "daan")])
-def test_without_voice_cloning_the_user_speaks_with_pocket_tts_own_voice(name, own, monkeypatch, tmp_path):
+@pytest.mark.parametrize("name, own", [("de", "eve"), ("nl", "michael")])
+def test_without_voice_cloning_the_user_speaks_with_one_of_pocket_tts_voices(name, own, monkeypatch, tmp_path):
     """The German and Dutch users are cloned voices: where cloning cannot be
-    had, no German or Dutch turn could be held at all."""
+    had, no German or Dutch turn could be held at all. Their stand-ins are
+    not the voices Iris answers in."""
     model = PocketWithoutCloning(cloning=False)
     monkeypatch.setattr(voices.TTSModel, "load_model", lambda language: model)
     monkeypatch.setattr(UserVoice, "_pocket", {})
     voice = UserVoice.named(tmp_path, name)
     assert len(voice.utterance(["Hallo."])) > 0
     assert model.prompts == [own]
+    assert own not in {PocketGenerator.default_voice(language) for language in POCKET_LANGUAGES}
     # Kept apart from what a cloned voice said
     clone = UserVoice.named(tmp_path, name)
     clone._pocket = {}

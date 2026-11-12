@@ -32,7 +32,6 @@ from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 from pocket_tts import TTSModel
-from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 
 from iris.tts import KOKORO_MODEL_FILE, KOKORO_VOICES_FILE, POCKET_LANGUAGES, find_kokoro_models
 from irisdev.voicetest.acoustics import RATE, in_room, room, to_rate
@@ -57,6 +56,9 @@ KOKORO_LANGUAGES = {
 }
 # Pocket TTS clones a voice from this, said by a Kokoro voice, for German and Dutch
 CLONE_PROMPT = "Hello, I am reading this short passage so my voice can be recognized clearly."
+# Pocket TTS's own voices (each speaks every language it has) that stand in
+# for a woman's and a man's cloned voice where it cannot clone
+CLONE_STAND_INS = {"f": "eve", "m": "michael"}
 # Whisper for finding where the pieces of a spliced sentence meet
 SPLICE_MODEL = "base"
 
@@ -174,15 +176,15 @@ class UserVoice:
         """Pocket TTS for the language, the voice's state, and the voice it
         is: a named voice, or one cloned from a Kokoro voice reading
         CLONE_PROMPT. Pocket TTS clones only with weights that are gated on
-        Hugging Face; without them, a cloned voice is Pocket TTS's own voice
-        for the language, the one Iris answers in."""
+        Hugging Face; without them, a cloned voice is one of Pocket TTS's own
+        voices instead (CLONE_STAND_INS), never the one Iris answers in."""
         language = POCKET_LANGUAGES.get(self.language, "english")
         key = (language, self.voice)
         if key not in self._pocket:
             model = TTSModel.load_model(language=language)
             voice = prompt = self.voice
             if voice.startswith("clone:") and not getattr(model, "has_voice_cloning", True):
-                voice = prompt = DEFAULT_VOICE_FOR_LANGUAGE[language]
+                voice = prompt = CLONE_STAND_INS[voice.split(":", 1)[1][1:2]]
                 logger.warning("Pocket TTS cannot clone voices here: the user speaks %s as %s", language, voice)
             elif voice.startswith("clone:"):
                 speaker = UserVoice(self.cache, "kokoro", self.voice.split(":", 1)[1], "en")
