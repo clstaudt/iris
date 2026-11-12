@@ -22,5 +22,11 @@ contextBridge.exposeInMainWorld("iris", {
   /** The system's folder picker; resolves to the chosen path, or null */
   chooseFolder: (title: string) => ipcRenderer.invoke("choose-folder", title),
 
+  /** Whether the window opened as presence (only the orb) */
+  presence: ipcRenderer.sendSync("get-presence") as boolean,
+
+  /** Shrink the window to presence, or bring the conversation back */
+  setPresence: (on: boolean) => ipcRenderer.invoke("set-presence", on),
+
   platform: process.platform,
 });

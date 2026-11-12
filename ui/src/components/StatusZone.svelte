@@ -33,8 +33,28 @@
           class="w-[180px]"
         />
       {/key}
+    {:else if store.presence && store.presenceError}
+      <!-- Only the orb shows: an error that needs the user opens the conversation -->
+      <button
+        onclick={() => store.setPresence(false)}
+        class="presence-error max-w-[188px] text-center text-danger"
+        title={store.presenceError}
+      >
+        {store.presenceError}
+      </button>
     {:else}
       {STATE_LABELS[store.state] ?? ""}
     {/if}
   </div>
 </div>
+
+<style>
+  .presence-error {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.4;
+  }
+</style>
