@@ -36,7 +36,7 @@ echo "== App and disk image"
 signing=()
 if [ -z "${CSC_LINK:-}" ] && { [ "${CSC_IDENTITY_AUTO_DISCOVERY:-true}" = "false" ] ||
     ! security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; }; then
-  echo "No Developer ID certificate: signing ad hoc, without notarization"
+  echo "Signing ad hoc, without notarization (no Developer ID certificate in use)"
   signing=(-c.mac.identity=- -c.mac.notarize=false)
 fi
 npx electron-builder --mac dmg --arm64 --publish never ${signing[@]+"${signing[@]}"}
