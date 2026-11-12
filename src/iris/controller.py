@@ -5,6 +5,7 @@ state stream for external UIs such as the Electron shell."""
 import importlib.metadata
 import itertools
 import queue
+import sys
 import threading
 import time
 from collections import deque
@@ -99,6 +100,20 @@ KOKORO_MB = 335
 # see, if the server has it; else the first one that can see
 VISION_MODEL = "qwen3-vl:8b"
 
+# Told when the microphone gives only exact zeros: a real one always has a
+# noise floor. macOS gives them to an app it does not let hear the microphone
+SILENT_MAC = (
+    "Microphone returns pure silence — macOS is denying audio capture. In dev "
+    "mode the permission belongs to the app that launched the dev server "
+    "(Cursor, VS Code, Terminal or iTerm), not to Electron. Enable it under "
+    "System Settings > Privacy & Security > Microphone, then relaunch that app "
+    "completely."
+)
+SILENT = (
+    "The microphone gives only silence. Check that it is not muted, and that "
+    "Iris may use it."
+)
+
 # Events that make up the visible conversation. Kept here so a UI that
 # reloads (or attaches late) can rebuild its transcript; streaming chunks are
 # left out because chat.done carries the full reply.
@@ -180,18 +195,7 @@ class AssistantController:
             self._zero_level_since = time.monotonic()
         elif not self._silence_warned and time.monotonic() - self._zero_level_since > 4:
             self._silence_warned = True
-            self.bus.emit(
-                "error",
-                {
-                    "message": (
-                        "Microphone returns pure silence — macOS is denying audio "
-                        "capture. In dev mode the permission belongs to the app that "
-                        "launched the dev server (Cursor, VS Code, Terminal or iTerm), "
-                        "not to Electron. Enable it under System Settings > Privacy & "
-                        "Security > Microphone, then relaunch that app completely."
-                    )
-                },
-            )
+            self.bus.emit("error", {"message": SILENT_MAC if sys.platform == "darwin" else SILENT})
 
     def _flag_state(self) -> str:
         with self._state_lock:
