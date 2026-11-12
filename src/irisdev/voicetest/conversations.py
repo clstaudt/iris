@@ -28,6 +28,7 @@ from irisdev.voicetest.script import (
     Conversation,
     Echo,
     Noise,
+    Restart,
     Say,
     Silence,
     Sound,
@@ -1984,7 +1985,7 @@ VOICES_GROUP = [in_voice(conv, voice) for voice in OTHER_VOICES for conv in CONV
 # Languages ---------------------------------------------------------------------------------
 
 LANGUAGE_NAMES = {"German": "de", "French": "fr", "Italian": "it", "Spanish": "es", "Japanese": "ja",
-                  "Dutch": "nl", "Portuguese": "pt", "Chinese (Mandarin)": "zh"}
+                  "Dutch": "nl", "Portuguese": "pt", "Chinese (Mandarin)": "zh", "Hindi": "hi"}
 CANNED = {
     "en": "Here is my answer. {first}",
     "de": "Hier ist meine Antwort. {first}",
@@ -1993,8 +1994,12 @@ CANNED = {
     "es": "Aquí está mi respuesta. {first}",
     "ja": "お答えします。{first}",
     "nl": "Hier is mijn antwoord. {first}",
+    "pt": "Aqui está a minha resposta. {first}",
+    "zh": "这是我的回答。{first}",
+    "hi": "यह मेरा जवाब है। {first}",
 }
-SEARCH_VERBS = r"\bsearch\b|\blook up\b|\bsuch\b|\bcherche\b|\bbusca\b|\bcerca\b|調べ"
+SEARCH_VERBS = (r"\bsearch\b|\blook up\b|\bsuch\b|\bcherche\b|\bbusca\b|\bcerca\b|\bpesquisa\b|\bzoek\b"
+                r"|調べ|搜索")
 
 
 def asked_language(messages: list[dict]) -> str:
@@ -2031,16 +2036,42 @@ LANGUAGE_WEB = {"results": {
     "strasbourg": "Marché de Noël de Strasbourg: opens on 21 November.",
     "madrid|sevilla|seville": "Madrid to Sevilla by train: 45 euros.",
     "東京|tokyo": "東京の天気: 明日は晴れ、18度。",
+    # Numbers in words: Pocket TTS reads no digits in these languages (see NUMBERS)
+    "azulejo": "Museu Nacional do Azulejo: Aberto de terça a domingo, das dez às dezoito horas.",
+    "rijksmuseum": "Rijksmuseum: Morgen open van negen tot vijf uur.",
+    "北京|beijing": "北京明天：晴，最高气温十八度。",
+    "roma|rome": "Roma domani: Sole, ventuno gradi.",
 }, "delay": 1.0}
+
+
+def languages_asked(view) -> list[str]:
+    """The languages the turn's first request tells the model to answer in
+    ("Respond in Dutch.")."""
+    requests = view.requests()
+    said = " ".join(m.get("content") or "" for m in requests[0].messages) if requests else ""
+    return re.findall(r"Respond in (.+?)\.", said)
+
+
+def asks_for(language: str, name: str = "language_note") -> Check:
+    """The model is told to answer in a language, and in no other."""
+    def fn(result, view):
+        if not view.requests():
+            return None
+        asked = languages_asked(view)
+        return None if asked == [language] else f"the model is told to answer in {asked or 'nothing'}, not {language}"
+    return Check(name, fn)
 
 
 def asks_for_english(name: str = "english_note") -> Check:
     """Back in English, the model is told to answer in English."""
+    return asks_for("English", name)
+
+
+def asks_for_nothing(name: str = "language_note") -> Check:
+    """In English all along, the model is told no language."""
     def fn(result, view):
-        requests = view.requests()
-        if not requests:
-            return None
-        return None if requests[0].carries("Respond in English") else "nothing tells the model to answer in English"
+        asked = languages_asked(view)
+        return f"the model is told to answer in {asked}" if asked else None
     return Check(name, fn)
 
 
@@ -2061,6 +2092,100 @@ def english_with_names(noisy: bool) -> Conversation:
     )
 
 
+# Of the reply's words (characters in Japanese and Chinese), the voice is heard
+# saying this share at least. Kokoro reads Japanese through espeak, which
+# cannot read kanji: it says "Chinese letter", in English, for each. A
+# Japanese reply is heard saying little of what it says ("KANJI"), and the
+# user's Japanese voice is not understood, so Japanese turns are typed.
+SPOKEN_SHARE = 0.5
+KANJI = "spoken_share"
+# Kokoro speaks Mandarin from espeak's phonemes too, with tones and sounds
+# espeak gets wrong: a Chinese reply is heard saying a third of what it says
+MANDARIN = "spoken_share"
+
+# A long reply in one paragraph, in languages that put no space after a
+# sentence: the voice starts at its first sentence, not once it is all there
+LONG_JAPANESE = "".join([
+    "あしたのとうきょうは、あさからよくはれるでしょう。", "ひるまはあたたかく、さいこうきおんはじゅうはちどくらいです。",
+    "ゆうがたからは、きたのかぜがすこしつよくなります。", "よるはひえこむので、うわぎをもってでかけてください。",
+    "あさってはくもりで、ときどきあめがふるかもしれません。", "かさをかばんにいれておくと、あんしんです。",
+    "しゅうまつは、またはれてあたたかくなるみこみです。", "おでかけには、ちょうどいいてんきになるでしょう。",
+    "ほかにしりたいことがあれば、えんりょなくきいてください！", "どこかへおでかけのよていはありますか？",
+])
+LONG_CHINESE = "".join([
+    "北京明天是晴天，最高气温十八度左右，适合出门散步。", "早上比较冷，出门的时候最好带一件外套。",
+    "下午风会大一些，北风三到四级。", "晚上气温会降到五度左右，请注意保暖。", "后天会转阴，可能还会下一点小雨。",
+    "出门的时候记得带伞，以防万一。", "周末天气会好转，又是晴朗的好天气。", "如果你想去长城，周末是一个不错的选择！",
+    "还有什么想知道的吗？",
+])
+# Two characters every 0.1 s: the reply takes 7 to 13 s to arrive whole,
+# its first sentence about 1.5 s
+LONG_STREAM = {"per_word": 0.1}
+LONG_FIRST_WORD = 6.0
+
+
+def spoken_while_written(name: str = "spoken_early") -> Check:
+    """The voice starts while the reply is still being written, at its first
+    sentence, not once all of it is there."""
+    def fn(result, view):
+        if result.first_word is None or not result.replies:
+            return None
+        written = result.replies[-1][0]
+        if result.first_word < written:
+            return None
+        return f"the first word came at {result.first_word:.2f} s, once the reply was written ({written:.2f} s)"
+    return Check(name, fn)
+
+
+# Pocket TTS's models for other languages than English read no digits: "am
+# 27. November" comes out as "am Gas im November", "à 11h30" as "à APAPAPH".
+# Iris gives them the reply as written, so a Kyutai persona garbles every
+# date, time, price and temperature in German, French, Italian, Spanish,
+# Portuguese and Dutch. Numbers in words are read right.
+NUMBERS = "spoken_once"
+# What is asked in each language, the reply, and its numbers, which the voice
+# is to be heard saying (as Whisper writes them back: in digits)
+SAID_WITH_NUMBERS = [
+    ("en", "When does the Christmas market open?", "The market opens on November 27 at 10 o'clock.", ["27", "10"]),
+    ("de", "Wann öffnet der Weihnachtsmarkt?", "Der Markt öffnet am 27. November um 10 Uhr.", ["27", "10"]),
+    ("pt", "Quando abre o museu?", "O museu abre de terça a domingo, das 10 às 18 horas.", ["10", "18"]),
+    ("fr", "Quand ouvre le marché de Noël ?", "Le marché ouvre le 21 novembre à 11 heures.", ["21", "11"]),
+    ("nl", "Wanneer gaat het museum open?", "Het museum is morgen open van 9 tot 17 uur.", ["9", "17"]),
+    ("it", "Che tempo fa domani a Roma?", "Domani a Roma ci saranno 21 gradi e sole.", ["21"]),
+]
+
+
+def numbers_in_languages() -> Conversation:
+    """Iris (Pocket TTS) says replies with numbers in each language; the
+    voice is to be heard saying the numbers."""
+    turns = [Turn([asked], typed=True, reply_language=language, spoken_once=numbers)
+             for language, asked, _, numbers in SAID_WITH_NUMBERS]
+    rules = [Rule(re.escape(asked), reply=reply) for _, asked, reply, _ in SAID_WITH_NUMBERS]
+    expected = [f"T{n}:{NUMBERS}" for n, (language, *_) in enumerate(SAID_WITH_NUMBERS, 1) if language != "en"]
+    return Conversation("numbers said in other languages", turns, stub_rules=rules, expected_failures=expected,
+                        tags=["hearing", "languages", "numbers"])
+
+
+# A short exchange in the language first: the long reply is not the first in it
+LONG_IN_LANGUAGES = [
+    Conversation(
+        "a long Japanese reply spoken from its first sentence",
+        [Turn(["こんにちは、日本語で話せますか？"], typed=True, reply_language="ja"),
+         Turn(["明日の東京の天気を詳しく教えてください。"], typed=True, reply_language="ja",
+              first_word=LONG_FIRST_WORD, checks=[asks_for("Japanese"), spoken_while_written()])],
+        stub_rules=[Rule(r"詳しく", reply=LONG_JAPANESE, chunk=2), Rule(r".", reply=in_language)],
+        stub_options=LONG_STREAM, tags=["hearing", "languages", "ja", "first_word"],
+    ),
+    Conversation(
+        "a long Chinese reply spoken from its first sentence",
+        [Turn(["请帮我搜索北京的天气。"], voice="zh", reply_language="zh"),
+         Turn(["请帮我搜索北京明天的天气。"], voice="zh", reply_language="zh", first_word=LONG_FIRST_WORD,
+              checks=[asks_for("Chinese (Mandarin)"), spoken_while_written()])],
+        stub_rules=[Rule(r"明天", reply=LONG_CHINESE, chunk=2), Rule(r".", reply=in_language)],
+        stub_options=LONG_STREAM, tags=["hearing", "languages", "zh", "first_word"],
+    ),
+]
+
 LANGUAGES = [
     english_with_names(False),
     english_with_names(True),
@@ -2080,21 +2205,30 @@ LANGUAGES = [
         [
             Turn(["What is the capital of Australia?"], reply_mentions=["Canberra"], reply_language="en"),
             Turn(["Such im Internet, wann der Christkindlesmarkt in Nürnberg 2026 öffnet."], voice="de",
+                 reading=["Such im Internet, wann der Christkindlesmarkt in Nürnberg zweitausendsechsundzwanzig öffnet."],
                  search_mentions=["n(u|ue)rnberg|nuremberg", "2026"], reply_language="de"),
             Turn(["Cherche aussi quand ouvre le marché de Noël de Strasbourg."], voice="fr",
                  search_mentions=["strasbourg"], reply_language="fr"),
             Turn(["Grazie mille!"], voice="it", reply_language="it"),
             Turn(["Busca cuánto cuesta un billete de tren de Madrid a Sevilla."], voice="es",
                  search_mentions=["madrid", "sevilla|seville"], reply_language="es"),
-            Turn(["明日の東京の天気を調べてください。"], voice="ja", search_mentions=["東京|tokyo"],
-                 reply_language="ja"),
+            # Typed: the user's Kokoro voice cannot read kanji either (see KANJI)
+            Turn(["明日の東京の天気を調べてください。"], typed=True, search_mentions=["東京|tokyo"],
+                 reply_language="ja", checks=[asks_for("Japanese")], spoken_share=SPOKEN_SHARE),
+            Turn(["Pesquisa quando abre o Museu do Azulejo em Lisboa."], voice="pt", search_mentions=["azulejo"],
+                 reply_language="pt", checks=[asks_for("Portuguese")]),
+            Turn(["Zoek op wanneer het Rijksmuseum morgen opengaat."], voice="nl", search_mentions=["rijksmuseum"],
+                 reply_language="nl", checks=[asks_for("Dutch")]),
+            Turn(["请帮我搜索北京明天的天气。"], voice="zh", search_mentions=["北京|beijing"], reply_language="zh",
+                 checks=[asks_for("Chinese (Mandarin)")]),
             Turn(["Okay, back to English. What time is it in New York now?"], reply_language="en",
                  checks=[asks_for_english()]),
         ],
         tools={"web": True}, web=LANGUAGE_WEB, stub_rules=LANGUAGE_RULES,
+        expected_failures=[f"T6:{KANJI}"],
         tags=["hearing", "languages", "mixed"],
     ),
-]
+] + LONG_IN_LANGUAGES + [numbers_in_languages()]
 
 HEARING = NOISE + DISTANCE + VOICES_GROUP + LANGUAGES
 
@@ -2163,6 +2297,29 @@ TYPED_AND_SPOKEN = [
         # a queued typed turn ends listen() and throws the utterance away
         expected_failures=["T4:*", "T5:*"],
         tags=["conversation", "typed"],
+    ),
+    # A typed message is answered, and spoken, in the language it is typed in,
+    # not in the one spoken last
+    Conversation(
+        "typed messages in other languages",
+        [
+            Turn(["Wie wird das Wetter morgen in Hamburg?"], typed=True, reply_language="de",
+                 checks=[asks_for("German")], spoken_share=SPOKEN_SHARE),
+            Turn(["And what is the capital of Australia?"], typed=True, reply_language="en",
+                 checks=[asks_for_english()], spoken_share=SPOKEN_SHARE),
+            Turn(["Was ist die Hauptstadt von Australien?"], voice="de", reply_language="de",
+                 checks=[asks_for("German")]),
+            Turn(["What is the capital of Canada?"], typed=True, reply_language="en",
+                 checks=[asks_for_english()], spoken_share=SPOKEN_SHARE),
+            Turn(["明日の東京の天気を教えてください。"], typed=True, reply_language="ja",
+                 checks=[asks_for("Japanese")], spoken_share=SPOKEN_SHARE),
+            Turn(["Qual é a capital do Brasil?"], typed=True, reply_language="pt",
+                 checks=[asks_for("Portuguese")], spoken_share=SPOKEN_SHARE),
+            Turn(["Thanks. How many legs does a spider have?"], reply_language="en", checks=[asks_for_english()]),
+        ],
+        stub_rules=LANGUAGE_RULES,
+        expected_failures=[f"T5:{KANJI}"],
+        tags=["conversation", "typed", "languages"],
     ),
 ]
 
@@ -2384,7 +2541,129 @@ PERSONAS = [
     ),
 ]
 
-CONVERSATION = TYPED_AND_SPOKEN + WAKING + PERSONAS
+# What the user says in each language, and how: in a voice of that language,
+# or typed (Japanese, see KANJI); and what a search is to be for
+SAID_IN = {
+    "en": dict(parts=["What is the capital of Australia?"]),
+    "fr": dict(parts=["Quelle est la capitale de l'Australie ?"], voice="fr"),
+    "it": dict(parts=["Cerca il meteo di domani a Roma."], voice="it", search_mentions=["roma|rome"]),
+    "es": dict(parts=["¿Cuál es la capital de Australia?"], voice="es"),
+    "pt": dict(parts=["Pesquisa quando abre o Museu do Azulejo em Lisboa."], voice="pt", search_mentions=["azulejo"]),
+    "hi": dict(parts=["कल दिल्ली में मौसम कैसा रहेगा?"], voice="hi"),
+    "ja": dict(parts=["明日の東京の天気を調べてください。"], typed=True, search_mentions=["東京|tokyo"]),
+    "zh": dict(parts=["请帮我搜索北京明天的天气。"], voice="zh", search_mentions=["北京|beijing"]),
+    "de": dict(parts=["Wie wird das Wetter morgen in Hamburg?"], voice="de"),
+    "nl": dict(parts=["Zoek op wanneer het Rijksmuseum morgen opengaat."], voice="nl",
+               search_mentions=["rijksmuseum"]),
+}
+NAME_OF = {code: name for name, code in LANGUAGE_NAMES.items()}
+
+
+def persona_across_languages(persona: str, label: str, languages: list[str]) -> Conversation:
+    """A persona answers each language in it, told so, and its voice is heard
+    saying the reply in it; then the user goes back to English."""
+    turns = []
+    for language in languages:
+        note = asks_for(NAME_OF[language]) if language != "en" else asks_for_nothing()
+        turns.append(Turn(**SAID_IN[language], reply_language=language, checks=[note], spoken_share=SPOKEN_SHARE))
+    turns.append(Turn(["Thank you. Back to English: what day comes after Monday?"], reply_language="en",
+                      checks=[asks_for_english()], spoken_share=SPOKEN_SHARE))
+    known = {"ja": KANJI, "zh": MANDARIN}
+    expected = [f"T{n}:{known[language]}" for n, language in enumerate(languages, 1) if language in known]
+    return Conversation(
+        f"a {label} persona across languages ({persona})", turns, persona=persona if persona != "iris" else None,
+        tools={"web": True}, web=LANGUAGE_WEB, stub_rules=LANGUAGE_RULES, expected_failures=expected,
+        tags=["conversation", "persona", "languages", persona],
+    )
+
+
+# HAL and Computer speak with Kokoro, which borrows Pocket TTS's voices for
+# German and Dutch; Iris speaks with Pocket TTS, which borrows Kokoro's for
+# Hindi, Japanese and Chinese (Spanish, which needs Pocket TTS's Spanish
+# model, is in "across languages")
+PERSONAS += [
+    persona_across_languages("hal", "Kokoro", ["en", "fr", "it", "es", "pt", "hi", "ja", "zh", "de", "nl"]),
+    persona_across_languages("computer", "Kokoro", ["en", "es", "pt", "hi", "de"]),
+    persona_across_languages("iris", "Kyutai", ["en", "fr", "it", "pt", "hi", "ja", "zh", "de", "nl"]),
+]
+
+
+# Memory across a restart --------------------------------------------------------------------
+
+# A topic filed long ago: in the memory index, its turns long out of the recent conversation
+NAZARE = {"title": "Lighthouse at Nazaré", "gist": "the red lighthouse the user visited",
+          "summary": "The user visited the red lighthouse at Nazaré last spring and watched surfers "
+                     "ride a wave as tall as a seven-storey house."}
+
+
+def recall_topic(title: str) -> tuple:
+    """The tool of a rule that recalls the topic of this title, by the
+    number the memory index in the system prompt gives it."""
+    def arguments(messages):
+        system = messages[0].get("content") or "" if messages and messages[0].get("role") == "system" else ""
+        found = re.search(rf"^#(\d+) {re.escape(title)}:", system, re.MULTILINE)
+        return {"topic_id": int(found.group(1)) if found else 0}
+    return ("recall", arguments)
+
+
+def recalled(messages: list[dict]) -> str:
+    _, content = last_tool(messages)
+    found = re.search(r"^Summary: (.*)$", content, re.MULTILINE)
+    return f"I remember. {found.group(1)}" if found else "I cannot find that in my memory."
+
+
+def cat_named(messages: list[dict]) -> str:
+    """What the sister's cat is called, if the conversation the model was
+    given says so."""
+    earlier = " ".join(user_messages(messages)[:-1]).lower()
+    return "Your sister's cat is called Pepper." if "pepper" in earlier else "You have not told me its name."
+
+
+MEMORY_RULES = [
+    Rule(r"lighthouse", tool=recall_topic(NAZARE["title"]), after_tool=recalled),
+    Rule(r"what was .*\bcat\b", reply=cat_named),
+    Rule(r"adopted", reply="How lovely. Pepper is a good name for a cat."),
+    Rule(r"porto", reply="Porto is a beautiful city to live in."),
+]
+
+
+def memory_in_context(name: str = "memory") -> Check:
+    """The model was given what Iris remembers: the memory index, and the
+    conversation before the restart as its recent turns."""
+    def fn(result, view):
+        requests = view.requests()
+        if not requests:
+            return "no request to the model"
+        problems = []
+        if "Memory index:" not in requests[0].system or NAZARE["title"] not in requests[0].system:
+            problems.append("the system prompt has no memory index with the topic")
+        earlier = " ".join(requests[0].users()[:-1]).lower()
+        if "pepper" not in earlier or "porto" not in earlier:
+            problems.append(f"the turns before the restart are not in it: {requests[0].users()[:-1]}")
+        if view.history():
+            problems.append("the conversation was kept outside memory")
+        return "; ".join(problems) or None
+    return Check(name, fn)
+
+
+MEMORY = [
+    Conversation(
+        "memory across a restart",
+        [
+            Turn(["My sister Lena just adopted a cat called Pepper."]),
+            Turn(["She lives in Porto, right by the river."]),
+            Restart(restores=["Pepper", "Porto", "good name for a cat"]),
+            Turn(["What was my sister's cat called?"], reply_mentions=["Pepper"], check_with_stub=True,
+                 tools_used=[], checks=[memory_in_context()]),
+            Turn(["Do you remember the lighthouse I told you about?"], tools_used=["recall"],
+                 reply_mentions=["seven-storey"], check_with_stub=True),
+        ],
+        memory=True, memory_topics=[NAZARE], stub_rules=MEMORY_RULES,
+        tags=["conversation", "memory"],
+    ),
+]
+
+CONVERSATION = TYPED_AND_SPOKEN + WAKING + PERSONAS + MEMORY
 
 
 # A slow model -----------------------------------------------------------------------------
