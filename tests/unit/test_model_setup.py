@@ -198,6 +198,7 @@ def test_a_missing_ollama_is_reported_plainly(monkeypatch):
             return {"models": []}
 
     monkeypatch.setattr("iris.controller.ollama_client", lambda host, timeout=None: Client())
+    monkeypatch.setattr("iris.controller.resolve_host", lambda url: url)
     controller.assistant = None
     assert controller.set_ollama_host("http://other:11434")["ok"] is True
     assert not [e for e in controller.history()["events"] if e["type"] == "error"]

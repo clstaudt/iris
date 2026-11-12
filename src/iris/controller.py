@@ -25,6 +25,7 @@ from iris.personas import (
     save_persona,
     shipped,
 )
+from iris.llm_client import is_openai, resolve_host
 from iris.plugins import load as load_plugins
 from iris.plugins import plugin_dir
 from iris.transcription import (
@@ -125,7 +126,7 @@ class AssistantController:
         self._turns: queue.Queue = queue.Queue()
         self._turn_ids = itertools.count(1)
 
-        # Ollama server chosen in the UI; None follows OLLAMA_HOST
+        # Server chosen in the UI, as resolve_host keeps it; None follows OLLAMA_HOST
         self._ollama_host: str | None = None
 
         self._flags: dict = {}
@@ -760,19 +761,23 @@ class AssistantController:
         return {"ok": True}
 
     def _warn_if_ollama_unreachable(self) -> bool:
-        """Say plainly what is missing when no Ollama server answers, e.g. on
+        """Say plainly what is missing when the server does not answer, e.g. on
         a computer where Ollama is not installed yet. Returns whether one answers."""
         if getattr(self.assistant.conversation, "reachable", True):
             return True
         url = effective_host(self._ollama_host)
+        if is_openai(self._ollama_host):
+            message = f"Can't reach the server at {url}. Start it, or set another server in Settings."
+        else:
+            message = (
+                f"Can't reach Ollama at {url}. Install it from ollama.com and start "
+                f"it, then download a model, e.g.: ollama pull qwen3:1.7b. Or set "
+                f"another server in Settings."
+            )
         self.bus.emit(
             "error",
             {
-                "message": (
-                    f"Can't reach Ollama at {url}. Install it from ollama.com and start "
-                    f"it, then download a model, e.g.: ollama pull qwen3:1.7b. Or set "
-                    f"another server in Settings."
-                ),
+                "message": message,
                 # Retracted by the UI once a reachable server is set
                 "kind": "ollama_unreachable",
             },
@@ -780,26 +785,31 @@ class AssistantController:
         return False
 
     def _warn_if_model_missing(self):
-        """Report a missing Ollama model up front rather than on first reply."""
+        """Report a model the server does not have up front rather than on
+        the first reply."""
         available = [
             m["name"] for m in ConversationManager.list_available_models(self._ollama_host)
         ]
         model = self.assistant.conversation.model
         if available and model not in available:
+            if is_openai(self._ollama_host):
+                message = f"The server has no model '{model}'. Pick another one in Settings."
+            else:
+                message = (
+                    f"Ollama model '{model}' is not installed. Pick another one "
+                    f"in Settings, or install it with: ollama pull {model}"
+                )
             self.bus.emit(
                 "error",
                 {
-                    "message": (
-                        f"Ollama model '{model}' is not installed. Pick another one "
-                        f"in Settings, or install it with: ollama pull {model}"
-                    ),
+                    "message": message,
                     # Lets the UI retract the warning once another model is chosen
                     "kind": "model_missing",
                 },
             )
 
     def list_models(self) -> dict:
-        """List Ollama models usable for conversation."""
+        """List the server's models usable for conversation."""
         return {"models": ConversationManager.list_available_models(self._ollama_host)}
 
     @staticmethod
@@ -808,17 +818,19 @@ class AssistantController:
         return {"servers": servers.check([str(url) for url in urls or []])}
 
     def set_ollama_host(self, url: str) -> dict:
-        """Point the assistant at another Ollama server ("" = default).
+        """Point the assistant at another server ("" = default): Ollama, or
+        any server with the OpenAI-compatible API.
 
-        The server is asked for its models first, so an unreachable URL is
-        reported instead of breaking the next reply.
+        The server is asked what it is (resolve_host) and for its models
+        first, so an unreachable URL is reported instead of breaking the next
+        reply.
         """
-        host = normalize_host(url)
+        host = resolve_host(url)
         try:
             ollama_client(host, timeout=8).list()
         except Exception as e:
             where = host or "the default server"
-            return {"ok": False, "error": f"Cannot reach Ollama at {where}: {e}"}
+            return {"ok": False, "error": f"Cannot reach the server at {where}: {e}"}
         self._ollama_host = host
         # A server answers now: the "can't reach Ollama" warning no longer holds
         with self._transcript_lock:

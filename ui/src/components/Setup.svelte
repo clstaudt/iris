@@ -156,8 +156,8 @@
         <section class="card">
           <h2 class="heading">Language model</h2>
           <p class="hint">
-            Conversations run on a large language model, served by Ollama on this computer or
-            another one.
+            Conversations run on a large language model, served by Ollama or another
+            OpenAI-compatible server, on this computer or another one.
           </p>
           <div class="flex gap-1.5">
             <input
@@ -173,13 +173,13 @@
           </div>
           {#if connectError}
             <p class="hint !text-danger">
-              No Ollama server there. Install Ollama from ollama.com and start it, then download a
+              No server answers there. Install Ollama from ollama.com and start it, then download a
               model in a terminal, for example: <code>ollama pull {PREFERRED_MODEL}</code>
             </p>
           {:else if connected && store.models.length === 0}
             <p class="hint !text-danger">
-              Ollama has no models yet. In a terminal: <code>ollama pull {PREFERRED_MODEL}</code>, then
-              Connect again.
+              The server has no models yet. With Ollama, in a terminal:
+              <code>ollama pull {PREFERRED_MODEL}</code>, then Connect again.
             </p>
           {:else if connected}
             <div class="relative">

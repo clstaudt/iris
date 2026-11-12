@@ -34,6 +34,8 @@ from typing import Optional
 
 import ollama
 
+from iris.llm_client import OpenAIClient, is_openai
+
 DEFAULT_PATH = Path.home() / ".iris" / "memory.db"
 
 # Token budgets (about four characters per token)
@@ -505,6 +507,10 @@ def _shape(schema: dict) -> str:
     return "{" + ", ".join(parts) + "}"
 
 
+# Reasoning a model writes inline before its answer
+REASONING = re.compile(r"<think>.*?(</think>|$)", re.DOTALL)
+
+
 def parse_json(text: str) -> Optional[dict]:
     """The first JSON object in a reply, tolerating fences and extra prose."""
     start = text.find("{")
@@ -524,9 +530,9 @@ def _abortable_chat(
     abort: Callable[[], bool], think: bool,
 ) -> str:
     """One streamed chat call on a connection of its own, cut off as soon as
-    abort() turns true. Closing the connection makes Ollama stop generating,
-    which frees the model for the conversation at once."""
-    client = ollama.Client(host=host)
+    abort() turns true. Closing the connection makes the server stop
+    generating, which frees the model for the conversation at once."""
+    client = OpenAIClient(host) if is_openai(host) else ollama.Client(host=host)
     done = threading.Event()
     cut = threading.Event()
 
@@ -543,7 +549,8 @@ def _abortable_chat(
         stream = client.chat(
             model=model, messages=messages, format=schema, options=options, stream=True, **kwargs
         )
-        return "".join(chunk.message.content or "" for chunk in stream)
+        reply = "".join(chunk.message.content or "" for chunk in stream)
+        return REASONING.sub("", reply)
     except Exception:
         if cut.is_set():
             raise FilingInterruptedError() from None
@@ -553,7 +560,7 @@ def _abortable_chat(
 
 
 def chat_json(get_host: Callable[[], Optional[str]], get_model: Callable[[], str]) -> ChatFn:
-    """A ChatFn on the conversation's Ollama server and model, looked up per
+    """A ChatFn on the conversation's server and model, looked up per
     call so model and server switches apply.
 
     Local models are held to the schema by `format`; cloud models ignore it

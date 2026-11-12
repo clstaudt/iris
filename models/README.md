@@ -13,7 +13,7 @@ Iris uses the Kokoro TTS models for text-to-speech generation. You need to downl
 
 Place the model files in this directory:
 ```
-/Users/cls/Documents/Work/RnD/iris/models/
+models/
 ├── kokoro-v1.0.onnx
 └── voices-v1.0.bin
 ```
