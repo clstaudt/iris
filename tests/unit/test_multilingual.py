@@ -383,6 +383,29 @@ def test_a_word_espeak_reads_as_english_is_said_without_the_switch(code, text, w
     assert "en" + word not in phonemes
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="espeak reads no kanji: Kokoro needs them in kana, which needs a kanji reader "
+    "(a new dependency, such as pykakasi)",
+)
+def test_a_japanese_reply_is_read_not_called_chinese_letters():
+    """Kokoro speaks Japanese from espeak's phonemes, and espeak calls every
+    kanji a "Chinese letter", in English: a Japanese reply is gibberish
+    ("Chinese letter, Chinese letter, no Chinese letter..."). The text Iris
+    gives Kokoro, through real espeak as Kokoro's tokenizer runs it."""
+    with patch("iris.tts.Kokoro") as kokoro, patch.object(
+        KokoroGenerator, "_locate_models", return_value=("/m.onnx", "/v.bin")
+    ):
+        kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
+        os.unlink(KokoroGenerator(voice="jf_alpha").generate("東京の天気は晴れです。", language="ja"))
+        given = kokoro.return_value.create.call_args.kwargs
+    try:
+        phonemes = Tokenizer().phonemize(given["text"], given["lang"])
+    except RuntimeError as error:
+        pytest.skip(f"espeak cannot run here: {error}")
+    assert "tʃˈaɪniːz" not in phonemes and "dʒˈapəniːz" not in phonemes, phonemes
+
+
 def test_each_pocket_language_has_a_voice_of_its_own():
     for lang, model in POCKET_LANGUAGES.items():
         if lang != "en":
