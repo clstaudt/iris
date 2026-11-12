@@ -10,7 +10,6 @@ import numpy as np
 import soundfile as sf
 
 from iris.assistant import VoiceAssistant, echo_of
-from iris.audio import AudioPlayer
 from iris.events import EventBus
 
 
@@ -26,11 +25,7 @@ class Pipeline:
         self.is_speaking_flag = threading.Event()
         self.stops = 0
         self._said = said
-        self.player = AudioPlayer()
-        self.coming = False
-
-    def more_to_say(self):
-        return self.coming
+        self.resumes = 0
 
     def stop(self):
         self.stops += 1
@@ -39,7 +34,7 @@ class Pipeline:
         pass
 
     def resume(self):
-        pass
+        self.resumes += 1
 
     @property
     def is_active(self):
@@ -157,25 +152,30 @@ def test_speaking_over_the_voice_is_the_next_turn(tmp_path):
     assert "chat.continued" not in events
 
 
-def test_the_voice_counts_as_speaking_while_heard_or_with_more_to_come(tmp_path):
+def test_the_voice_counts_as_speaking_until_its_stream_has_played_out(tmp_path):
     assistant, paths, _ = _assistant(tmp_path, barge_in=True)
     assistant._answer_listening(paths["first"], dormant=False)
-    speaking, heard_until = assistant.recorder.options["speaking"], assistant.recorder.options["heard_until"]
-    pipeline = assistant.speech_pipeline
-    # The last of it died away a second ago (its stream may still play silence)
-    pipeline.player.heard_until = time.monotonic() - 1.0
-    assert not speaking()
-    assert heard_until() == pipeline.player.heard_until
-    # Its echo dying away
-    pipeline.player.heard_until = time.monotonic() - 0.1
-    assert speaking()
-    # Quiet between two sentences, the next one coming
-    pipeline.player.heard_until = time.monotonic() - 1.0
-    pipeline.coming = True
+    speaking, pipeline = assistant.recorder.options["speaking"], assistant.speech_pipeline
+    pipeline.is_speaking_flag.set()
     assert speaking()
     # Paused by the user
     assistant.suspend_event.set()
     assert not speaking()
+    assistant.suspend_event.clear()
+    pipeline.is_speaking_flag.clear()
+    assert not speaking()
+
+
+def test_a_hold_ended_by_the_users_pause_keeps_the_voice_paused(tmp_path):
+    assistant, paths, _ = _assistant(tmp_path, barge_in=True)
+    assistant._answer_listening(paths["first"], dormant=False)
+    release, pipeline = assistant.recorder.options["release"], assistant.speech_pipeline
+    before = pipeline.resumes
+    release()
+    assert pipeline.resumes == before + 1
+    assistant.suspend_event.set()
+    release()
+    assert pipeline.resumes == before + 1
 
 
 def test_barge_in_switched_off(tmp_path):
@@ -247,9 +247,9 @@ def test_a_turn_of_the_voices_own_words_is_not_answered(tmp_path):
 
 
 def test_an_answer_begun_after_the_voice_fell_quiet_is_the_users(tmp_path):
-    """"The blue one", said back to "the red one or the blue one?" half a
-    second after the voice fell quiet, is answered; the same words begun as
-    the voice fell quiet are its echo."""
+    """"The blue one", said back to "the red one or the blue one?" 0.4 s
+    after the voice fell quiet, is answered; the same words begun as the
+    voice fell quiet are its echo."""
     assistant = object.__new__(VoiceAssistant)
     assistant.interrupt_event = threading.Event()
     assistant.status_manager = Flags()
@@ -278,15 +278,15 @@ def test_an_answer_begun_after_the_voice_fell_quiet_is_the_users(tmp_path):
     assistant.transcriber = Transcriber()
     assistant.tts_generator = Voice()
     assistant.conversation_language = "en"
-    # Two seconds: PRE_SPEECH before the turn was recognized, SPEECH_START
-    # into it, so its first syllable came 1.7 s before it is recognized
+    # Two seconds, from PRE_SPEECH before its first syllable: that came 1.5 s
+    # before it is recognized
     turn = tmp_path / "turn.wav"
     sf.write(turn, np.zeros(32000, dtype=np.float32), 16000)
 
-    assistant.speech_pipeline.ended = time.monotonic() - 1.7 - 0.5
+    assistant.speech_pipeline.ended = time.monotonic() - 1.5 - 0.4
     assistant._answer_spoken(str(turn))
     assert len(answered) == 1
 
-    assistant.speech_pipeline.ended = time.monotonic() - 1.7 - 0.1
+    assistant.speech_pipeline.ended = time.monotonic() - 1.5 - 0.1
     assistant._answer_spoken(str(turn))
     assert len(answered) == 1

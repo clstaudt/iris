@@ -58,10 +58,12 @@ HOLD_SPEECH = 0.5
 HOLD_CERTAIN = 0.9
 HOLD_CERTAIN_TIME = 0.1
 HOLD_CERTAIN_GOES_ON = 2
-# While the echo canceller measurably lets the voice through, the voice is
-# not held again this long (seconds) after a hold that heard only its echo:
-# held at every leak, it would stutter
+# While the echo canceller measurably lets the voice through, or after a
+# second hold within HOLD_AGAIN seconds that heard only the voice's echo,
+# the voice is not held again this long (seconds): held at every leak, it
+# would stutter
 HOLD_BACKOFF = 2.0
+HOLD_AGAIN = 4.0
 # Audio kept from before speech was recognized, so a turn starts with its
 # first syllable
 PRE_SPEECH = 0.5
