@@ -12,7 +12,17 @@
         height: 100%;
         overflow: hidden;
       }
+      /* Presence: a transparent window, only the orb shows */
+      html.presence-window,
+      html.presence-window body {
+        background: transparent;
+      }
     </style>
+    <script>
+      if (new URLSearchParams(location.search).get("window") === "presence") {
+        document.documentElement.classList.add("presence-window");
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

@@ -8,26 +8,19 @@
   import Setup from "./components/Setup.svelte";
   import StatusZone from "./components/StatusZone.svelte";
   import Transcript from "./components/Transcript.svelte";
+  import { connectConversation } from "./lib/orb.svelte";
   import { store } from "./lib/state.svelte";
 
   onMount(() => {
     store.init();
+    // Presence is a window of its own; this one hands it the orb
+    return connectConversation();
   });
 </script>
 
-<svelte:window
-  onkeydown={(event) => {
-    if (store.presence && event.key === "Escape") store.setPresence(false);
-  }}
-/>
-
-<main class="flex h-screen flex-col bg-frame text-ink" class:presence={store.presence}>
+<main class="flex h-screen flex-col bg-frame text-ink">
   <!-- Drag region for the hidden-inset title bar -->
-  <header
-    class="drag-region relative flex h-11 shrink-0 items-center justify-center {store.presence
-      ? 'hidden'
-      : ''}"
-  >
+  <header class="drag-region relative flex h-11 shrink-0 items-center justify-center">
     <span class="text-[13px] font-medium tracking-[0.08em] text-ink-3">iris</span>
     <div class="no-drag absolute right-3 flex items-center gap-1 {store.needsSetup ? 'hidden' : ''}">
       <button
@@ -66,37 +59,18 @@
         <Setup />
       </div>
     {:else}
-      <div
-        class="flex min-h-0 gap-2 {store.presence ? '' : 'px-2 pb-2'}"
-        in:fade={{ duration: 600, delay: 400 }}
-      >
-        <!-- In presence only the orb stays: the same one, so it never restarts.
-             The settings window covers the conversation without unmounting it. -->
+      <div class="flex min-h-0 gap-2 px-2 pb-2" in:fade={{ duration: 600, delay: 400 }}>
+        <!-- The settings window covers the conversation without unmounting it -->
         <section
-          class="group relative flex min-w-0 flex-1 flex-col overflow-hidden {store.presence
-            ? 'justify-center'
-            : 'rounded-[14px] border border-line bg-panel'} {store.settingsPage && !store.presence
+          class="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-line bg-panel {store.settingsPage
             ? 'hidden'
             : ''}"
         >
-          {#if !store.presence}
-            <Transcript />
-            <Composer />
-          {/if}
+          <Transcript />
+          <Composer />
           <StatusZone />
-          {#if store.presence}
-            <button
-              onclick={() => store.setPresence(false)}
-              class="leave absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
-              title="Conversation"
-            >
-              <Icon name="expand" size={14} />
-            </button>
-          {/if}
         </section>
-        {#if store.presence}
-          <!-- Nothing beside the orb -->
-        {:else if store.settingsPage}
+        {#if store.settingsPage}
           <SettingsWindow />
         {:else if store.panel === "memory"}
           <Memory />
@@ -111,13 +85,6 @@
     -webkit-app-region: drag;
   }
   .no-drag {
-    -webkit-app-region: no-drag;
-  }
-  /* Presence: the whole window moves it, its buttons still click */
-  .presence {
-    -webkit-app-region: drag;
-  }
-  .presence :global(button) {
     -webkit-app-region: no-drag;
   }
   .stack {
