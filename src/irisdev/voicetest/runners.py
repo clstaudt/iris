@@ -133,10 +133,8 @@ def calibrated_addition(runner: ScriptedConversations) -> list[TurnResult]:
 
 def downloaded_whisper_sizes(assistant) -> list[str]:
     """The Whisper sizes on this computer, as Iris reports them."""
-    controller = getattr(assistant, "controller", None)
-    if controller is None:
-        return []
-    return [m["id"] for m in controller.stt_models().get("models", []) if m.get("cached")]
+    downloaded = getattr(assistant, "stt_downloaded", None)
+    return downloaded() if downloaded is not None else []
 
 
 def whisper_matrix(runner: ScriptedConversations, report: Callable[[str], None] = print) -> list[TurnResult]:

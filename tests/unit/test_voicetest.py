@@ -1072,6 +1072,9 @@ class TestHolding:
         held_elsewhere = ScriptedConversations(fake, space, FakeVoice(), report=lambda line: None)
         [skipped] = held_elsewhere.hold(Conversation("needs", [Turn(["x"])], needs=("stub",)))
         assert skipped.skipped == "needs the scripted model"
+        fake.stt_downloaded = lambda: ["small"]
+        [skipped] = held_elsewhere.hold(Conversation("big", [Turn(["x"])], stt_model="large-v3"))
+        assert skipped.skipped == "Whisper large-v3 is not on this computer"
 
 
 def test_the_scripted_models_settings_change_and_come_back():

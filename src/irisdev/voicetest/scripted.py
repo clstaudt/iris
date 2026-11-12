@@ -529,6 +529,9 @@ class ScriptedConversations:
             return "needs a real model (IRIS_VOICETEST_HOST)"
         if "real_web" in needs and not self.real_web:
             return "needs the real web (IRIS_VOICETEST_WEB=real)"
+        downloaded = getattr(self.assistant, "stt_downloaded", None)
+        if conversation.stt_model and downloaded is not None and conversation.stt_model not in downloaded():
+            return f"Whisper {conversation.stt_model} is not on this computer"
         return ""
 
     def hold(self, conversation: Conversation) -> list[TurnResult]:

@@ -287,6 +287,11 @@ class IrisUnderTest:
     def config(self) -> dict:
         return self.assistant.config_info()
 
+    def stt_downloaded(self) -> list[str]:
+        """The Whisper sizes on this computer (switching to another would
+        download it first)."""
+        return [m["id"] for m in self.controller.stt_models().get("models", []) if m.get("cached")]
+
     def voice_queued(self) -> bool:
         """Whether more of the reply is still to be played than the clip
         playing now: text waiting to be synthesized, being synthesized, or
