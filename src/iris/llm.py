@@ -7,12 +7,13 @@ import types
 import warnings
 from typing import Optional
 
+import httpx
 import markdown
 import ollama
 from bs4 import BeautifulSoup
 
 from iris.attachments import Attachment, recorded_text
-from iris.llm_client import OpenAIClient, is_openai, normalize_host
+from iris.llm_client import MODEL_TIMEOUT, READ_TIMEOUT, OpenAIClient, is_openai, normalize_host
 from iris.llm_client import effective_host as effective_host  # imported from here by callers
 from iris.memory import LIVE_TOKENS, PIN_TURNS, PINNED_TOKENS, MemoryKeeper, estimate_tokens
 from iris.personas import Persona, get_persona
@@ -28,13 +29,30 @@ def ollama_client(host: Optional[str] = None, **kwargs):
     """A client for a server URL as resolve_host keeps it: an OpenAIClient
     for an OpenAI-compatible server, ollama's own client for Ollama, or the
     ollama module itself (whose default client follows OLLAMA_HOST) when no
-    server is configured."""
+    server is configured. Unless told otherwise, a client gives up on a
+    server that stops answering (MODEL_TIMEOUT)."""
     host = normalize_host(host)
     if is_openai(host):
         return OpenAIClient(host, **kwargs)
     if not host and not kwargs:
         return ollama
-    return ollama.Client(host=host, **kwargs)
+    return ollama.Client(host=host, **{"timeout": MODEL_TIMEOUT, **kwargs})
+
+
+def failure_message(error: Exception, host: Optional[str]) -> str:
+    """What the user is told when the model could not answer. A server out
+    of reach, or one that stopped answering, is said to be so in words that
+    fit any kind of server; other errors are passed on as they are."""
+    server = f"The model server at {effective_host(host)}"
+    if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError)):
+        return f"{server} cannot be reached."
+    if isinstance(error, httpx.ReadTimeout):
+        return f"{server} stopped answering: nothing came for {READ_TIMEOUT:g} seconds."
+    if isinstance(error, httpx.TimeoutException):
+        return f"{server} did not answer in time."
+    if isinstance(error, (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)):
+        return f"The connection to the model server at {effective_host(host)} was lost."
+    return f"The language model could not answer: {error}"
 
 
 # Markup some models write into a reply that is never meant to be spoken:
@@ -462,7 +480,9 @@ class ConversationManager:
         )
 
         try:
-            summary_response = self.client.chat(
+            # Streamed, so the client's timeout limits the wait between
+            # chunks, not the time the whole summary takes
+            stream = self.client.chat(
                 model=self.model,
                 messages=[
                     {
@@ -475,10 +495,10 @@ class ConversationManager:
                         "content": f"Summarize this conversation:\n\n{conversation_text}",
                     },
                 ],
+                stream=True,
             )
-            return summary_response.get("message", {}).get(
-                "content", "Previous conversation context."
-            )
+            summary = "".join(chunk["message"]["content"] or "" for chunk in stream)
+            return summary or "Previous conversation context."
         except Exception as e:
             print(f"Warning: Could not summarize: {e}")
             # Fallback: just take first message of each type
@@ -692,7 +712,7 @@ class ConversationManager:
         if not isinstance(self.client, types.ModuleType):
             return self.client
         if self._own_client is None:
-            self._own_client = ollama.Client()
+            self._own_client = ollama.Client(timeout=MODEL_TIMEOUT)
         return self._own_client
 
     def _ask(self, model: str, messages: list, **extra):

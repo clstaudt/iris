@@ -260,6 +260,10 @@ class Turn:
     # Phrases the reply's voice says exactly once, and never, as transcribed
     spoken_once: list[str] = field(default_factory=list)
     spoken_excludes: list[str] = field(default_factory=list)
+    # Words of which an error the turn reports should mention at least one
+    # (case ignored): the turn must report such an error, and it does not
+    # fail the turn
+    error_mentions: list[str] = field(default_factory=list)
     checks: list[Check] = field(default_factory=list)
     name: str = ""
 

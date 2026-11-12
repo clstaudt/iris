@@ -1255,8 +1255,12 @@ class ScriptedConversations:
                 problem = f"the check failed to run: {error!r}"
             if problem:
                 fail(check.name, problem)
+        expected = [e for e in result.errors if any(w.lower() in e.lower() for w in turn.error_mentions)]
+        if turn.error_mentions and not expected:
+            fail("error", f"no error mentions any of {turn.error_mentions}")
         for error in result.errors:
-            fail("error", f"error: {error}")
+            if error not in expected:
+                fail("error", f"error: {error}")
 
     def _judge_barge_in(self, result: TurnResult, budget: dict, fail):
         if result.barge_in is None:

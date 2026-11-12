@@ -34,7 +34,7 @@ from typing import Optional
 
 import ollama
 
-from iris.llm_client import OpenAIClient, is_openai
+from iris.llm_client import MODEL_TIMEOUT, OpenAIClient, is_openai
 
 DEFAULT_PATH = Path.home() / ".iris" / "memory.db"
 
@@ -532,7 +532,10 @@ def _abortable_chat(
     """One streamed chat call on a connection of its own, cut off as soon as
     abort() turns true. Closing the connection makes the server stop
     generating, which frees the model for the conversation at once."""
-    client = OpenAIClient(host) if is_openai(host) else ollama.Client(host=host)
+    if is_openai(host):
+        client = OpenAIClient(host)
+    else:
+        client = ollama.Client(host=host, timeout=MODEL_TIMEOUT)
     done = threading.Event()
     cut = threading.Event()
 

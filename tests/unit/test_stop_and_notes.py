@@ -132,6 +132,7 @@ class SilentModel:
 
     reply = None
     model = "test"
+    host = None
 
     def __init__(self):
         self.cancelled = threading.Event()

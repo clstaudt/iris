@@ -8,6 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+import httpx
 import numpy as np
 import ollama
 import pytest
@@ -251,6 +252,23 @@ class TestStubModel:
         assert reply_to([{"role": "user", "content": "Tell me a long story"}]) == LONG
         assert reply_to([{"role": "user", "content": "Explain it in detail"}]) == LONG
         assert reply_to([{"role": "system", "content": "story"}, {"role": "user", "content": "Hi"}]) == SHORT
+
+    def test_a_reply_can_stall_until_the_client_gives_up(self):
+        stub = StubModel(rules=[Rule("stall", "One two three four.", stall_after=2)],
+                         first_token=0.0, per_word=0.0)
+        try:
+            client = ollama.Client(host=stub.url, timeout=0.3)
+            said = []
+            with pytest.raises(httpx.ReadTimeout):
+                for chunk in client.chat(model=MODEL, messages=[{"role": "user", "content": "stall"}],
+                                         stream=True):
+                    said.append(chunk.message.content)
+            assert "".join(said) == "One two"
+            record = stub.requests[-1]
+            assert record.stalled is not None and record.finished is None
+            assert under_test.wait_until(lambda: record.closed is not None, 2)
+        finally:
+            stub.close()
 
     def test_a_reply_cut_off_does_not_break_the_server(self):
         stub = StubModel(first_token=0.0, per_word=0.05)
@@ -913,6 +931,8 @@ class StandIn:
         self.endpoint = space.endpoint("fake")
         self.log = Log()
         self.think, self.reply = think, reply
+        # An error to report with each reply
+        self.error = None
         self.persona = "iris"
         self.settings = []
         self._history = []
@@ -944,6 +964,8 @@ class StandIn:
         # As Iris does, the reply is complete before it has been spoken
         reply = f"Reply to {text}"
         self.log("chat.done", {"text": reply, "interrupted": False})
+        if self.error:
+            self.log("error", {"message": self.error})
         while self.endpoint.speaker.playing():
             time.sleep(0.02)
         self._history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
@@ -1075,6 +1097,22 @@ class TestHolding:
                                                            during=[(At.reply_audible(0.3), Say(["hmm"]))])]))
         assert "aside" in result.failed
         assert result.asides and result.asides[0][1] == "hmm"
+
+    def test_an_error_fails_a_turn_unless_it_is_expected(self, held):
+        runner, fake, space = held
+        fake.error = "The model server stopped answering."
+        results = runner.hold(Conversation("errors", [
+            Turn(["one"], at=At.finished(0.2), error_mentions=["stopped answering"]),
+            Turn(["two"], at=At.finished(0.2)),
+            Turn(["three"], at=At.finished(0.2), error_mentions=["cannot be reached"]),
+        ]))
+        assert [r.failed for r in results] == [[], ["error"], ["error", "error"]]
+        assert results[2].failures == ["no error mentions any of ['cannot be reached']",
+                                       "error: The model server stopped answering."]
+        fake.error = None
+        [quiet] = runner.hold(Conversation("none", [Turn(["four"], at=At.finished(0.2),
+                                                         error_mentions=["stopped"])]))
+        assert quiet.failed == ["error"]
 
     def test_a_turn_not_called_for_is_skipped(self, held):
         runner, fake, space = held

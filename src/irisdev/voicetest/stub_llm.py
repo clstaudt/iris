@@ -15,6 +15,9 @@ is drawn from that result.
 Every request is recorded (StubRequest): what it carried, which tools it
 offered, when the tool call and the first byte went out, and whether the
 client hung up before the reply was complete.
+
+A rule can also stand for a model server in trouble: one that stalls part
+way through a reply (stall_after), as a network that drops out does.
 """
 
 import json
@@ -182,6 +185,9 @@ class Rule:
     first_token: Optional[float] = None
     # Answer this many tool results with another search, while tools are offered
     loop: int = 0
+    # Words of the reply sent before it stalls: nothing more comes, and the
+    # connection is held open until the client gives up
+    stall_after: Optional[int] = None
 
     def matches(self, messages: list[dict]) -> bool:
         if callable(self.match):
@@ -201,6 +207,7 @@ class Answer:
     text: str = ""
     call: Optional[Call] = None
     first_token: Optional[float] = None
+    stall_after: Optional[int] = None
 
 
 # The record of a request -------------------------------------------------------
@@ -227,6 +234,8 @@ class StubRequest:
     closed: Optional[float] = None
     # When the reply was complete
     finished: Optional[float] = None
+    # When the reply stalled (Rule.stall_after)
+    stalled: Optional[float] = None
     # What was sent: the text, and a tool call
     text: str = ""
     call: Optional[Call] = None
@@ -448,8 +457,9 @@ class StubModel:
             return Answer(rule.no_tools if rule.no_tools is not None else SHORT, first_token=rule.first_token)
         if rule.reply is not None:
             text = rule.reply(messages) if callable(rule.reply) else rule.reply
-            return Answer(text, first_token=rule.first_token)
-        return Answer(reply_to(messages), first_token=rule.first_token)
+        else:
+            text = reply_to(messages)
+        return Answer(text, first_token=rule.first_token, stall_after=rule.stall_after)
 
     def _record(self, body: dict) -> StubRequest:
         messages = body.get("messages") or []
@@ -529,8 +539,16 @@ class StubModel:
             message["tool_calls"] = [{"function": {"name": call.name, "arguments": call.arguments}}]
         return message
 
+    def _stall(self, handler, record: StubRequest):
+        """Send nothing more, until the client hangs up."""
+        record.stalled = time.monotonic()
+        self._pause(handler, float("inf"), record)
+
     def _whole(self, handler, answer: Answer, record: StubRequest):
         """The reply as one JSON object ("stream": false)."""
+        if answer.stall_after is not None:
+            self._stall(handler, record)
+            return
         text = answer.call.lead_in if answer.call else answer.text
         payload = {
             "model": MODEL,
@@ -572,6 +590,9 @@ class StubModel:
 
         try:
             for n, piece in enumerate(pieces):
+                if n == answer.stall_after:
+                    self._stall(handler, record)
+                    return
                 if n and not self._pause(handler, self.per_word, record):
                     return
                 send(chunk(self._message(piece), False))

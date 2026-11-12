@@ -8,12 +8,14 @@ tools it used, and that it answered or stayed silent (see script.py).
 
 CONVERSATIONS are the everyday ones. GROUPS holds them all by name, one
 group per thing tested: "search" (web search), "turn-taking",
-"interruptions", "hearing", "conversation", "performance", and "slow" and
-"network" for the long runs and the real web.
+"interruptions", "hearing", "conversation", "performance", "model" (a
+model server in trouble), and "slow" and "network" for the long runs and
+the real web.
 """
 
 import re
 
+from iris.llm_client import READ_TIMEOUT
 from irisdev.voicetest import checks as c
 from irisdev.voicetest.fakeweb import Each
 from irisdev.voicetest.script import (
@@ -2635,6 +2637,46 @@ def session_of_60() -> Conversation:
 PERFORMANCE = SLOW_MODEL + LONG_CONTEXT
 
 
+# A model server in trouble ------------------------------------------------------------------
+
+# What a reply that stalls sends: a sentence for the voice, and a word more
+STALLED = "The bicycle was invented in the early nineteenth century. And"
+
+
+def gave_up_on_the_stall(name: str = "gave_up") -> Check:
+    """The reply stalled, and Iris hung up once nothing had come for the
+    read timeout: not sooner, and not much later."""
+    def fn(result, view):
+        stalled = [r for r in view.requests() if r.stalled]
+        if not stalled:
+            return "the reply never stalled"
+        if stalled[0].closed is None:
+            return "Iris did not give up on the reply"
+        waited = stalled[0].closed - stalled[0].stalled
+        if not READ_TIMEOUT - 1 <= waited <= READ_TIMEOUT + 5:
+            return f"Iris gave up {waited:.1f} s after the reply stalled"
+        return None
+    return Check(name, fn)
+
+
+MODEL_TROUBLE = [
+    Conversation(
+        "a model server that stops answering",
+        [
+            # The first sentence is said; then nothing comes, and the turn
+            # ends with an error that says so
+            Turn(["Tell me about the history of the bicycle."], error_mentions=["stopped answering"],
+                 checks=[gave_up_on_the_stall()]),
+            Turn(["What is the capital of France?"], reply_mentions=["Paris"], check_with_stub=True),
+        ],
+        stub_rules=[Rule("bicycle", f"{STALLED} then came the pedals.", stall_after=len(STALLED.split()))],
+        reply_timeout=READ_TIMEOUT + 60,
+        needs=("stub",),
+        tags=["model", "timeout"],
+    ),
+]
+
+
 # The groups --------------------------------------------------------------------------------
 
 TURN_TAKING = ([answering_at_once(shift) for shift in (0.0, 0.3, 0.6)] + [SPRINGFIELD] + GOING_ON + ONE_BREATH
@@ -2649,13 +2691,15 @@ GROUPS = {
     "hearing": HEARING,
     "conversation": CONVERSATION,
     "performance": PERFORMANCE,
+    "model": MODEL_TROUBLE,
     # Long runs (pytest -m voice_slow): Whisper's sizes, a session of 60 turns
     "slow": whisper_cells() + [session_of_60()],
     # The real web (pytest -m voice_network, IRIS_VOICETEST_WEB=real)
     "network": NETWORK,
 }
 # The groups held by default (pytest -m voice)
-DEFAULT_GROUPS = ("basic", "search", "turn-taking", "interruptions", "hearing", "conversation", "performance")
+DEFAULT_GROUPS = ("basic", "search", "turn-taking", "interruptions", "hearing", "conversation", "performance",
+                  "model")
 
 
 def group(*names: str) -> list[Conversation]:
