@@ -51,6 +51,8 @@ class Tool:
     shown; the vision model answers) or "message". A failed call's
     "message" is passed on to the model as the error. "pin_topic" (a memory
     topic id) keeps that topic in context for the next few turns.
+    "ends_reply" (True) makes the call the end of the reply: the model is
+    not asked to go on, unless the reply has said nothing yet.
     """
 
     name: str
@@ -69,6 +71,9 @@ class Tool:
     #: What it was called on, for the transcript; by default the first
     #: text argument (a query, a URL)
     detail: Optional[Callable[[dict], str]] = None
+    #: Whether it is offered to the model now, asked on every turn; None
+    #: for always while its plugin is on
+    offered: Optional[Callable[[], bool]] = None
 
     def schema(self) -> dict:
         """The tool as offered to the model (Ollama's function format)."""
@@ -98,6 +103,13 @@ class PluginContext:
 
     #: Long-term memory, when it is on
     memory: Optional[MemoryStore] = None
+    #: Ends the conversation: once the reply being given has been spoken,
+    #: Iris goes to sleep as its sleep word puts it. None where there is no
+    #: conversation to end
+    sleep: Optional[Callable[[], None]] = None
+    #: Whether Iris can go to sleep now: only with a wake word set, which
+    #: wakes it again
+    can_sleep: Callable[[], bool] = lambda: False
 
 
 class Plugin:
