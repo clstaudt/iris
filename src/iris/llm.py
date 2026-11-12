@@ -109,8 +109,14 @@ LIST_ITEM = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
 # A line already ending in punctuation that makes the voice pause, perhaps
 # followed by closing quotes or brackets
 PAUSED_END = re.compile(r"[.!?…:;,][\"'”’)\]]*$")
-# Where streamed text may be cut for speech: after a sentence or at a line
-SPEECH_BREAK = re.compile(r"[.!?](?= )|\n")
+# Where streamed text may be cut for speech: after a sentence or at a line.
+# Japanese and Chinese end a sentence with 。！？ and go on without a space,
+# so the text after it must have begun (a closing quote or bracket stays with
+# the sentence); Hindi ends one with a danda.
+CLOSING = "」』）】〉》”’\"')\\]"
+SPEECH_BREAK = re.compile(
+    rf"[.!?](?= )|[।॥](?=\s)|[。！？]+[{CLOSING}]*(?=[^{CLOSING}。！？])|\n"
+)
 # The number of a numbered list item, which looks like a sentence end
 LIST_NUMBER = re.compile(r"(?:^|\n)\s*\d+\.$")
 
