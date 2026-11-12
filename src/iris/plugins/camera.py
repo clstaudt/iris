@@ -34,6 +34,18 @@ GUIDANCE = (
     "  * NEVER describe what the camera sees without calling this function first\n"
     "  * Call it EVERY TIME they say 'look again' - always capture fresh\n"
 )
+# Where macOS lets an app use the camera
+MAC_PERMISSION = "If there is one, allow Iris under System Settings > Privacy & Security > Camera."
+
+
+def _unavailable() -> dict:
+    """No camera, or one the system does not let Iris open, which look the
+    same from here. On macOS the user may have to allow it, which only they
+    can do: they are told as well as the model."""
+    result = {"success": False, "message": "Camera not available"}
+    if sys.platform == "darwin":
+        result["notice"] = f"Iris cannot open a camera. {MAC_PERMISSION}"
+    return result
 
 
 def look(**kwargs) -> dict:
@@ -65,7 +77,7 @@ def look(**kwargs) -> dict:
             os.close(saved_stderr_fd)
 
         if not camera.isOpened():
-            return {"success": False, "message": "Camera not available"}
+            return _unavailable()
 
         # Give camera time to warm up (important for first frame quality)
         # Also makes the "Looking" indicator clearly visible

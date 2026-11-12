@@ -48,9 +48,12 @@ class Tool:
 
     run(**arguments) returns a dict with "success" (bool) and one of
     "result" (text for the model), "image" (a base64 JPEG the model is
-    shown; the vision model answers) or "message". A failed call's
-    "message" is passed on to the model as the error. "pin_topic" (a memory
-    topic id) keeps that topic in context for the next few turns.
+    shown; a model that can see answers) or "message". A failed call's
+    "message" is passed on to the model as the error. "notice" is told the
+    user as well, shown as an error line: what only they can fix, such as a
+    permission to grant, should not depend on the model passing it on.
+    "pin_topic" (a memory topic id) keeps that topic in context for the
+    next few turns.
     "ends_reply" (True) makes the call the end of the reply: the model is
     not asked to go on, unless the reply has said nothing yet.
     """

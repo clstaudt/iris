@@ -918,9 +918,11 @@ class VoiceAssistant:
                     )
 
             def on_tool_result(tool_name, result):
-                # An image no model can see was left out: the user is told why
+                # What only the user can fix is told them, not just the model
                 if not self.event_bus:
                     return
+                if result.get("notice"):
+                    self.event_bus.emit("error", {"message": result["notice"]})
                 if result.get("image") and not self.conversation.image_model():
                     self.event_bus.emit("error", {"message": NO_VISION, "kind": "no_vision"})
 
