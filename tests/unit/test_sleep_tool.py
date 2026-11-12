@@ -10,6 +10,7 @@ import queue
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from iris import assistant as assistant_module
@@ -129,6 +130,8 @@ def _assistant(*replies, wake_word="Iris", speak=True, plugins=(sleep.plugin,)):
     a.conversation_language = "en"
     a.player = HeldPlayer()
     a.speech_pipeline = SpeechPipeline(InstantGenerator(), a.player)
+    # The voice's languages, which a typed message's language is told among
+    a.tts_generator = SimpleNamespace(languages=lambda: frozenset({"en", "de", "fr", "it"}))
     a.tools = Tools(list(plugins), a._plugin_context())
     with patch("iris.llm.ollama") as mock_ollama:
         mock_ollama.show.return_value = MagicMock(modelinfo={}, details=MagicMock(family="test"))
@@ -235,6 +238,12 @@ class Recorder:
         self.assistant = assistant
         self.opened = []
 
+    def check_audio_devices(self):
+        return True, ""
+
+    def close_microphone(self):
+        pass
+
     def listen(self, on_level=None, should_stop=None, silence_duration=None):
         a = self.assistant
         self.opened.append((time.monotonic(), a.dormant, silence_duration))
@@ -247,10 +256,10 @@ def test_the_wake_word_is_listened_for_only_once_the_goodbye_has_died_away(monke
         assistant_module.AudioRecorder, "check_audio_devices", staticmethod(lambda: (True, ""))
     )
     chimes = []
-    monkeypatch.setattr(
-        assistant_module, "play_sound", lambda audio, rate: chimes.append(time.monotonic())
-    )
     a = _assistant()
+    a.player = SimpleNamespace(
+        audio=SimpleNamespace(play=lambda audio, rate, **options: chimes.append(time.monotonic()))
+    )
     a.stop_event = threading.Event()
     a.hold_event = threading.Event()
     a.turn_queue = queue.Queue()
