@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store, type SettingsPage } from "../../lib/state.svelte";
+  import { walkthrough } from "../../lib/walkthrough.svelte";
   import Icon from "../Icon.svelte";
   import Personas from "./Personas.svelte";
   import Pipeline from "./Pipeline.svelte";
@@ -33,7 +34,11 @@
         {/if}
       </button>
     {/each}
-    <button onclick={() => store.openSettings(null)} class="nav back mt-auto">
+    <button onclick={() => walkthrough.open(false)} class="nav back mt-auto">
+      <Icon name="play" size={13} />
+      Walkthrough
+    </button>
+    <button onclick={() => store.openSettings(null)} class="nav back">
       <Icon name="back" size={14} />
       Conversation
     </button>
