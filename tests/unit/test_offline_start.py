@@ -25,6 +25,7 @@ from iris import downloads, tts
 from iris.assistant import VoiceAssistant
 from iris.controller import AssistantController
 from iris.events import EventBus, brief
+from iris.tts import SpeechGenerator
 from iris.turns import SMART_TURN_FILE, SmartTurn
 from irisdev.voicetest.assistant import wait_until
 from irisdev.voicetest.stub_llm import MODEL, SHORT, StubModel
@@ -374,3 +375,40 @@ def test_a_microphone_unplugged_while_listening_leaves_typed_messages_answered(s
         assert len([e for e in seen.errors() if "disconnected" in e]) == 1
     finally:
         _stop(iris, thread)
+
+
+# A language's voice, loaded at its first reply ----------------------------------------
+
+
+def test_a_languages_voice_that_cannot_be_loaded_is_told_once(monkeypatch):
+    """Pocket TTS loads its model for another language at the first reply
+    in it. Offline that fails: the reply is not spoken, and the user is
+    told why, once, until the voice speaks."""
+    online = {"english"}
+
+    def load_model(language=None, **kwargs):
+        if language not in online:
+            raise OFFLINE
+        return SimpleNamespace(
+            sample_rate=24000,
+            get_state_for_audio_prompt=lambda voice: None,
+            generate_audio=lambda state, sentence: tts.torch.zeros(240),
+        )
+
+    monkeypatch.setattr(tts.TTSModel, "load_model", staticmethod(load_model))
+    told = []
+    generator = SpeechGenerator("kyutai", "alba")
+    generator.on_failure = told.append
+    assert generator.generate("Hello there.", language="en")
+    assert generator.generate("Bonjour.", language="fr") is None
+    assert generator.generate("Merci.", language="fr") is None
+    assert len(told) == 1
+    assert told[0].startswith("The voice for French could not be loaded, so Iris does not speak French")
+    assert "\n" not in told[0]
+    # Back online, it speaks French, and a later failure is told again
+    online.add("french")
+    assert generator.generate("Bonjour.", language="fr")
+    online.discard("french")
+    generator._engines["kyutai"]._models.pop("french")
+    assert generator.generate("Encore.", language="fr") is None
+    assert len(told) == 2
