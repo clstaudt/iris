@@ -12,6 +12,7 @@ import httpx
 import numpy as np
 import ollama
 import pytest
+import torch
 from ddgs.exceptions import DDGSException
 from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 
@@ -22,7 +23,7 @@ from iris.status import StatusManager
 from iris.tools import Tools
 from iris.turns import SmartTurn
 from irisdev.voicetest import assistant as under_test
-from irisdev.voicetest import scripted, sounds, wording
+from irisdev.voicetest import scripted, sounds, voices, wording
 from irisdev.voicetest.acoustics import (
     HEARD_KEPT,
     LOOKBACK,
@@ -328,6 +329,43 @@ def test_every_kokoro_voice_of_the_user_can_speak(name, monkeypatch, tmp_path):
     assert spoken == voice.voice
     assert (lang, phonemes) == ((code, None) if code in KOKORO_ONNX_LANGUAGES else
                                 ("en-us", f"<{code}:Hello there.>"))
+
+
+class PocketWithoutCloning:
+    """Pocket TTS as it loads without the gated weights for voice cloning:
+    it speaks only with its own voices."""
+
+    def __init__(self, cloning: bool):
+        self.has_voice_cloning = cloning
+        self.sample_rate = 24000
+        self.prompts = []
+
+    def get_state_for_audio_prompt(self, prompt):
+        if not self.has_voice_cloning and "/" in str(prompt):
+            raise ValueError("We could not download the weights for the model with voice cloning")
+        self.prompts.append(prompt)
+        return prompt
+
+    def generate_audio(self, state, text):
+        return torch.zeros(2400)
+
+
+@pytest.mark.parametrize("name, own", [("de", "juergen"), ("nl", "daan")])
+def test_without_voice_cloning_the_user_speaks_with_pocket_tts_own_voice(name, own, monkeypatch, tmp_path):
+    """The German and Dutch users are cloned voices: where cloning cannot be
+    had, no German or Dutch turn could be held at all."""
+    model = PocketWithoutCloning(cloning=False)
+    monkeypatch.setattr(voices.TTSModel, "load_model", lambda language: model)
+    monkeypatch.setattr(UserVoice, "_pocket", {})
+    voice = UserVoice.named(tmp_path, name)
+    assert len(voice.utterance(["Hallo."])) > 0
+    assert model.prompts == [own]
+    # Kept apart from what a cloned voice said
+    clone = UserVoice.named(tmp_path, name)
+    clone._pocket = {}
+    monkeypatch.setattr(voices.TTSModel, "load_model", lambda language: PocketWithoutCloning(cloning=True))
+    monkeypatch.setattr(UserVoice, "_kokoro", NamedLanguagesOnly())
+    assert clone._key("Hallo.") != voice._key("Hallo.")
 
 
 def test_the_user_speaks_every_language_iris_speaks():

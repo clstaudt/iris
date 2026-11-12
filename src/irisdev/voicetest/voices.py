@@ -21,6 +21,7 @@ stops mid-sentence and the voice says so.
 """
 
 import hashlib
+import logging
 import tempfile
 from pathlib import Path
 from typing import Optional, Union
@@ -31,9 +32,12 @@ from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 from pocket_tts import TTSModel
+from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 
 from iris.tts import KOKORO_MODEL_FILE, KOKORO_VOICES_FILE, POCKET_LANGUAGES, find_kokoro_models
 from irisdev.voicetest.acoustics import RATE, in_room, room, to_rate
+
+logger = logging.getLogger(__name__)
 
 # The user's voice, not one an Iris persona uses by default
 USER_ENGINE = "kokoro"
@@ -122,8 +126,15 @@ class UserVoice:
         return cls(cache, speed=speed, **VOICES[name])
 
     def _key(self, text: str) -> str:
-        spec = f"{self.engine}:{self.voice}:{self.language}:{self.speed}:{text}"
+        spec = f"{self.engine}:{self._spoken_voice()}:{self.language}:{self.speed}:{text}"
         return hashlib.sha1(spec.encode()).hexdigest()[:16]
+
+    def _spoken_voice(self) -> str:
+        """The voice the user speaks with: a cloned one is Pocket TTS's own
+        voice for the language where cloning cannot be had (see _pocket_voice)."""
+        if self.engine == "kyutai" and self.voice.startswith("clone:"):
+            return self._pocket_voice()[2]
+        return self.voice
 
     def _speak(self, text: str) -> np.ndarray:
         path = self.cache / f"{self._key(text)}.wav"
@@ -146,7 +157,7 @@ class UserVoice:
                                             phonemes=kokoro.tokenizer.phonemize(text, code))
             return np.asarray(audio, dtype=np.float32), int(rate)
         if self.engine == "kyutai":
-            model, state = self._pocket_voice()
+            model, state, _ = self._pocket_voice()
             return model.generate_audio(state, text).numpy().astype(np.float32), int(model.sample_rate)
         raise ValueError(f"The user cannot speak with the engine {self.engine!r}")
 
@@ -160,14 +171,20 @@ class UserVoice:
         return cls._kokoro
 
     def _pocket_voice(self):
-        """Pocket TTS for the language, and the voice's state: a named voice,
-        or one cloned from a Kokoro voice reading CLONE_PROMPT."""
+        """Pocket TTS for the language, the voice's state, and the voice it
+        is: a named voice, or one cloned from a Kokoro voice reading
+        CLONE_PROMPT. Pocket TTS clones only with weights that are gated on
+        Hugging Face; without them, a cloned voice is Pocket TTS's own voice
+        for the language, the one Iris answers in."""
         language = POCKET_LANGUAGES.get(self.language, "english")
         key = (language, self.voice)
         if key not in self._pocket:
             model = TTSModel.load_model(language=language)
-            prompt = self.voice
-            if self.voice.startswith("clone:"):
+            voice = prompt = self.voice
+            if voice.startswith("clone:") and not getattr(model, "has_voice_cloning", True):
+                voice = prompt = DEFAULT_VOICE_FOR_LANGUAGE[language]
+                logger.warning("Pocket TTS cannot clone voices here: the user speaks %s as %s", language, voice)
+            elif voice.startswith("clone:"):
                 speaker = UserVoice(self.cache, "kokoro", self.voice.split(":", 1)[1], "en")
                 prompt = str(self.cache / f"prompt-{speaker._key(CLONE_PROMPT)}.wav")
                 if not Path(prompt).exists():
@@ -176,7 +193,7 @@ class UserVoice:
                 state = model.get_state_for_audio_prompt(prompt)
             except Exception as error:
                 raise RuntimeError(f"Pocket TTS cannot speak with the voice {self.voice!r} here: {error}")
-            self._pocket[key] = (model, state)
+            self._pocket[key] = (model, state, voice)
         return self._pocket[key]
 
     def utterance(self, parts: list[Part], level: Optional[float] = None,
