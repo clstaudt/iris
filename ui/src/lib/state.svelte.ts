@@ -293,6 +293,11 @@ interface SavedSettings {
   /** Whisper size chosen in the pipeline; none for the best this computer runs */
   whisper_model?: string;
   turn_detection?: TurnDetection;
+  /** Model servers kept to switch between, by URL; the default one is not
+   *  listed */
+  servers?: string[];
+  /** The model last chosen on each server, by URL */
+  server_models?: Record<string, string>;
   /** Named setups by id, and the one in use */
   setups?: Record<string, Setup>;
   active_setup?: string;
@@ -373,6 +378,11 @@ class IrisStore {
   private previewHeard = false;
   /** Whisper's sizes for the recognition stage, once asked for */
   recognitionModels = $state<RecognitionModels | null>(null);
+  /** Model servers kept to switch between, by URL (the default one, "", is
+   *  always there and not listed) */
+  servers = $state<string[]>(loadSettings().servers ?? []);
+  /** Whether each server answered when last checked, by URL */
+  reachable = $state<Record<string, boolean>>({});
   /** The latest turns' timings, newest last */
   timings = $state<TurnTiming[]>([]);
   /** Named setups by id; the active one follows every change made */
@@ -460,6 +470,7 @@ class IrisStore {
         if (previousServer && previousServer !== this.config.ollama_url) {
           this.messages = this.messages.filter((m) => m.kind !== "ollama_unreachable");
         }
+        this.keepServer(this.config.ollama_host ?? "");
         this.restoreMic();
         break;
       }
@@ -962,17 +973,79 @@ class IrisStore {
       { url }
     );
     if (!result.ok) return result.error ?? "Could not connect";
-    this.remember({ ollama_host: result.host ?? "" });
+    // Kept under the address the core settled on, which is the one it reports
+    const host = result.host ?? "";
+    if (url.trim() !== host) {
+      this.servers = this.servers.filter((server) => server !== url.trim());
+    }
+    this.keepServer(host);
+    this.reachable[host] = true;
+    this.remember({ ollama_host: host });
     this.models = [];
     const llms = await rpc<{ models: { name: string; tools: boolean; vision: boolean }[] }>(
       "llm.list"
     );
     this.models = llms.models;
+    await this.modelForServer(host);
     return null;
   }
 
+  /** The server in use is always among those kept, so it can be switched
+   *  back to. */
+  private keepServer(host: string) {
+    if (!host || this.servers.includes(host)) return;
+    this.servers = [...this.servers, host];
+    saveSettings({ servers: $state.snapshot(this.servers) });
+  }
+
+  /** After switching servers: the model last used on this one, or, when the
+   *  model in use is not on it, the first it has (one that takes tools if
+   *  there is one). */
+  private async modelForServer(host: string) {
+    const names = this.models.map((m) => m.name);
+    if (names.length === 0) return;
+    const remembered = loadSettings().server_models?.[host];
+    const current = this.config?.llm_model ?? "";
+    let model: string | undefined;
+    if (remembered && names.includes(remembered)) model = remembered;
+    else if (!names.includes(current)) {
+      model = (this.models.find((m) => m.tools) ?? this.models[0]).name;
+    }
+    if (model && model !== current) await this.setModel(model);
+  }
+
+  /** Keep a server to switch to later. */
+  addServer(url: string) {
+    const server = url.trim().replace(/\/+$/, "");
+    if (!server || this.servers.includes(server)) return;
+    this.servers = [...this.servers, server];
+    saveSettings({ servers: $state.snapshot(this.servers) });
+    this.checkServers().catch(() => {});
+  }
+
+  /** Forget a server; the one in use stays. */
+  removeServer(url: string) {
+    if (url === (this.config?.ollama_host ?? "")) return;
+    this.servers = this.servers.filter((server) => server !== url);
+    saveSettings({ servers: $state.snapshot(this.servers) });
+  }
+
+  /** Ask which of the servers answer, the default one included. */
+  async checkServers() {
+    const urls = [...new Set(["", ...this.servers, this.config?.ollama_host ?? ""])];
+    const result = await rpc<{ servers: { url: string; reachable: boolean }[] }>(
+      "llm.check_hosts",
+      { urls }
+    );
+    for (const server of result.servers) this.reachable[server.url] = server.reachable;
+  }
+
   async setModel(name: string) {
-    this.remember({ llm_model: name });
+    const host = this.config?.ollama_host ?? "";
+    this.remember({
+      llm_model: name,
+      server_models: { ...loadSettings().server_models, [host]: name },
+    });
     await rpc("llm.set", { name });
   }
 

@@ -67,12 +67,19 @@ IMMEDIATE = frozenset(
     {"assistant.interrupt", "assistant.pause", "assistant.resume", "assistant.hold", "mic.set"}
 )
 
+# Slow requests that depend on nothing else and nothing depends on: each is
+# answered on a thread of its own, so it holds up neither the requests in
+# order nor the controls. Checking the servers takes seconds when one is away,
+# and the app checks them again and again while their list is shown
+CONCURRENT = frozenset({"llm.check_hosts"})
 
-def serve(read_line, methods: dict, write_frame, immediate=IMMEDIATE):
+
+def serve(read_line, methods: dict, write_frame, immediate=IMMEDIATE, concurrent=CONCURRENT):
     """Answer requests until the input ends.
 
     Requests are answered one after the other, in the order they came, on a
-    worker thread; the immediate ones are answered as they arrive.
+    worker thread; the immediate ones are answered as they arrive, and the
+    concurrent ones each on a thread of its own.
     """
     work: queue.Queue = queue.Queue()
 
@@ -122,8 +129,11 @@ def serve(read_line, methods: dict, write_frame, immediate=IMMEDIATE):
                 {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
             )
             continue
-        if request.get("method") in immediate:
+        method = request.get("method")
+        if method in immediate:
             handle(request)
+        elif method in concurrent:
+            threading.Thread(target=handle, args=(request,), daemon=True).start()
         else:
             work.put(request)
     work.put(None)
@@ -181,6 +191,7 @@ def main():
         "llm.list": lambda params: controller.list_models(),
         "llm.set": lambda params: controller.set_model(params.get("name", "")),
         "llm.set_host": lambda params: controller.set_ollama_host(params.get("url", "")),
+        "llm.check_hosts": lambda params: controller.check_servers(params.get("urls", [])),
         "chat.send_text": lambda params: controller.send_text(
             params.get("text", ""), params.get("attachments")
         ),

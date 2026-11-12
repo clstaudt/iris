@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from iris.rpc_server import encode_frame
+from iris.rpc_server import encode_frame, serve
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -177,8 +177,6 @@ def test_llm_set_requires_running_assistant(client):
 def test_stop_never_waits_behind_a_slow_request():
     """Stop and the other controls are answered as they arrive; the rest in
     the order they came."""
-    from iris.rpc_server import serve
-
     answered = []
     lock = threading.Lock()
     release = threading.Event()
@@ -217,9 +215,50 @@ def test_stop_never_waits_behind_a_slow_request():
     assert all("result" in frame for frame in answered)
 
 
-def test_a_line_that_is_not_json_is_answered_with_an_error():
-    from iris.rpc_server import serve
+def test_a_check_of_the_servers_holds_up_no_other_request():
+    """Checking the servers takes seconds when one is away; a message sent
+    meanwhile is answered without waiting for it."""
+    answered = []
+    lock = threading.Lock()
+    release = threading.Event()
 
+    def check(params):
+        release.wait(5)
+        return {"servers": []}
+
+    methods = {
+        "llm.check_hosts": check,
+        "assistant.send_text": lambda params: {"ok": True},
+    }
+    lines = iter(
+        json.dumps({"jsonrpc": "2.0", "id": n, "method": m})
+        for n, m in enumerate(["llm.check_hosts", "assistant.send_text"], 1)
+    )
+
+    def read_line():
+        line = next(lines, None)
+        if line is None:
+            # The message was answered while the check still runs
+            deadline = time.monotonic() + 2
+            while 2 not in [f["id"] for f in answered] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            release.set()
+            deadline = time.monotonic() + 2
+            while len(answered) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return ""
+        return line + "\n"
+
+    def write(frame):
+        with lock:
+            answered.append(frame)
+
+    serve(read_line, methods, write)
+    assert [frame["id"] for frame in answered] == [2, 1]
+    assert all("result" in frame for frame in answered)
+
+
+def test_a_line_that_is_not_json_is_answered_with_an_error():
     lines = iter(["not json\n", ""])
     answered = []
     serve(lambda: next(lines), {}, answered.append)

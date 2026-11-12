@@ -10,7 +10,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from iris import downloads, engines
+from iris import downloads, engines, servers
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AUDIO_FILTERS, AudioRecorder, get_filter
@@ -801,6 +801,11 @@ class AssistantController:
     def list_models(self) -> dict:
         """List Ollama models usable for conversation."""
         return {"models": ConversationManager.list_available_models(self._ollama_host)}
+
+    @staticmethod
+    def check_servers(urls: list) -> dict:
+        """Which of these model servers answer ("" is the default one)."""
+        return {"servers": servers.check([str(url) for url in urls or []])}
 
     def set_ollama_host(self, url: str) -> dict:
         """Point the assistant at another Ollama server ("" = default).
