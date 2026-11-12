@@ -345,7 +345,7 @@ A working microphone reports a non-zero value (a quiet room still has a noise fl
 
 ### Testing the voice
 
-`irisdev.voicetest` tests Iris by talking to it. Iris runs as in the app, with its real recognition, Smart Turn, echo canceller, language model and voice, but its microphone and speaker belong to a virtual acoustic space: what the microphone hears is scripted, the speaker records what it plays, and each speaker comes back into its own microphone as an echo and is heard by the others. Nothing is played on the computer's speakers, and nothing in the room reaches the test. Iris gets a home folder of its own, so your personas, memory and settings are left alone.
+`irisdev.voicetest` tests Iris by talking to it. Iris runs as in the app, with its real recognition, Smart Turn, echo canceller, language model and voice, but its microphone and speaker belong to a virtual acoustic space: what the microphone hears is scripted, the speaker records what it plays, and each speaker comes back into its own microphone as an echo and is heard by the others. Nothing is played on the computer's speakers, and nothing in the room reaches the test. Iris keeps its personas, memory and plugins in a folder of its own, so yours are left alone.
 
 ```bash
 # Scripted conversations: a synthesized user talks to Iris, turn by turn

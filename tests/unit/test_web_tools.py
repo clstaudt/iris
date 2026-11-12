@@ -4,6 +4,7 @@ import threading
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from ddgs.exceptions import DDGSException
 
 from iris.plugins import web
 from iris.tools import Tools
@@ -299,8 +300,6 @@ class TestSearchTriedAgain:
     def test_engines_that_refused_are_asked_again(self, mock_ddgs_cls):
         """ddgs says "No results found." when the engines it asked refused;
         a moment later they answer."""
-        from ddgs.exceptions import DDGSException
-
         mock_ddgs_cls.return_value.text.side_effect = [
             DDGSException("No results found."),
             [{"title": "Ali G Indahouse - Quotes", "body": "Keep it real", "href": "https://q.example"}],
@@ -311,8 +310,6 @@ class TestSearchTriedAgain:
 
     @patch("iris.plugins.web.DDGS")
     def test_duckduckgo_alone_last(self, mock_ddgs_cls):
-        from ddgs.exceptions import DDGSException
-
         mock_ddgs_cls.return_value.text.side_effect = DDGSException("No results found.")
         result = _web().execute("search", query="something nobody wrote")
         backends = [call.kwargs["backend"] for call in mock_ddgs_cls.return_value.text.call_args_list]

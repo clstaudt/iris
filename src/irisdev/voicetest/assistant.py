@@ -10,9 +10,13 @@ assistant is tested by implementing the same interface.
 
 import threading
 import time
+from pathlib import Path
 from typing import Optional, Protocol
 
+from iris.controller import AssistantController
+from iris.events import EventBus
 from irisdev.voicetest.acoustics import Endpoint
+from irisdev.voicetest.isolation import isolate
 
 # States in which the assistant is working on a turn
 BUSY = frozenset(
@@ -85,19 +89,20 @@ class IrisUnderTest:
         persona: str = "iris",
         tools: Optional[dict] = None,
         start_timeout: float = 600.0,
+        home: Optional[Path] = None,
     ):
         """
         Args:
             endpoint: Its microphone and speaker
             llm_host: The language model's server
             llm_model: The model
-            persona: Who it is
+            persona: Who it is (one shipped with Iris)
             tools: {tool: on}; all off by default, so replies do not depend
                 on the camera, the screen or the web
+            home: The folder its personas, memory and plugins are kept in,
+                instead of the user's (a new temporary one if not given)
         """
-        from iris.controller import AssistantController
-        from iris.events import EventBus
-
+        self.home = isolate(home)
         self.name = persona
         self.endpoint = endpoint
         self.log = Log()

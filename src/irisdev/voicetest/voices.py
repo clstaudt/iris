@@ -12,6 +12,7 @@ from typing import Union
 import numpy as np
 import soundfile as sf
 
+from iris.tts import SpeechGenerator
 from irisdev.voicetest.acoustics import RATE, to_rate
 
 # The user's voice, not one an Iris persona uses by default
@@ -36,8 +37,6 @@ class UserVoice:
         path = self.cache / f"{key}.wav"
         if not path.exists():
             if self._generator is None:
-                from iris.tts import SpeechGenerator
-
                 self._generator = SpeechGenerator(USER_ENGINE, USER_VOICE, 1.0)
             generated = self._generator.generate(text, language="en")
             if not generated:

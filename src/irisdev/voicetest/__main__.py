@@ -5,9 +5,10 @@
 
 Without a server, conversations use a scripted model (StubModel), which
 tests the voice without a model's time; replies are then not checked. Iris
-runs with a home folder of its own, so the user's personas, memory and
-settings are left alone; the speech models already on this computer are
-used. Nothing is played on the speakers or heard from the microphone.
+keeps its personas, memory and plugins in a folder of its own, so the
+user's are left alone; the speech models already on this computer are used
+(irisdev.voicetest.isolation). Nothing is played on the speakers or heard
+from the microphone.
 
 Each run writes report.json and, per conversation, what each microphone
 heard and each speaker played as WAV files, to listen to.
@@ -18,27 +19,25 @@ import json
 import os
 import re
 import sys
-import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
 
-REAL_HOME = Path.home()
+import soundfile as sf
 
-
-def isolate() -> Path:
-    """Give Iris a home folder of its own, before any of it is imported; the
-    speech models stay where they are."""
-    home = Path(tempfile.mkdtemp(prefix="iris-voicetest-"))
-    os.environ.setdefault("HF_HOME", str(REAL_HOME / ".cache" / "huggingface"))
-    os.environ.setdefault("IRIS_MODELS_DIR", str(REAL_HOME / ".iris" / "models"))
-    os.environ.update(
-        HOME=str(home),
-        USERPROFILE=str(home),
-        IRIS_MEMORY_DB=str(home / "memory.db"),
-        IRIS_PLUGINS_DIR=str(home / "plugins"),
-    )
-    return home
+from irisdev.voicetest import (
+    CONVERSATIONS,
+    IrisUnderTest,
+    ScriptedConversations,
+    SelfTalk,
+    Space,
+    StubModel,
+    UserVoice,
+    summarize,
+)
+from irisdev.voicetest.acoustics import RATE
+from irisdev.voicetest.scripted import budgets_from
+from irisdev.voicetest.stub_llm import MODEL
 
 
 def slug(text: str) -> str:
@@ -47,10 +46,6 @@ def slug(text: str) -> str:
 
 def save_audio(folder: Path, endpoints, start: float, end: float):
     """What each microphone heard and each speaker played."""
-    import soundfile as sf
-
-    from irisdev.voicetest.acoustics import RATE
-
     folder.mkdir(parents=True, exist_ok=True)
     for endpoint in endpoints:
         sf.write(folder / f"{slug(endpoint.name)}-microphone.wav", endpoint.recording(start, end), RATE)
@@ -58,21 +53,6 @@ def save_audio(folder: Path, endpoints, start: float, end: float):
 
 
 def conversations(args, out: Path) -> int:
-    import soundfile as sf
-
-    from irisdev.voicetest import (
-        CONVERSATIONS,
-        IrisUnderTest,
-        ScriptedConversations,
-        Space,
-        StubModel,
-        UserVoice,
-        summarize,
-    )
-    from irisdev.voicetest.acoustics import RATE
-    from irisdev.voicetest.scripted import budgets_from
-    from irisdev.voicetest.stub_llm import MODEL
-
     chosen = [c for c in CONVERSATIONS if not args.only or any(o.lower() in c.name for o in args.only)]
     if not chosen:
         print(f"No conversation matches {args.only}; there are: " + ", ".join(c.name for c in CONVERSATIONS))
@@ -118,8 +98,6 @@ def conversations(args, out: Path) -> int:
 
 
 def selftalk(args, out: Path) -> int:
-    from irisdev.voicetest import IrisUnderTest, SelfTalk, Space
-
     if not args.llm_host:
         print("Self-talk needs a real model: give --llm-host and --llm-model")
         return 2
@@ -180,7 +158,7 @@ def main(argv=None) -> int:
                         help="the model (or IRIS_VOICETEST_MODEL)")
     parser.add_argument("--echo-gain", type=float, default=0.3, help="how loud a speaker is in its own microphone")
     parser.add_argument("--out", type=Path, default=Path("voicetest-output"))
-    parser.add_argument("--voice-cache", type=Path, default=REAL_HOME / ".cache" / "iris-voicetest",
+    parser.add_argument("--voice-cache", type=Path, default=Path.home() / ".cache" / "iris-voicetest",
                         help="where the user's synthesized utterances are kept")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -204,7 +182,6 @@ def main(argv=None) -> int:
         parser.error("give --llm-host and --llm-model together")
     out = args.out / time.strftime("%Y%m%d-%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
-    isolate()
     return conversations(args, out) if args.command == "conversations" else selftalk(args, out)
 
 
