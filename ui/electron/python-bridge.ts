@@ -132,10 +132,18 @@ export class PythonBridge {
       this.onLog(line);
     });
 
+    // A request written as the core died: its end is told by "exit"
+    proc.stdin?.on("error", (err) => console.error(`[python-bridge] could not write to the core: ${err.message}`));
+
     // The program could not be started at all (missing, not executable):
     // starting it again would fail the same way
     proc.on("error", (err) => {
       if (this.process !== proc) return;
+      if (proc.pid !== undefined) {
+        // It runs: a signal that could not be sent, say
+        console.error(`[python-bridge] ${err.message}`);
+        return;
+      }
       this.process = null;
       this.rejectPending(`Python process could not start: ${err.message}`);
       if (this.stopping) return;
