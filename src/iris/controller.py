@@ -95,6 +95,10 @@ APPROX_MODEL_MB = {
 }
 KOKORO_MB = 335
 
+# The model that answers about images when the conversation's model cannot
+# see, if the server has it; else the first one that can see
+VISION_MODEL = "qwen3-vl:8b"
+
 # Events that make up the visible conversation. Kept here so a UI that
 # reloads (or attaches late) can rebuild its transcript; streaming chunks are
 # left out because chat.done carries the full reply.
@@ -254,7 +258,7 @@ class AssistantController:
             threading.Thread(target=self._speaking_poller, daemon=True).start()
         return {"ok": True}
 
-    def _pick_vision_model(self, preferred: str) -> str | None:
+    def _pick_vision_model(self, preferred: str = VISION_MODEL) -> str | None:
         """Resolve the model used for image prompts.
 
         Returns None when no separate model is needed or available, which keeps
@@ -284,7 +288,7 @@ class AssistantController:
             kwargs["tts_models_dir"] = tts_dir
 
         if "vision_model" not in kwargs:
-            kwargs["vision_model"] = self._pick_vision_model("qwen3-vl:8b")
+            kwargs["vision_model"] = self._pick_vision_model()
 
         try:
             self._fetch_models(kwargs)
@@ -840,11 +844,9 @@ class AssistantController:
             ]
         if self.assistant is not None:
             self.assistant.conversation.set_host(host)
-            if self.assistant.conversation.vision_model:
-                conversation = self.assistant.conversation
-                conversation.vision_model = (
-                    self._pick_vision_model("qwen3-vl:8b") or conversation.vision_model
-                )
+            # The model that sees is one of this server's, or there is none:
+            # the last server's would not be found here
+            self.assistant.conversation.vision_model = self._pick_vision_model()
             self.bus.emit("config", self.assistant.config_info())
             try:
                 self._warn_if_model_missing()
