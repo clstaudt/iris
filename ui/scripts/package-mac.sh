@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # Build Iris.dmg for Apple Silicon Macs: the frozen Python core, the UI, and
-# the app around them. Signed ad hoc only; see README "macOS app".
+# the app around them; see README "macOS app".
 #
 #   cd ui && npm run dist:mac      ->  ui/release/Iris-<version>-macOS-arm64.dmg
+#
+# Signing: with a Developer ID Application certificate (CSC_LINK and
+# CSC_KEY_PASSWORD, or one in the login keychain) the app is signed with it
+# under the hardened runtime, and notarized when APPLE_ID,
+# APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID are set. Without a
+# certificate, or with CSC_IDENTITY_AUTO_DISCOVERY=false, it is signed ad hoc
+# and not notarized.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -26,5 +33,11 @@ cd "$ROOT/ui"
 npm run build
 
 echo "== App and disk image"
-npx electron-builder --mac dmg --arm64
+signing=()
+if [ -z "${CSC_LINK:-}" ] && { [ "${CSC_IDENTITY_AUTO_DISCOVERY:-true}" = "false" ] ||
+    ! security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; }; then
+  echo "No Developer ID certificate: signing ad hoc, without notarization"
+  signing=(-c.mac.identity=- -c.mac.notarize=false)
+fi
+npx electron-builder --mac dmg --arm64 --publish never ${signing[@]+"${signing[@]}"}
 ls -lh release/*.dmg
