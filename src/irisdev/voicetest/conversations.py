@@ -2694,6 +2694,22 @@ SKY_RESULTS = {
 }
 
 
+def refused_then_asked_without(name: str = "asked_without_tools") -> Check:
+    """The turn's first request offered tools and was refused; the next
+    offered none, and its system prompt says nothing of them."""
+    def fn(result, view):
+        requests = view.requests()
+        if len(requests) < 2:
+            return f"{len(requests)} requests"
+        first, second = requests[:2]
+        if not first.refused:
+            return "the first request was not refused"
+        if second.tools or "'search' function" in second.system:
+            return "the request made again still offers tools"
+        return None
+    return Check(name, fn)
+
+
 MODEL_TROUBLE = [
     Conversation(
         "a model server that stops answering",
@@ -2740,6 +2756,29 @@ MODEL_TROUBLE = [
         ],
         needs=("stub",),
         tags=["model", "markup"],
+    ),
+    Conversation(
+        "a model without tool support",
+        [
+            # Refused with tools, the request is made again without them
+            Turn(["What is the capital of France?"], model_requests=2, checks=[refused_then_asked_without()]),
+            # ...and from then on the model is not offered any
+            Turn(["Search the web for news about the comet."], model_requests=1, tools_used=[],
+                 reply_mentions=["cannot search"], check_with_stub=True, checks=[c.no_tool_offer()]),
+        ],
+        tools={"web": True},
+        stub_rules=[Rule("comet", tool=search(), no_tools="I cannot search the web.")],
+        stub_options={"refuse_tools": True},
+        needs=("stub",),
+        tags=["model", "tools"],
+    ),
+    Conversation(
+        "a model that says it has no tool support",
+        [Turn(["What is the capital of France?"], model_requests=1, checks=[c.no_tool_offer()])],
+        tools={"web": True},
+        stub_options={"refuse_tools": True, "capabilities": ["completion"]},
+        needs=("stub",),
+        tags=["model", "tools"],
     ),
 ]
 

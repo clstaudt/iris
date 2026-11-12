@@ -330,7 +330,7 @@ class Conversation:
     # The scripted model's rules
     stub_rules: Optional[list] = None
     # The scripted model's settings (first_token, per_word, serial,
-    # context_length, summary_delay)
+    # context_length, summary_delay, capabilities, refuse_tools)
     stub_options: dict = field(default_factory=dict)
     persona: Optional[str] = None
     turn_detection: Optional[str] = None

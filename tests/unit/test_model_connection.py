@@ -18,6 +18,8 @@ from iris import llm, memory
 from iris.assistant import VoiceAssistant
 from iris.llm import ConversationManager, failure_message, ollama_client
 from iris.llm_client import MODEL_TIMEOUT, OpenAIClient
+from iris.plugin import Plugin, Tool
+from iris.tools import Tools
 from irisdev.voicetest.assistant import wait_until
 from irisdev.voicetest.stub_llm import MODEL, SHORT, Rule, StubModel
 
@@ -210,3 +212,92 @@ def test_failures_are_told_in_words_that_fit_any_server():
     assert failure_message(RuntimeError("no such model"), BASE) == (
         "The language model could not answer: no such model"
     )
+
+
+# An Ollama model without tool support ------------------------------------------------
+
+GUIDANCE = "Call get_time for the time anywhere."
+
+
+class Clock(Plugin):
+    id = "clock"
+    name = "Clock"
+
+    def tools(self, context):
+        return [
+            Tool(
+                name="get_time",
+                description="The time in a city.",
+                run=lambda city="", **kw: {"success": True, "result": f"14:00 in {city}"},
+                parameters={"city": {"type": "string"}},
+                guidance=GUIDANCE,
+            )
+        ]
+
+
+def _with_tools(stub) -> ConversationManager:
+    return ConversationManager(model=MODEL, host=stub.url, tools=Tools([Clock()]))
+
+
+def _offered(request) -> bool:
+    return bool(request.tools) or GUIDANCE in request.system
+
+
+def test_a_model_that_refuses_tools_is_asked_again_without_them_and_not_offered_them_again():
+    stub = StubModel(first_token=0.0, per_word=0.0, refuse_tools=True)
+    try:
+        conversation = _with_tools(stub)
+        assert "".join(conversation.chat_stream("What is the capital of France?")) == SHORT
+        refused, again = stub.requests
+        assert refused.refused and refused.tools == ["get_time"]
+        # ...without the tools or the guidance on them
+        assert not again.refused and not _offered(again)
+
+        assert "".join(conversation.chat_stream("And of Italy?")) == SHORT
+        assert len(stub.requests) == 3 and not _offered(stub.requests[-1])
+
+        # Remembered for that model only, and for that server
+        conversation.set_model("other:latest")
+        list(conversation.chat_stream("Hello?"))
+        assert stub.requests[-2].refused and stub.requests[-2].tools == ["get_time"]
+        conversation.set_host(stub.url)
+        conversation.set_model(MODEL)
+        list(conversation.chat_stream("Hello?"))
+        assert stub.requests[-2].refused
+    finally:
+        stub.close()
+
+
+def test_a_model_ollama_says_cannot_take_tools_is_never_offered_them():
+    stub = StubModel(first_token=0.0, per_word=0.0, refuse_tools=True, capabilities=["completion"])
+    try:
+        conversation = _with_tools(stub)
+        assert "".join(conversation.chat_stream("What is the capital of France?")) == SHORT
+        [request] = stub.requests
+        assert not request.refused and not _offered(request)
+    finally:
+        stub.close()
+
+
+def test_a_model_that_takes_tools_is_offered_them():
+    stub = StubModel(first_token=0.0, per_word=0.0)
+    try:
+        list(_with_tools(stub).chat_stream("What is the capital of France?"))
+        [request] = stub.requests
+        assert request.tools == ["get_time"] and GUIDANCE in request.system
+    finally:
+        stub.close()
+
+
+def test_other_errors_are_not_taken_for_a_refusal():
+    stub = StubModel(first_token=0.0, per_word=0.0)
+    try:
+        conversation = _with_tools(stub)
+        failing = MagicMock()
+        failing.chat.side_effect = ollama.ResponseError("model 'x' not found", 404)
+        conversation.client = failing
+        with pytest.raises(ollama.ResponseError):
+            list(conversation.chat_stream("Hello?"))
+        assert failing.chat.call_count == 1 and not conversation._no_tools
+    finally:
+        stub.close()

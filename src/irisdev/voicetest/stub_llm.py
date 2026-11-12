@@ -19,7 +19,9 @@ client hung up before the reply was complete.
 A rule can also stand for a model server in trouble: one that stalls part
 way through a reply (stall_after), as a network that drops out does, or a
 small model that writes its tool call into the reply as text (as_text),
-streamed in pieces that split the markup (chunk).
+streamed in pieces that split the markup (chunk). The model itself can be
+one without tool support: its capabilities say so, or it refuses requests
+with tools as Ollama does (refuse_tools).
 """
 
 import json
@@ -53,6 +55,8 @@ RESULT_LINE = re.compile(r"^- (?P<title>.*?): (?P<body>.*) \((?P<href>[^()]*)\)\
 SUMMARY_PROMPT = "Summarize this conversation"
 # How often a waiting request looks whether the client is still there
 POLL = 0.02
+# What the model can do, as /api/show reports it
+CAPABILITIES = ("completion", "tools")
 
 
 # Reading a conversation ------------------------------------------------------
@@ -244,6 +248,8 @@ class StubRequest:
     finished: Optional[float] = None
     # When the reply stalled (Rule.stall_after)
     stalled: Optional[float] = None
+    # Refused for its tools (StubModel.refuse_tools)
+    refused: bool = False
     # What was sent: the text, and a tool call
     text: str = ""
     call: Optional[Call] = None
@@ -293,6 +299,8 @@ class StubModel:
         context_length: int = 32768,
         summary_delay: float = 0.0,
         on_request: Optional[Callable[[str, StubRequest], None]] = None,
+        capabilities: tuple = CAPABILITIES,
+        refuse_tools: bool = False,
     ):
         """
         Args:
@@ -304,12 +312,18 @@ class StubModel:
             context_length: The context the model reports
             summary_delay: Seconds a request to summarize takes
             on_request: Called with (kind, record) as each request arrives
+            capabilities: What /api/show says the model can do
+            refuse_tools: Refuse a request that offers tools, as Ollama does
+                for a model without tool support (400, "does not support
+                tools")
         """
         self.first_token = first_token
         self.per_word = per_word
         self.context_length = context_length
         self.summary_delay = summary_delay
         self.on_request = on_request
+        self.capabilities = tuple(capabilities)
+        self.refuse_tools = refuse_tools
         self._default_rules = list(rules or [])
         self.rules = list(self._default_rules)
         self.serial = serial
@@ -378,7 +392,8 @@ class StubModel:
         self.rules = list(self._default_rules)
 
     # The settings a conversation may change
-    SETTINGS = ("first_token", "per_word", "serial", "context_length", "summary_delay")
+    SETTINGS = ("first_token", "per_word", "serial", "context_length", "summary_delay", "capabilities",
+                "refuse_tools")
 
     def configure(self, **settings) -> dict:
         """Change settings (SETTINGS) from now on; returns what they were."""
@@ -434,7 +449,7 @@ class StubModel:
                 "general.architecture": "voicetest",
                 "voicetest.context_length": self.context_length,
             },
-            "capabilities": ["completion", "tools"],
+            "capabilities": list(self.capabilities),
         }
 
     # Answering -----------------------------------------------------------------
@@ -515,6 +530,10 @@ class StubModel:
 
     def _chat(self, handler: BaseHTTPRequestHandler, body: dict):
         record = self._record(body)
+        if self.refuse_tools and body.get("tools"):
+            record.refused = True
+            handler._json({"error": f"registry.ollama.ai/library/{MODEL} does not support tools"}, 400)
+            return
         if self._slot is not None:
             # One slot: wait for it, unless the client gives up first
             while not self._slot.acquire(timeout=POLL):

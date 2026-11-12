@@ -80,6 +80,10 @@ BUDGETS = {
 }
 
 
+# The scripted model's settings that change what the assistant knows of it
+MODEL_SETTINGS = {"context_length", "capabilities", "refuse_tools"}
+
+
 def budgets_from(text: str) -> dict:
     """Budgets given as "name=seconds,name=seconds" (as in the environment
     variable IRIS_VOICETEST_BUDGETS), checked against the known names."""
@@ -601,8 +605,8 @@ class ScriptedConversations:
     def _configure_stub(self, options: dict) -> dict:
         """Change the scripted model's settings; what they were."""
         before = self.stub.configure(**options)
-        if "context_length" in options and hasattr(self.assistant, "refresh_context"):
-            self.assistant.refresh_context()
+        if MODEL_SETTINGS & set(options) and hasattr(self.assistant, "refresh_model"):
+            self.assistant.refresh_model()
         return before
 
     def _warm_up(self):

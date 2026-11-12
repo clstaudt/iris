@@ -689,7 +689,8 @@ def no_tool_offer(name: str = "tools_offered") -> Check:
     def fn(result, view):
         problems = []
         for request in view.requests():
-            if "tools" in request.body:
+            # ollama's client sends an empty list when no tools are offered
+            if request.tools:
                 problems.append(f"request {request.index} offers {request.tools}")
             if "'search' function" in request.system:
                 problems.append(f"request {request.index}'s prompt holds the search guidance")

@@ -253,6 +253,22 @@ class TestStubModel:
         assert reply_to([{"role": "user", "content": "Explain it in detail"}]) == LONG
         assert reply_to([{"role": "system", "content": "story"}, {"role": "user", "content": "Hi"}]) == SHORT
 
+    def test_a_model_without_tool_support_refuses_them_as_ollama_does(self):
+        stub = StubModel(first_token=0.0, per_word=0.0, refuse_tools=True, capabilities=["completion"])
+        try:
+            client = ollama.Client(host=stub.url)
+            assert client.show(MODEL).capabilities == ["completion"]
+            schema = {"type": "function", "function": {"name": "search"}}
+            with pytest.raises(ollama.ResponseError) as refused:
+                list(client.chat(model=MODEL, messages=[{"role": "user", "content": "Hi"}],
+                                 tools=[schema], stream=True))
+            assert refused.value.status_code == 400 and "does not support tools" in refused.value.error
+            assert stub.requests[-1].refused
+            reply = client.chat(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True)
+            assert "".join(c.message.content for c in reply) == SHORT
+        finally:
+            stub.close()
+
     def test_a_reply_can_stall_until_the_client_gives_up(self):
         stub = StubModel(rules=[Rule("stall", "One two three four.", stall_after=2)],
                          first_token=0.0, per_word=0.0)

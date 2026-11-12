@@ -1,7 +1,8 @@
 """LLM conversation management, on Ollama or an OpenAI-compatible server."""
 
-import re
+import itertools
 import logging
+import re
 import threading
 import types
 import warnings
@@ -28,6 +29,8 @@ MAX_TOOL_ROUNDS = 3
 # one asked again after a reply that was nothing but a call it cannot make
 NO_MORE_TOOLS_NOTE = "Answer the user now from what you have. No more tools can be used."
 NO_TOOLS_NOTE = "No tools can be used now. Answer the user in words."
+# How Ollama refuses a request with tools for a model that cannot take them
+TOOLS_REFUSED = "does not support tools"
 
 
 def ollama_client(host: Optional[str] = None, **kwargs):
@@ -221,6 +224,8 @@ class ConversationManager:
         # stored: [(attachment, turns left)], oldest first
         self.shared: list[tuple[Attachment, int]] = []
         self._capability_cache: dict[str, set] = {}
+        # Models that refused a request because of its tools
+        self._no_tools: set[str] = set()
         self.model = model
         self.vision_model = vision_model
         self.conversation_history = []
@@ -274,6 +279,7 @@ class ConversationManager:
         self.client = ollama_client(self.host)
         self.reachable = True  # set_host is only called for a server that answered
         self._capability_cache = {}
+        self._no_tools = set()
         self.max_context_tokens = self._get_model_context_length()
 
     def set_model(self, model: str):
@@ -289,6 +295,19 @@ class ConversationManager:
             except Exception:
                 return None
         return self._capability_cache[model]
+
+    def _takes_tools(self, model: str) -> bool:
+        """Whether to offer the model tools: not once it refused them, nor
+        when the server says it cannot take them. A model chosen for its
+        sight is offered them only when the server says it can."""
+        if model in self._no_tools or getattr(self.client, "tools_refused", False) is True:
+            return False
+        if model != self.model:
+            return "tools" in (self._capabilities(model) or set())
+        # Known from when the model was chosen; unknown, it is offered tools
+        # until it refuses them
+        capabilities = self._capability_cache.get(model)
+        return not capabilities or "tools" in capabilities
 
     def image_model(self) -> Optional[str]:
         """The model that answers a message with images, or None if no
@@ -331,6 +350,10 @@ class ConversationManager:
         """
         try:
             model_info = self.client.show(self.model)
+            # What it can do comes with it (see _takes_tools)
+            capabilities = set(model_info.capabilities or [])
+            if capabilities:
+                self._capability_cache[self.model] = capabilities
             modelinfo = model_info.modelinfo
 
             # Look for context length in model info
@@ -510,10 +533,14 @@ class ConversationManager:
         else:
             self.memory.store.add_turn("system", text)
 
-    def manage_context(self) -> list:
+    def manage_context(self, with_tools: bool = True) -> list:
         """
         Manage conversation history to fit within context window.
         Summarizes old messages if needed.
+
+        Args:
+            with_tools: The model is offered tools, so the system prompt
+                says how to use them
 
         Returns:
             Managed list of messages
@@ -522,7 +549,7 @@ class ConversationManager:
         system_content = self.persona.description
 
         # How to use the tools that are on, from each tool's guidance
-        if self.tools:
+        if self.tools and with_tools:
             system_content += self.tools.guidance()
 
         if self.memory is not None:
@@ -664,6 +691,34 @@ class ConversationManager:
             model=model, messages=system_first(messages), stream=True, **extra
         )
 
+    def _open(self, model: str, messages: list, schemas: Optional[list]):
+        """The model's streamed reply, with these tools on offer, and the
+        tools it was asked with in the end.
+
+        An Ollama model that cannot take tools refuses a request with them
+        (400, "... does not support tools"). It is asked again without them,
+        and without the system prompt's guidance on them, and is not
+        offered tools again (OpenAIClient does the same for its servers).
+        """
+        if not schemas:
+            return self._ask(model, messages), None
+        stream = iter(self._ask(model, messages, tools=schemas))
+        try:
+            first = next(stream)
+        except StopIteration:
+            return iter(()), schemas
+        except ollama.ResponseError as error:
+            if TOOLS_REFUSED not in str(error.error).lower():
+                raise
+            logger.info("%s does not support tools; asking it without them", model)
+            self._no_tools.add(model)
+            guidance = self.tools.guidance()
+            if guidance and messages[0].get("role") == "system":
+                content = messages[0]["content"].replace(guidance, "", 1)
+                messages[0] = {**messages[0], "content": content}
+            return self._ask(model, messages), None
+        return itertools.chain([first], stream), schemas
+
     def keep(self, prompt: str, answer: str, source: Optional[str] = None):
         """Keep an exchange streamed with keep=False: its reply as far as
         the user heard it, or self.reply when it was heard to the end. The
@@ -692,8 +747,17 @@ class ConversationManager:
         self.shared = [(a, n - 1) for a, n in self.shared if n > 1]
         self.shared += [(a, PIN_TURNS) for a in attachments]
 
+        # Shared images are answered by a model that can see them
+        images = [a.image for a, _ in self.shared if a.image]
+        sees = self.image_model() if images else None
+        model = sees or self.model
+
+        # Tools, and how to use them, for a model that takes them
+        use_tools = bool(self.tools and self.tools.has_tools()) and self._takes_tools(model)
+        schemas = self.tools.get_schemas() if use_tools else None
+
         # Get managed conversation context
-        messages = self.manage_context()
+        messages = self.manage_context(with_tools=use_tools)
 
         # Inject a language instruction so the LLM replies in the right language
         if response_language != "en":
@@ -705,25 +769,14 @@ class ConversationManager:
 
         # Add current user message, with the files still in context
         user_message = {"role": "user", "content": prompt + self._files_context(attachments)}
-        model = self.model
-        images = [a.image for a, _ in self.shared if a.image]
-        if images:
-            model = self.image_model()
-            if model:
-                user_message["images"] = images
-            else:
-                model = self.model
-                user_message["content"] += (
-                    "\n\n(The images cannot be shown to you: no model that can see "
-                    "images is installed. Let the user know.)"
-                )
+        if sees:
+            user_message["images"] = images
+        elif images:
+            user_message["content"] += (
+                "\n\n(The images cannot be shown to you: no model that can see "
+                "images is installed. Let the user know.)"
+            )
         messages.append(user_message)
-
-        # A model chosen for its sight may not take tools
-        use_tools = bool(self.tools and self.tools.has_tools())
-        if use_tools and model != self.model:
-            use_tools = "tools" in (self._capabilities(model) or set())
-        schemas = self.tools.get_schemas() if use_tools else None
 
         # The reply streams as it comes, so the voice can start before the
         # model has finished; text before a tool call ("Let me look that
@@ -736,7 +789,7 @@ class ConversationManager:
         while True:
             if self._cancelled.is_set():
                 return
-            stream = self._ask(response_model, messages, **({"tools": schemas} if schemas else {}))
+            stream, schemas = self._open(response_model, messages, schemas)
             markup = MarkupFilter()
             said, tool_calls = [], None
             for chunk in stream:
