@@ -47,6 +47,18 @@ CANCELLING_WINDOWS = 12
 CANCELLING_SPARED = 2
 # Below this level (RMS) of what was played, the voice counts as silent
 PLAYING = 0.01
+# A step of the microphone counts towards it while the voice played within
+# this long before it was captured (its way through the room and the devices)
+HEARD_WITHIN = 0.1
+# Where the voice is not heard this much louder than the room's own noise
+# (its energy over that of the microphone while the voice was silent), there
+# is nothing to cancel: a window of it does not count. With headphones no
+# window counts, and the canceller counts as cancelling.
+ABOVE_NOISE = 4.0
+# The room's noise is that of the microphone while the voice has been silent
+# this long (seconds), over the last QUIET_KEPT steps
+QUIET_AFTER = 0.3
+QUIET_KEPT = 300
 
 
 def _int16(audio: np.ndarray) -> bytes:
@@ -71,6 +83,8 @@ class EchoCanceller:
         # of the microphone before and after cancelling in the window so far
         self._suppressions: deque[float] = deque(maxlen=CANCELLING_WINDOWS)
         self._window = [0.0, 0.0, 0]
+        # The microphone's energy in steps with the voice silent
+        self._quiet: deque[float] = deque(maxlen=QUIET_KEPT)
 
     @property
     def settled(self) -> bool:
@@ -90,9 +104,10 @@ class EchoCanceller:
     @property
     def cancelling(self) -> bool:
         """Whether it is taking the voice out, as measured: settled, and the
-        voice lately came out at least CANCELLING dB quieter."""
+        voice lately came out at least CANCELLING dB quieter, or was not
+        heard over the room's noise at all."""
         suppression = self.suppression
-        return self.settled and suppression is not None and suppression >= CANCELLING
+        return self.settled and (suppression is None or suppression >= CANCELLING)
 
     def played(self, start: float, audio: np.ndarray, sample_rate: int):
         """Audio that leaves the speaker from start (time.monotonic()) on."""
@@ -146,8 +161,12 @@ class EchoCanceller:
             capture = AudioFrame(_int16(audio[i : i + STEP]), RATE, 1, STEP)
             self._apm.process_stream(capture)
             cleaned[i : i + STEP] = np.frombuffer(capture.data, dtype=np.int16) / 32768.0
-            if float(np.sqrt(np.mean(reference**2))) >= PLAYING:
+            # What was played reaches the microphone a little later
+            lately = self._reference(at - HEARD_WITHIN, int(HEARD_WITHIN * RATE) + STEP)
+            if float(np.sqrt(np.mean(lately**2))) >= PLAYING:
                 self._measure(audio[i : i + STEP], cleaned[i : i + STEP])
+            elif not self._reference(at - QUIET_AFTER, int(QUIET_AFTER * RATE) + STEP).any():
+                self._quiet.append(float(np.mean(audio[i : i + STEP] ** 2)))
         return cleaned
 
     def _measure(self, heard: np.ndarray, cleaned: np.ndarray):
@@ -157,6 +176,7 @@ class EchoCanceller:
         window[1] += float(np.mean(cleaned**2))
         window[2] += 1
         if window[2] * STEP >= WINDOW * RATE:
-            if window[0] > 0.0:
+            noise = float(np.median(self._quiet)) if self._quiet else 0.0
+            if window[0] > 0.0 and window[0] / window[2] >= ABOVE_NOISE * noise:
                 self._suppressions.append(10.0 * float(np.log10(window[0] / max(window[1], 1e-12))))
             self._window = [0.0, 0.0, 0]

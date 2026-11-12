@@ -162,8 +162,34 @@ def test_the_user_speaking_over_the_voice_leaves_it_cancelling():
     canceller = EchoCanceller()
     canceller.played(0.0, played, RATE)
     mic = _echo_of(played, 0.03)
-    # Half a second of a louder user, at the end
+    # Half a second of a louder user, in the middle: two windows of it are
+    # spared, more are not
     user = 3 * _voice(0.5, seed=7)
-    mic[-len(user) - RATE // 10 : -RATE // 10] += user
+    mic[4 * RATE : 4 * RATE + len(user)] += user
     _clean_all(canceller, mic)
-    assert canceller.cancelling
+    assert canceller.cancelling is True
+
+
+def test_but_a_user_speaking_on_over_it_is_not_spared():
+    played = _voice(8.0)
+    canceller = EchoCanceller()
+    canceller.played(0.0, played, RATE)
+    mic = _echo_of(played, 0.03)
+    user = 3 * _voice(1.5, seed=7)
+    mic[6 * RATE : 6 * RATE + len(user)] += user
+    _clean_all(canceller, mic)
+    assert canceller.cancelling is False
+
+
+def test_with_nothing_to_cancel_it_counts_as_cancelling():
+    """Headphones: the voice does not reach the microphone, only the room's
+    noise does, before the voice and while it plays."""
+    played = _voice(8.0)
+    canceller = EchoCanceller()
+    canceller.played(1.0, played, RATE)
+    rng = np.random.default_rng(5)
+    mic = (rng.standard_normal(9 * RATE) * 0.003).astype(np.float32)
+    _clean_all(canceller, mic)
+    assert canceller.settled
+    assert canceller.suppression is None
+    assert canceller.cancelling is True
