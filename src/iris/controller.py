@@ -123,6 +123,34 @@ TRANSCRIPT_LIMIT = 500
 TIMINGS_KEPT = 20
 
 
+def silent_microphone_message() -> str:
+    """What to say when the microphone delivers nothing but exact zeros.
+
+    On macOS that is the system withholding it from the app, which is asked
+    for it under a name that differs in the app (Iris) and in development
+    (the app that started the dev server). Elsewhere it is a muted or
+    missing microphone.
+    """
+    if sys.platform == "darwin":
+        if getattr(sys, "frozen", False):  # the packaged app's core
+            return (
+                "The microphone returns pure silence: macOS does not let Iris use it. "
+                "Enable it for Iris under System Settings > Privacy & Security > "
+                "Microphone, then reopen Iris."
+            )
+        return (
+            "The microphone returns pure silence: macOS does not let this app use it. "
+            "In development the permission belongs to the app that launched the dev "
+            "server (Cursor, VS Code, Terminal or iTerm), not to Electron. Enable it "
+            "under System Settings > Privacy & Security > Microphone, then relaunch "
+            "that app completely."
+        )
+    return (
+        "The microphone returns pure silence. Check that it is connected and not "
+        "muted, and that Iris may use it."
+    )
+
+
 class AssistantController:
     """Owns a VoiceAssistant instance and translates it into bus events.
 
@@ -198,7 +226,7 @@ class AssistantController:
             self._zero_level_since = time.monotonic()
         elif not self._silence_warned and time.monotonic() - self._zero_level_since > 4:
             self._silence_warned = True
-            self.bus.emit("error", {"message": SILENT_MAC if sys.platform == "darwin" else SILENT})
+            self.bus.emit("error", {"message": silent_microphone_message()})
 
     def _flag_state(self) -> str:
         with self._state_lock:

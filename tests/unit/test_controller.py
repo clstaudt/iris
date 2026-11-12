@@ -4,7 +4,7 @@ import threading
 import time
 
 from iris.audio import AudioPlayer
-from iris.controller import AssistantController
+from iris.controller import AssistantController, silent_microphone_message
 from iris.events import EventBus
 from iris.personas import get_persona
 from iris.tts import SpeechGenerator
@@ -266,6 +266,22 @@ def test_a_silent_microphone_is_warned_about_once(monkeypatch):
     assert len(warnings) == 1
     levels(0.0, 1)
     assert len(warnings) == 2
+
+
+def test_the_silence_warning_names_what_to_do_where_iris_runs(monkeypatch):
+    """Only macOS withholds a microphone silently, and it asks for it under
+    the app's name: Iris when packaged, the dev server's app in development."""
+    monkeypatch.setattr("iris.controller.sys.platform", "linux")
+    elsewhere = silent_microphone_message()
+    assert "macOS" not in elsewhere and "System Settings" not in elsewhere
+    assert "muted" in elsewhere
+
+    monkeypatch.setattr("iris.controller.sys.platform", "darwin")
+    development = silent_microphone_message()
+    assert "Terminal" in development and "System Settings" in development
+    monkeypatch.setattr("iris.controller.sys.frozen", True, raising=False)
+    packaged = silent_microphone_message()
+    assert "for Iris" in packaged and "Terminal" not in packaged
 
 
 def test_work_shows_through_a_paused_mic(monkeypatch):
