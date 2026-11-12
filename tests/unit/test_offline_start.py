@@ -59,7 +59,6 @@ class Microphone:
         self.opened += 1
         if self.unplugged or not self.present:
             raise RuntimeError("Error opening InputStream: Invalid device")
-        device = self
 
         class Stream:
             def start(self):

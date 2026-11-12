@@ -687,7 +687,8 @@ class AssistantController:
                 try:
                     fetch()
                 except Exception as e:
-                    self.bus.emit("error", {"message": f"Could not download the {what}: {brief(e)}"})
+                    message = f"Could not download the {what}: {brief(e)}"
+                    self.bus.emit("error", {"message": message})
         finally:
             self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
 

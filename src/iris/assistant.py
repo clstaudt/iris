@@ -424,7 +424,9 @@ class VoiceAssistant:
             self.set_wake_word(self._wanted_wake_word, engine=engine)
         except Exception as e:
             logger.exception("The wake word could not be set up")
-            self._error(f"The wake word could not be set up, so Iris listens without it. {brief(e)}")
+            self._error(
+                f"The wake word could not be set up, so Iris listens without it. {brief(e)}"
+            )
 
     def _plugin_context(self) -> PluginContext:
         """What the plugins get to make their tools: long-term memory, and
@@ -1192,7 +1194,8 @@ class VoiceAssistant:
                 # Paused, the user is typing, or nothing to recognize speech
                 # with: keep the microphone closed (models stay loaded) and
                 # keep watching for typed turns
-                if self.pause_event.is_set() or self.hold_event.is_set() or self.transcriber is None:
+                closed = self.pause_event.is_set() or self.hold_event.is_set()
+                if closed or self.transcriber is None:
                     self.recorder.close_microphone()
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False

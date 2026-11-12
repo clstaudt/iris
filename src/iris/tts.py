@@ -25,7 +25,6 @@ from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 
 from iris.audio import get_filter
-from iris.events import brief
 from iris.engines import (
     SpeechEngine,
     register_speech_engine,
@@ -33,6 +32,7 @@ from iris.engines import (
     speech_engine,
     spoken_languages,
 )
+from iris.events import brief
 
 warnings.filterwarnings("ignore")
 
