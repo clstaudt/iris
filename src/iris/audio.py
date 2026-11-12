@@ -440,6 +440,7 @@ class AudioRecorder:
         speaking: Callable[[], bool] | None = None,
         hold: Callable[[], None] | None = None,
         release: Callable[[], None] | None = None,
+        heard_until: Callable[[], float] | None = None,
     ) -> str | None:
         """
         Keep listening after a turn seemed over, while it is being answered.
@@ -453,11 +454,12 @@ class AudioRecorder:
         canceller taking it out of the microphone. What it leaves of the
         voice can still sound like speech, so speech over the voice holds it
         (hold() pauses it), and the microphone listens in the quiet: the user
-        goes on speaking, the voice's echo dies away with it. Speech more
-        certain than any echo the settled canceller leaves is the user's too.
-        Echo lets the voice go on (release()). Until the canceller has
-        learned the room, it lets too much of the voice through for that:
-        speech over the voice is not listened to then.
+        goes on speaking, the voice's echo dies away with it; speech the VAD
+        is certain of needs to go on for a moment only. Echo lets the voice
+        go on (release()). Until the canceller has learned the room, it lets
+        too much of the voice through for that: speech over the voice is not
+        listened to then. Listening ends with the voice going on, however it
+        ends.
 
         Args:
             turn: Path to the turn recorded by listen()
@@ -471,6 +473,9 @@ class AudioRecorder:
             speaking: Whether the voice is speaking; the user is heard over it
             hold: Pauses the voice
             release: Lets the voice go on after a hold
+            heard_until: Until when the voice was heard, or will be
+                (time.monotonic()): speech over it counts from when it fell
+                quiet, by itself or held, whichever came first
 
         Returns:
             Path to the turn the user spoke (with the earlier one, if it went
@@ -491,9 +496,13 @@ class AudioRecorder:
         backoff = round(HOLD_BACKOFF / frame_seconds)
         # Frames in a row sure, and certain, to be speech, and whether speech
         # was certain since listening began anew; while the voice is held,
-        # frames left to listen to, and how many after it died away were
-        # speech; frames until the voice may be held again
-        sure, certain, was_certain, held, heard, calm = 0, 0, False, 0, 0, 0
+        # frames left to listen to, when it was held, and how many frames
+        # after it died away were speech; frames until the voice may be held
+        # again, and whether speech heard meanwhile waits to be judged
+        sure, certain, was_certain = 0, 0, False
+        held, held_at, heard = 0, 0.0, 0
+        calm, waiting = 0, False
+        taken = 0  # frames taken from the microphone
         try:
             with self._microphone(echo, go_on=True) as frames:
                 while True:
@@ -505,6 +514,9 @@ class AudioRecorder:
                         frame = frames.get(timeout=0.05)
                     except queue.Empty:
                         continue
+                    # When the frame was captured (time.monotonic())
+                    at = frames.first + taken * frame_seconds
+                    taken += 1
                     spoke = tracker.started
                     ended = tracker.feed(frame)
                     sure = sure + 1 if tracker.probability >= HOLD_THRESHOLD else 0
@@ -514,7 +526,8 @@ class AudioRecorder:
                     calm = max(0, calm - 1)
                     if held:
                         held -= 1
-                        settled = HOLD - held * frame_seconds > HOLD_SETTLE
+                        quiet_from = min(held_at, heard_until()) if heard_until else held_at
+                        settled = at - quiet_from >= HOLD_SETTLE - frame_seconds / 2
                         heard += settled and tracker.probability >= SPEECH_THRESHOLD
                         if held:
                             continue
@@ -533,14 +546,21 @@ class AudioRecorder:
                                 calm = backoff
                             continue
                         spoke = False  # the user's: taken up below
-                    elif echo is not None and not spoke and (sure >= trigger or tracker.started):
+                    elif echo is not None and (not spoke or waiting) and (sure >= trigger or tracker.started):
                         if speaking():
-                            if echo.settled and not calm:
-                                hold()
-                                held, heard = round(HOLD / frame_seconds), 0
-                            else:
+                            if not echo.settled:
                                 tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
+                                waiting = False
+                            elif calm:
+                                # Kept, to be judged once the voice may be held again
+                                waiting = True
+                            else:
+                                hold()
+                                held, held_at, heard, waiting = round(HOLD / frame_seconds), at, 0, False
                             continue
+                        if waiting:
+                            # The voice ended meanwhile: what was heard is taken up below
+                            spoke, waiting = False, False
                     if tracker.started:
                         if not spoke and not on_speech():
                             tracker.forget_before()
@@ -551,6 +571,9 @@ class AudioRecorder:
         except Exception as e:
             print(f"Recording error: {e}")
             return None
+        finally:
+            if held and release is not None:
+                release()
 
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         sf.write(temp_file.name, tracker.audio(), self.sample_rate)
@@ -785,11 +808,17 @@ class _Frames:
         self._capture = capture
         self._on_block = on_block
         self._pending = np.zeros(0, dtype=np.float32)
+        # When the first frame was captured (time.monotonic()); the frames
+        # follow one another from there
+        self.first = 0.0
+        self._started = False
 
     def get(self, timeout: float) -> np.ndarray:
         """The next frame; raises queue.Empty if none came within timeout."""
         while len(self._pending) < FRAME:
             block, captured = self._capture.take(timeout)
+            if not self._started:
+                self.first, self._started = captured, True
             if self._on_block:
                 self._on_block(captured + len(block) / self._capture.sample_rate)
             if self._echo is not None:
@@ -850,13 +879,27 @@ class AudioPlayer:
         # position its current segment started from, and when that segment
         # started being heard, None while paused)
         self._place: tuple[int, int, int, float | None] | None = None
+        # Until when what was played is heard (time.monotonic()): the end of
+        # the clip playing, or when it was cut off
+        self.heard_until = 0.0
+
+    def audible(self, within: float = 0.0) -> bool:
+        """Whether what was played is heard now, or was within so many
+        seconds."""
+        return time.monotonic() < self.heard_until + within
+
+    def _cut(self):
+        """What plays stopped being heard now."""
+        now = time.monotonic()
+        self.heard_until = min(self.heard_until, now)
+        if self.echo is not None:
+            self.echo.cut(now)
 
     def stop(self):
         """Stop any currently playing audio."""
         self._stopped.set()
         self.audio.stop()
-        if self.echo is not None:
-            self.echo.cut(time.monotonic())
+        self._cut()
 
     def pause(self):
         """Pause playback; play() holds its place until resume()."""
@@ -955,6 +998,7 @@ class AudioPlayer:
             started = time.monotonic()
             latency = self.audio.play(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
             self._place = (len(audio), sample_rate, position, started + latency)
+            self.heard_until = started + latency + len(segment) / sample_rate
             if self.echo is not None:
                 self.echo.played(started + latency, segment, sample_rate)
 
@@ -985,8 +1029,7 @@ class AudioPlayer:
             cut_by_pause = self._paused.is_set() and not stopped()
             if cut_by_pause or stopped():
                 self.audio.stop()
-                if self.echo is not None:
-                    self.echo.cut(time.monotonic())
+                self._cut()
 
             if level_thread:
                 level_stop.set()

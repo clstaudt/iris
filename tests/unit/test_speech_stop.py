@@ -91,3 +91,39 @@ def test_a_stop_racing_the_start_of_a_clip_silences_it():
     pipeline = SpeechPipeline(generator, Player())
     pipeline.queue_speech("Hello.")
     assert _wait(lambda: seen == [True])
+
+
+class TailPlayer(RecordingPlayer):
+    """Plays each clip, which was heard until a second before play returns:
+    the stream outlives the clip, playing silence."""
+
+    def __init__(self):
+        super().__init__()
+        self.heard_until = 0.0
+
+    def play(self, audio_file, on_level=None, cancelled=None):
+        super().play(audio_file, on_level, cancelled)
+        self.heard_until = time.monotonic() - 1.0
+
+
+def test_a_sentence_counts_as_spoken_until_it_stopped_being_heard():
+    generator, player = SlowGenerator(), TailPlayer()
+    generator.release.set()
+    pipeline = SpeechPipeline(generator, player)
+    pipeline.queue_speech("The lighthouse keeper rose with the dawn.")
+    assert _wait(lambda: player.played and not pipeline.is_active)
+    now = time.monotonic()
+    assert pipeline.spoken_since(now - 1.5) == "The lighthouse keeper rose with the dawn."
+    assert pipeline.spoken_since(now - 0.5) == ""
+
+
+def test_more_to_say_while_text_waits_or_is_synthesized():
+    generator, player = SlowGenerator(), RecordingPlayer()
+    pipeline = SpeechPipeline(generator, player)
+    assert not pipeline.more_to_say()
+    pipeline.queue_speech("A storm was coming.")
+    assert generator.started.wait(2)
+    assert pipeline.more_to_say()
+    generator.release.set()
+    assert _wait(lambda: not pipeline.is_active)
+    assert not pipeline.more_to_say()

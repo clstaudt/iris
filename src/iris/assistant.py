@@ -29,7 +29,7 @@ from iris.timing import TurnTiming
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
 from iris.tts import SpeechGenerator, SpeechPipeline
-from iris.turns import SmartTurn
+from iris.turns import HOLD_SETTLE, PRE_SPEECH, SPEECH_START, SmartTurn
 from iris.wakeword import WakeWordDetector, match_sleep_word
 
 warnings.filterwarnings("ignore")
@@ -81,10 +81,10 @@ def _echo_canceller() -> Optional[EchoCanceller]:
         return None
 
 
-# A turn that begins while the voice speaks, or this long after it stopped
-# (its last syllables still arrive, through the room and the device), may
-# be its echo
-ECHO_AFTER = 0.5
+# A turn that begins while the voice is heard, or this long after it fell
+# quiet (its last syllables still arrive, through the room and the device),
+# may be its echo. A user answering at once begins later than that.
+ECHO_AFTER = 0.3
 # A turn of four words or more is the voice's echo when this share of its
 # words come, in order, from what the voice said
 ECHO_SHARE = 0.85
@@ -574,9 +574,15 @@ class VoiceAssistant:
                 return answered.is_set() or self.speech_pipeline.is_speaking_flag.is_set()
 
             def speaking() -> bool:
-                """Whether the voice is speaking the answer (between two of
-                its clips too), and not paused by the user."""
-                return self.speech_pipeline.is_active and not self.suspend_event.is_set()
+                """Whether the voice is speaking the answer: heard now, or
+                a moment ago (its echo dying away), or with more of it to
+                come; not once the last of it has died away, though the
+                speaker's stream plays silence for a while longer. Not
+                while paused by the user."""
+                if self.suspend_event.is_set():
+                    return False
+                pipeline = self.speech_pipeline
+                return pipeline.more_to_say() or pipeline.player.audible(within=HOLD_SETTLE)
 
             def listen_on(turn=audio_path):
                 whole_turn[0] = self.recorder.listen_on(
@@ -588,6 +594,7 @@ class VoiceAssistant:
                     speaking=speaking if through_voice else None,
                     hold=self.speech_pipeline.pause,
                     release=self.speech_pipeline.resume,
+                    heard_until=lambda: self.speech_pipeline.player.heard_until,
                 )
 
             listener = threading.Thread(target=listen_on, daemon=True)
@@ -691,7 +698,10 @@ class VoiceAssistant:
 
         turn_wait = getattr(getattr(self, "recorder", None), "last_turn_wait", None)
         recognizing = time.monotonic()
-        turn_began = recognizing - (turn_wait or 0.0) - _seconds_of(audio_path)
+        # Its first syllable: the recording ends as the turn is taken (with
+        # the silence waited for), and begins PRE_SPEECH before speech was
+        # recognized, SPEECH_START into it
+        turn_began = recognizing - _seconds_of(audio_path) + PRE_SPEECH - SPEECH_START
         text, detected_language = self.transcriber.transcribe(audio_path)
         self._timing = TurnTiming(
             "voice",

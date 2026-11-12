@@ -739,7 +739,11 @@ class SpeechPipeline:
                             self._said.append(text)
                         self._playing = None
                         if not sound:
-                            self._spoken.append((time.monotonic(), text))
+                            # When it stopped being heard: the stream
+                            # outlives the clip by up to a block
+                            heard = getattr(self.player, "heard_until", None)
+                            ended = time.monotonic() if heard is None else min(time.monotonic(), heard)
+                            self._spoken.append((ended, text))
 
                 # Cleanup
                 try:
@@ -754,6 +758,15 @@ class SpeechPipeline:
         self.playback_worker_thread = threading.Thread(target=playback_worker, daemon=True)
         self.generation_worker_thread.start()
         self.playback_worker_thread.start()
+
+    def more_to_say(self) -> bool:
+        """Whether more of what it speaks is still to come: text waiting to
+        be spoken, being synthesized, or synthesized and waiting to play."""
+        with self._status_lock:
+            generating = (
+                self.is_generating_flag.is_set() and self._generating_epoch == self._epoch
+            )
+            return not self.text_queue.empty() or generating or not self.audio_queue.empty()
 
     @property
     def is_active(self) -> bool:
