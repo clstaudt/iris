@@ -1,0 +1,18 @@
+{
+ "all": [
+  "\n\nIMPORTANT - You have access to tools that you must use appropriately:\n- 'look' function: Your CAMERA. You CANNOT see through the camera without calling this.\n  * YOU MUST call 'look' for ANY question about physical objects, gestures, or camera view\n  * NEVER describe what the camera sees without calling this function first\n  * Call it EVERY TIME they say 'look again' - always capture fresh\n- 'capture_screen' function: Screenshot of the user's PHYSICAL computer screen.\n  * ONLY use when they ask about what is on their screen, desktop, or open applications\n  * NEVER use this to read websites - use 'browse' for websites\n  * 'page', 'article', 'headline', 'website' refer to the WEB, not the screen\n- 'search' function: Search the web for CURRENT information.\n  * YOU MUST call this for questions about current events, news, weather, prices, or recent facts\n  * Use when the user asks about something you're unsure of or that changes over time\n  * NEVER guess at current facts - search first\n- 'browse' function: Fetch and read the contents of a specific webpage.\n  * When the user names a website (e.g. 'The Guardian', 'BBC News'), infer its URL and call this\n  * Use to read, scan, or check any web page, article, or headline\n  * Use to read full article content from URLs found via 'search'\n  * Provide the full URL including https://\n\nIMPORTANT: You MUST use these functions when appropriate. NEVER make up or guess what you see.",
+  [
+   "look",
+   "capture_screen",
+   "search",
+   "browse"
+  ]
+ ],
+ "web": [
+  "\n\nIMPORTANT - You have access to tools that you must use appropriately:\n- 'search' function: Search the web for CURRENT information.\n  * YOU MUST call this for questions about current events, news, weather, prices, or recent facts\n  * Use when the user asks about something you're unsure of or that changes over time\n  * NEVER guess at current facts - search first\n- 'browse' function: Fetch and read the contents of a specific webpage.\n  * When the user names a website (e.g. 'The Guardian', 'BBC News'), infer its URL and call this\n  * Use to read, scan, or check any web page, article, or headline\n  * Use to read full article content from URLs found via 'search'\n  * Provide the full URL including https://\n\nIMPORTANT: You MUST use these functions when appropriate. NEVER make up or guess what you see.",
+  [
+   "search",
+   "browse"
+  ]
+ ]
+}

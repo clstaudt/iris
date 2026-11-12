@@ -305,3 +305,26 @@ def test_switching_to_a_voice_that_speaks_the_language_keeps_it():
     controller.set_persona("hal")
 
     assert controller.assistant.conversation_language == "fr"
+
+
+def test_plugins_and_engines_are_listed_for_the_app():
+    controller = AssistantController(EventBus())
+
+    listed = controller.plugins_list()
+    ids = [p["id"] for p in listed["plugins"]]
+    assert ids[:4] == ["memory", "camera", "screen", "web"]
+    assert listed["failures"] == []
+    camera = listed["plugins"][1]
+    assert camera["switchable"] is True and camera["source"] == "built-in"
+
+    engines = controller.engines_list()
+    assert [e["id"] for e in engines["tts"]][:2] == ["kyutai", "kokoro"]
+    assert "whisper" in [e["id"] for e in engines["stt"]]
+
+
+def test_the_persona_editor_learns_the_engines_from_the_core():
+    voices = AssistantController(EventBus()).persona_voices()
+    info = {e["id"]: e for e in voices["engine_info"]}
+    assert info["kyutai"] == {"id": "kyutai", "name": "Kyutai", "takes_speed": False}
+    assert info["kokoro"]["takes_speed"] is True
+    assert set(voices["engines"]) >= {"kyutai", "kokoro"}

@@ -8,6 +8,7 @@
   } from "../lib/state.svelte";
   import Icon from "./Icon.svelte";
 
+  // The engines the core has, by name; the shipped ones until it has said
   const ENGINES: { id: SpeechEngine; label: string }[] = [
     { id: "kyutai", label: "Kyutai" },
     { id: "kokoro", label: "Kokoro" },
@@ -52,7 +53,16 @@
     !!draft && changed && !!draft.name.trim() && !!draft.voice && !saving
   );
   const voices = $derived<VoiceInfo[]>(store.voices?.engines[draft?.engine ?? "kyutai"] ?? []);
-  const kokoroMissing = $derived(!!store.voices && store.voices.engines.kokoro.length === 0);
+  const engines = $derived(
+    store.voices?.engine_info?.map((engine) => ({ id: engine.id, label: engine.name })) ?? ENGINES
+  );
+  // An engine without voices (Kokoro before it is downloaded) cannot be chosen
+  const voiceless = (engine: SpeechEngine) =>
+    !!store.voices && (store.voices.engines[engine]?.length ?? 0) === 0;
+  const takesSpeed = $derived(
+    store.voices?.engine_info?.find((engine) => engine.id === draft?.engine)?.takes_speed ??
+      draft?.engine === "kokoro"
+  );
   // The voice's engine, speed and effect, for those who asked for more
   const detailed = $derived(store.settingsLevel !== "essentials");
 
@@ -72,9 +82,10 @@
     if (!draft || draft.engine === engine) return;
     draft.engine = engine;
     const list = store.voices?.engines[engine] ?? [];
-    draft.voice = list.some((v) => v.id === DEFAULT_VOICE[engine])
-      ? DEFAULT_VOICE[engine]
-      : (list[0]?.id ?? DEFAULT_VOICE[engine]);
+    const preferred = DEFAULT_VOICE[engine];
+    draft.voice = preferred && list.some((v) => v.id === preferred)
+      ? preferred
+      : (list[0]?.id ?? preferred ?? "");
   }
 
   function filterLabel(name: string) {
@@ -150,11 +161,11 @@
         <h3 class="section">Voice</h3>
         {#if detailed}
           <div class="segmented" role="radiogroup" aria-label="Speech engine">
-            {#each ENGINES as engine}
+            {#each engines as engine}
               <button
                 role="radio"
                 aria-checked={draft.engine === engine.id}
-                disabled={engine.id === "kokoro" && kokoroMissing}
+                disabled={voiceless(engine.id)}
                 onclick={() => setEngine(engine.id)}
                 class:active={draft.engine === engine.id}
               >
@@ -185,7 +196,7 @@
         </div>
         {#if detailed}
           <div class="grid grid-cols-[5.5rem_1fr] items-center gap-x-3 gap-y-2 pt-1">
-            {#if draft.engine === "kokoro"}
+            {#if takesSpeed}
               <label for="persona-speed" class="text-[12.5px] text-ink-2">Speed</label>
               <div class="flex items-center gap-3">
                 <input

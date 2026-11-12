@@ -140,6 +140,8 @@ def main():
         "tools.set": lambda params: controller.set_tool(
             params.get("name", ""), bool(params.get("enabled", True))
         ),
+        "plugins.list": lambda params: controller.plugins_list(),
+        "engines.list": lambda params: controller.engines_list(),
         "persona.list": lambda params: controller.list_personas(),
         "persona.set": lambda params: controller.set_persona(params.get("name", "")),
         "persona.get": lambda params: controller.persona_get(params.get("id", "")),

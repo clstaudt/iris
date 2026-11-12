@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from iris import downloads
+from iris import downloads, engines
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AUDIO_FILTERS, AudioRecorder, get_filter
@@ -24,6 +24,8 @@ from iris.personas import (
     save_persona,
     shipped,
 )
+from iris.plugins import load as load_plugins
+from iris.plugins import plugin_dir
 from iris.transcription import (
     WhisperTranscriber,
     folder_engine,
@@ -34,7 +36,6 @@ from iris.transcription import (
 )
 from iris.tts import (
     DEFAULT_KOKORO_DIR,
-    ENGINES,
     KOKORO_MODEL_FILE,
     KOKORO_MODEL_URL,
     KOKORO_VOICES_FILE,
@@ -108,6 +109,9 @@ class AssistantController:
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.assistant: VoiceAssistant | None = None
+        # Plugins shipped, installed and in the user's folder; their engines
+        # are registered from here on
+        self.plugins = load_plugins()
 
         self._loop_thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
@@ -260,8 +264,8 @@ class AssistantController:
         kwargs = dict(options)
         kwargs["ollama_host"] = self._ollama_host
         persona_name = kwargs.pop("persona", "iris")
-        # {group: enabled} chosen in the UI; applied once the tools exist
-        tool_choices = kwargs.pop("tools", {}) or {}
+        # {plugin id: enabled} chosen in the UI; the others follow their default
+        kwargs["tools"] = kwargs.pop("tools", {}) or {}
         amnesia = bool(kwargs.pop("amnesia", False))
         # Model folders chosen in Settings; empty means download as usual
         if stt_path := kwargs.pop("stt_model_path", ""):
@@ -269,11 +273,6 @@ class AssistantController:
         if tts_dir := kwargs.pop("tts_models_dir", ""):
             kwargs["tts_models_dir"] = tts_dir
 
-        # Tools are on by default; one whose optional dependencies are
-        # missing stays off and shows as not installed
-        kwargs.setdefault("enable_vision", True)
-        kwargs.setdefault("enable_screen_capture", True)
-        kwargs.setdefault("enable_web_search", True)
         if "vision_model" not in kwargs:
             kwargs["vision_model"] = self._pick_vision_model("qwen3-vl:8b")
 
@@ -287,11 +286,9 @@ class AssistantController:
                 persona=get_persona(persona_name),
                 event_bus=self.bus,
                 turn_queue=self._turns,
+                plugins=self.plugins.plugins,
                 **kwargs,
             )
-            if self.assistant.tools is not None:
-                for group, enabled in tool_choices.items():
-                    self.assistant.tools.set_group(group, bool(enabled))
             self.assistant.conversation.set_amnesia(amnesia)
             self.bus.emit("config", self.assistant.config_info())
             self._restore_thread()
@@ -411,14 +408,45 @@ class AssistantController:
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
-    def set_tool(self, group: str, enabled: bool) -> dict:
-        """Switch a tool group (camera, screen, web) on or off."""
-        if self.assistant is None or self.assistant.tools is None:
+    def set_tool(self, plugin_id: str, enabled: bool) -> dict:
+        """Switch a plugin's tools (camera, screen, web, ...) on or off."""
+        if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
-        if not self.assistant.tools.set_group(group, bool(enabled)):
-            return {"ok": False, "error": f"Tool '{group}' is not available"}
+        if not self.assistant.tools.set_enabled(plugin_id, bool(enabled)):
+            return {"ok": False, "error": f"Tool '{plugin_id}' is not available"}
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
+
+    def plugins_list(self) -> dict:
+        """The plugins found, what each brings, and those that failed to load."""
+        tools = self.assistant.tools if self.assistant else None
+        return {
+            "plugins": [
+                {
+                    "id": plugin.id,
+                    "name": plugin.name,
+                    "source": plugin.source,
+                    "available": plugin.available(),
+                    "switchable": plugin.switchable,
+                    "enabled": tools.enabled(plugin.id) if tools else None,
+                    "tools": tools.names_of(plugin.id) if tools else [],
+                    "speech_engines": [e.id for e in plugin.speech_engines()],
+                    "recognition_engines": [e.id for e in plugin.recognition_engines()],
+                }
+                for plugin in self.plugins.plugins
+            ],
+            "failures": self.plugins.failures,
+            "folder": str(plugin_dir()),
+        }
+
+    def engines_list(self) -> dict:
+        """Each slot's engines, with the ones in use marked."""
+        assistant = self.assistant
+        return engines.describe(
+            speech=assistant.tts_generator.engine if assistant else None,
+            recognition=assistant.recognition_engine if assistant else None,
+            models_dir=assistant.tts_generator.models_dir if assistant else None,
+        )
 
     def set_wake_word(self, word: str) -> dict:
         """Listen only for this word until addressed ("" listens to everything)."""
@@ -564,12 +592,14 @@ class AssistantController:
         is and never downloaded.
         """
         try:
-            self._fetch_stt(
-                kwargs.get("whisper_model", "auto"),
-                kwargs.get("wake_word"),
-                whisper_engine=kwargs.get("whisper_engine", "auto"),
-                whisper_device=kwargs.get("whisper_device", "auto"),
-            )
+            # Whisper's models; another recognition engine fetches its own
+            if kwargs.get("recognition_engine", "whisper") == "whisper":
+                self._fetch_stt(
+                    kwargs.get("whisper_model", "auto"),
+                    kwargs.get("wake_word"),
+                    whisper_engine=kwargs.get("whisper_engine", "auto"),
+                    whisper_device=kwargs.get("whisper_device", "auto"),
+                )
             self._fetch_turn()
             self._fetch_tts(kwargs.get("tts_models_dir"))
         finally:
@@ -800,10 +830,16 @@ class AssistantController:
         return {"ok": True, "persona": name}
 
     def persona_voices(self) -> dict:
-        """For the persona editor: each speech engine's voices, and the audio filters."""
+        """For the persona editor: the speech engines (names, whether they
+        take a speed) and their voices, and the audio filters."""
         models_dir = self.assistant.tts_generator.models_dir if self.assistant else None
+        registered = engines.speech_engines()
         return {
-            "engines": {engine: list_voices(engine, models_dir) for engine in ENGINES},
+            "engines": {engine: list_voices(engine, models_dir) for engine in registered},
+            "engine_info": [
+                {"id": engine.id, "name": engine.name, "takes_speed": engine.takes_speed}
+                for engine in registered.values()
+            ],
             "filters": list(AUDIO_FILTERS),
         }
 
@@ -827,7 +863,7 @@ class AssistantController:
         current persona applies the changes right away."""
         if not (settings.get("name") or "").strip():
             return {"ok": False, "error": "The persona needs a name"}
-        if settings.get("engine") not in ENGINES or not settings.get("voice"):
+        if settings.get("engine") not in engines.speech_engines() or not settings.get("voice"):
             return {"ok": False, "error": "The persona needs a voice"}
         persona_id = save_persona(settings, settings.get("id") or None)
         if self.assistant is not None and self.assistant.persona.id == persona_id:
@@ -851,7 +887,7 @@ class AssistantController:
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         engine, voice = settings.get("engine"), settings.get("voice")
-        if engine not in ENGINES or not voice:
+        if engine not in engines.speech_engines() or not voice:
             return {"ok": False, "error": "No voice chosen"}
         # In the voice's own language, when Iris can speak it with that engine
         language = voice_language(engine, voice)

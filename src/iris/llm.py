@@ -534,51 +534,9 @@ class ConversationManager:
         # Build system prompt with persona description
         system_content = self.persona.description
 
-        # Add tool awareness if tools are available
-        if self.tools and self.tools.has_tools():
-            tool_names = list(self.tools._enabled_tools.keys())
-
-            # Add general tool instruction
-            tool_instructions = (
-                "\n\nIMPORTANT - You have access to tools that you must use appropriately:\n"
-            )
-
-            if "look" in tool_names:
-                tool_instructions += (
-                    "- 'look' function: Your CAMERA. You CANNOT see through the camera without calling this.\n"
-                    "  * YOU MUST call 'look' for ANY question about physical objects, gestures, or camera view\n"
-                    "  * NEVER describe what the camera sees without calling this function first\n"
-                    "  * Call it EVERY TIME they say 'look again' - always capture fresh\n"
-                )
-
-            if "capture_screen" in tool_names:
-                tool_instructions += (
-                    "- 'capture_screen' function: Screenshot of the user's PHYSICAL computer screen.\n"
-                    "  * ONLY use when they ask about what is on their screen, desktop, or open applications\n"
-                    "  * NEVER use this to read websites - use 'browse' for websites\n"
-                    "  * 'page', 'article', 'headline', 'website' refer to the WEB, not the screen\n"
-                )
-
-            if "search" in tool_names:
-                tool_instructions += (
-                    "- 'search' function: Search the web for CURRENT information.\n"
-                    "  * YOU MUST call this for questions about current events, news, weather, prices, or recent facts\n"
-                    "  * Use when the user asks about something you're unsure of or that changes over time\n"
-                    "  * NEVER guess at current facts - search first\n"
-                )
-
-            if "browse" in tool_names:
-                tool_instructions += (
-                    "- 'browse' function: Fetch and read the contents of a specific webpage.\n"
-                    "  * When the user names a website (e.g. 'The Guardian', 'BBC News'), infer its URL and call this\n"
-                    "  * Use to read, scan, or check any web page, article, or headline\n"
-                    "  * Use to read full article content from URLs found via 'search'\n"
-                    "  * Provide the full URL including https://\n"
-                )
-
-            tool_instructions += "\nIMPORTANT: You MUST use these functions when appropriate. NEVER make up or guess what you see."
-
-            system_content += tool_instructions
+        # How to use the tools that are on, from each tool's guidance
+        if self.tools:
+            system_content += self.tools.guidance()
 
         if self.memory is not None:
             system_content += self._memory_context()
@@ -787,32 +745,19 @@ class ConversationManager:
                         }
                     )
 
-                    # Check if any tool is a vision tool (look/camera)
+                    # A tool that returned an image is answered by the vision model
                     uses_vision = False
                     for tool_call in tool_calls:
                         tool_name = tool_call["function"]["name"]
                         tool_args = tool_call["function"].get("arguments", {})
 
-                        # Check if this is a vision tool and set status BEFORE executing
-                        if tool_name == "look":
-                            uses_vision = True
-                            # Set looking status immediately when we know LLM wants to look
-                            if self.tools.status_manager:
-                                with self.tools.status_manager.status_lock:
-                                    self.tools.status_manager.status_looking = True
-                        elif tool_name == "capture_screen":
-                            uses_vision = True
-                            if self.tools.status_manager:
-                                with self.tools.status_manager.status_lock:
-                                    self.tools.status_manager.status_capturing_screen = True
-
                         if on_tool_use:
                             on_tool_use(tool_name, tool_args)
 
-                        # Execute the tool
+                        # Execute the tool (it shows its activity meanwhile)
                         result = self.tools.execute(tool_name, **tool_args)
-                        if tool_name == "recall" and result.get("success"):
-                            self.pinned[result["topic_id"]] = PIN_TURNS
+                        if result.get("success") and result.get("pin_topic") is not None:
+                            self.pinned[result["pin_topic"]] = PIN_TURNS
 
                         # Format tool response for LLM
                         tool_msg = {"role": "tool", "content": ""}
@@ -828,6 +773,7 @@ class ConversationManager:
 
                         # If tool returned an image, include it
                         if result.get("image"):
+                            uses_vision = True
                             tool_msg["images"] = [result["image"]]
                             tool_msg["content"] = result.get("message", "Image captured")
                         elif result.get("result"):

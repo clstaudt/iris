@@ -1,5 +1,6 @@
 """Text-to-speech generation and pipeline using Pocket TTS or kokoro-onnx."""
 
+import logging
 import os
 import queue
 import re
@@ -20,8 +21,16 @@ from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 
 from iris.audio import get_filter
+from iris.engines import (
+    SpeechEngine,
+    register_speech_engine,
+    speaking_engine,
+    speech_engine,
+)
 
 warnings.filterwarnings("ignore")
+
+logger = logging.getLogger(__name__)
 
 
 class KeptEspeak:
@@ -122,8 +131,13 @@ def find_kokoro_models() -> Path | None:
     return next((folder for folder in candidates if kokoro_files_in(folder)), None)
 
 
-class KokoroGenerator:
+class KokoroGenerator(SpeechEngine):
     """Generates speech audio using kokoro-onnx."""
+
+    id = "kokoro"
+    name = "Kokoro"
+    languages = frozenset(LANGUAGE_VOICE_MAP)
+    takes_speed = True
 
     def __init__(
         self,
@@ -165,6 +179,40 @@ class KokoroGenerator:
                 f"{KOKORO_MODEL_FILE} and {KOKORO_VOICES_FILE}"
             )
         return folder / KOKORO_MODEL_FILE, folder / KOKORO_VOICES_FILE
+
+    @classmethod
+    def available(cls, models_dir: str | Path | None = None) -> bool:
+        """Kokoro speaks once its files are downloaded (or chosen)."""
+        folder = Path(models_dir).expanduser() if models_dir else find_kokoro_models()
+        return folder is not None and kokoro_files_in(folder)
+
+    @classmethod
+    def voices(cls, models_dir: str | Path | None = None) -> list[dict]:
+        """Kokoro's voices come from its voices file, so there are none
+        until it is downloaded."""
+        folder = Path(models_dir).expanduser() if models_dir else find_kokoro_models()
+        if folder is None or not (folder / KOKORO_VOICES_FILE).exists():
+            return []
+        with np.load(folder / KOKORO_VOICES_FILE) as voices:
+            names = sorted(voices.files)
+        return [
+            {
+                "id": name,
+                "name": name.split("_", 1)[-1].replace("_", " ").title(),
+                "language": KOKORO_VOICE_LANGUAGES.get(name[:1], ("", "Other"))[1],
+            }
+            for name in names
+        ]
+
+    @classmethod
+    def voice_language(cls, voice: str) -> str:
+        """A Kokoro voice name starts with its language."""
+        return KOKORO_VOICE_LANGUAGES.get(voice[:1], ("en",))[0]
+
+    @classmethod
+    def default_voice(cls, language: str) -> str | None:
+        info = get_language_info(language)
+        return info["default_voice"] if info else None
 
     def voice_for(self, language: str) -> tuple[str, str]:
         """Pick (Kokoro language code, voice) for a reply in this language.
@@ -225,11 +273,8 @@ class KokoroGenerator:
 
             return temp_audio.name
 
-        except Exception as e:
-            print(f"Error generating speech: {e}")
-            import traceback
-
-            traceback.print_exc()
+        except Exception:
+            logger.exception("Kokoro could not speak")
             return None
 
 
@@ -246,7 +291,7 @@ def heard_part(text: str, fraction: float) -> str:
         if end < 0:
             return ""
     return text[:end].rstrip()
-ENGINES = ("kyutai", "kokoro")
+
 
 # Whisper language codes Pocket TTS speaks, and the model for each. Japanese
 # and Chinese are left to Kokoro.
@@ -290,53 +335,23 @@ LANGUAGE_NAMES = {
 
 
 def engine_speaks(engine: str, language: str) -> bool:
-    """Whether a persona on this engine can speak its replies in a language.
-    Kyutai personas leave the languages Pocket TTS lacks to Kokoro."""
-    if engine == "kyutai" and language in POCKET_LANGUAGES:
-        return True
-    return is_language_supported(language)
+    """Whether a persona on this engine can speak its replies in a language,
+    with its own voice or one it borrows (Kyutai personas leave the
+    languages Pocket TTS lacks to Kokoro)."""
+    return speaking_engine(engine, language) is not None
 
 
 def voice_language(engine: str, voice: str) -> str:
     """The Whisper language code of the language a voice was made for."""
-    if engine == "kokoro":
-        return KOKORO_VOICE_LANGUAGES.get(voice[:1], ("en",))[0]
-    for code, pocket_lang in POCKET_LANGUAGES.items():
-        if DEFAULT_VOICE_FOR_LANGUAGE.get(pocket_lang) == voice:
-            return code
-    return "en"
+    try:
+        return speech_engine(engine).voice_language(voice)
+    except ValueError:
+        return "en"
 
 
 def list_voices(engine: str, models_dir: str | Path | None = None) -> list[dict]:
-    """An engine's voices as {id, name, language}. Kokoro's come from its
-    voices file, so there are none until it is downloaded."""
-    if engine == "kokoro":
-        folder = Path(models_dir).expanduser() if models_dir else find_kokoro_models()
-        if folder is None or not (folder / KOKORO_VOICES_FILE).exists():
-            return []
-        with np.load(folder / KOKORO_VOICES_FILE) as voices:
-            names = sorted(voices.files)
-        return [
-            {
-                "id": name,
-                "name": name.split("_", 1)[-1].replace("_", " ").title(),
-                "language": KOKORO_VOICE_LANGUAGES.get(name[:1], ("", "Other"))[1],
-            }
-            for name in names
-        ]
-    names = list(POCKET_ENGLISH_VOICES) + [
-        DEFAULT_VOICE_FOR_LANGUAGE[pocket_lang]
-        for code, pocket_lang in POCKET_LANGUAGES.items()
-        if code != "en"
-    ]
-    return [
-        {
-            "id": name,
-            "name": name.replace("_", " ").title(),
-            "language": LANGUAGE_NAMES[voice_language(engine, name)],
-        }
-        for name in names
-    ]
+    """An engine's voices as {id, name, language}."""
+    return speech_engine(engine).voices(models_dir)
 
 
 # Characters Pocket TTS stumbles over: the word after a dash is garbled, and
@@ -373,17 +388,24 @@ def pocket_sentences(text: str) -> list[str]:
     return sentences
 
 
-class PocketGenerator:
+class PocketGenerator(SpeechEngine):
     """Generates speech audio with Kyutai's Pocket TTS, on the CPU.
 
     Pocket TTS has one model per language: English loads right away, the
     others the first time a reply is in that language.
     """
 
-    def __init__(self, voice: str = "alba"):
+    id = "kyutai"
+    name = "Kyutai"
+    languages = frozenset(POCKET_LANGUAGES)
+    # Japanese and Chinese are left to Kokoro
+    borrows = ("kokoro",)
+
+    def __init__(self, voice: str = "alba", models_dir: str | Path | None = None):
         """
         Args:
             voice: A Pocket TTS voice, or an audio file of a voice to clone
+            models_dir: Unused: Pocket TTS fetches its models itself
         """
         self.voice = voice
         self._models: dict[str, TTSModel] = {}
@@ -401,6 +423,37 @@ class PocketGenerator:
             model = self._model(pocket_lang)
             self._voice_states[key] = model.get_state_for_audio_prompt(voice)
         return self._voice_states[key]
+
+    @classmethod
+    def voices(cls, models_dir: str | Path | None = None) -> list[dict]:
+        names = list(POCKET_ENGLISH_VOICES) + [
+            DEFAULT_VOICE_FOR_LANGUAGE[pocket_lang]
+            for code, pocket_lang in POCKET_LANGUAGES.items()
+            if code != "en"
+        ]
+        return [
+            {
+                "id": name,
+                "name": name.replace("_", " ").title(),
+                "language": LANGUAGE_NAMES[cls.voice_language(name)],
+            }
+            for name in names
+        ]
+
+    @classmethod
+    def voice_language(cls, voice: str) -> str:
+        """Each language beyond English has a voice of its own."""
+        for code, pocket_lang in POCKET_LANGUAGES.items():
+            if DEFAULT_VOICE_FOR_LANGUAGE.get(pocket_lang) == voice:
+                return code
+        return "en"
+
+    @classmethod
+    def default_voice(cls, language: str) -> str | None:
+        if language == "en":
+            return "alba"
+        pocket_lang = POCKET_LANGUAGES.get(language)
+        return DEFAULT_VOICE_FOR_LANGUAGE.get(pocket_lang) if pocket_lang else None
 
     def voice_for(self, language: str) -> tuple[str, str]:
         """Pick (Pocket model language, voice) for a reply in this language.
@@ -439,16 +492,23 @@ class PocketGenerator:
             sf.write(temp_audio.name, audio.numpy(), model.sample_rate)
             return temp_audio.name
 
-        except Exception as e:
-            print(f"Error generating speech: {e}")
+        except Exception:
+            logger.exception("Pocket TTS could not speak")
             return None
 
 
-class SpeechGenerator:
-    """Speaks with the persona's engine and voice: Kyutai's Pocket TTS or Kokoro.
+register_speech_engine(PocketGenerator)
+register_speech_engine(KokoroGenerator)
 
-    Each engine loads the first time it is needed. Kokoro also speaks the
-    languages Pocket TTS does not, and only Kokoro voices take a speed.
+
+class SpeechGenerator:
+    """Speaks with the persona's engine and voice.
+
+    The engines are those registered in iris.engines: Kyutai's Pocket TTS
+    and Kokoro, and any a plugin adds. Each loads the first time it is
+    needed. A reply in a language the persona's engine lacks is spoken by an
+    engine it borrows from (Kyutai personas by Kokoro, for Japanese and
+    Chinese).
     """
 
     def __init__(
@@ -460,17 +520,16 @@ class SpeechGenerator:
     ):
         """
         Args:
-            engine: "kyutai" or "kokoro"
+            engine: Id of a registered speech engine
             voice: A voice of that engine
-            speed: Speech speed multiplier, for Kokoro
-            models_dir: Kokoro model folder chosen by the user
+            speed: Speech speed multiplier, for engines that take one
+            models_dir: Voice model folder chosen by the user (Kokoro's)
         """
         self.engine = engine
         self.voice = voice
         self.speed = speed
         self.models_dir = Path(models_dir).expanduser() if models_dir else None
-        self._kokoro: KokoroGenerator | None = None
-        self._pocket: PocketGenerator | None = None
+        self._engines: dict[str, SpeechEngine] = {}
         # Replies and previews may ask for speech at the same time
         self._lock = threading.Lock()
         self.prepare()
@@ -484,14 +543,10 @@ class SpeechGenerator:
         with self._lock:
             self._engine(self.engine)
 
-    def _engine(self, engine: str) -> KokoroGenerator | PocketGenerator:
-        if engine == "kokoro":
-            if self._kokoro is None:
-                self._kokoro = KokoroGenerator(models_dir=self.models_dir)
-            return self._kokoro
-        if self._pocket is None:
-            self._pocket = PocketGenerator()
-        return self._pocket
+    def _engine(self, engine: str) -> SpeechEngine:
+        if engine not in self._engines:
+            self._engines[engine] = speech_engine(engine)(models_dir=self.models_dir)
+        return self._engines[engine]
 
     def generate(
         self,
@@ -515,21 +570,18 @@ class SpeechGenerator:
         engine = engine or self.engine
         voice = voice or self.voice
         speed = speed or self.speed
-        if (
-            engine == "kyutai"
-            and language not in POCKET_LANGUAGES
-            and is_language_supported(language)
-        ):
-            # Kokoro takes over with the voice it has for that language
-            engine, voice = "kokoro", LANGUAGE_VOICE_MAP[language]["default_voice"]
+        # Another engine takes over, with its voice for that language
+        speaker = speaking_engine(engine, language)
+        if speaker is not None and speaker[1] is not None:
+            engine, voice = speaker
         with self._lock:
             try:
                 generator = self._engine(engine)
-            except Exception as e:
-                print(f"Error loading the voice: {e}")
+            except Exception:
+                logger.exception("Could not load the voice")
                 return None
             generator.voice = voice
-            if isinstance(generator, KokoroGenerator):
+            if generator.takes_speed:
                 generator.speed = speed
             return generator.generate(text, language=language)
 

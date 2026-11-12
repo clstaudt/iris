@@ -6,14 +6,14 @@ from iris.llm import MAX_TOOL_ROUNDS, ConversationManager, UnspokenFilter
 
 
 class FakeTools:
-    status_manager = None
-
     def __init__(self):
-        self._enabled_tools = {"search": {}, "browse": {}}
         self.executed = []
 
     def has_tools(self):
         return True
+
+    def guidance(self):
+        return ""
 
     def get_schemas(self):
         return [{"type": "function", "function": {"name": "search"}}]

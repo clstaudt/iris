@@ -9,6 +9,8 @@ import pytest
 from iris import memory as memory_module
 from iris.llm import ConversationManager
 from iris.memory import PIN_TURNS, Filer, MemoryKeeper, MemoryStore
+from iris.plugin import PluginContext
+from iris.plugins import memory as memory_plugin
 from iris.tools import Tools
 
 
@@ -188,11 +190,12 @@ def test_recall_returns_the_summary_and_latest_exchanges(store):
     topic = store.create_topic("Lisbon trip", "late Oct", "Trip in late October with Sintra.")
     _exchange(store, "Where to stay in Lisbon?", "Chiado.")
     store.mark_filed([t["id"] for t in store.recent_turns()], topic)
-    tools = Tools()
-    tools.enable_memory(store)
+    tools = Tools([memory_plugin.plugin], PluginContext(memory=store))
 
     result = tools.execute("recall", topic_id=topic)
     assert result["success"] and result["topic_id"] == topic
+    # Recalled, the topic stays in context for a few turns
+    assert result["pin_topic"] == topic
     assert "Summary: Trip in late October with Sintra." in result["result"]
     assert "Chiado." in result["result"]
     assert tools.execute("recall", topic_id=99)["success"] is False

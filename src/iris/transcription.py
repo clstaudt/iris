@@ -18,6 +18,8 @@ from faster_whisper import WhisperModel
 from faster_whisper.audio import decode_audio
 from faster_whisper.vad import collect_chunks, get_speech_timestamps
 
+from iris.engines import RecognitionEngine, register_recognition_engine
+
 try:
     import mlx_whisper
 
@@ -284,3 +286,16 @@ class StreamingTranscriber:
             for chunk_file in self._chunk_files:
                 Path(chunk_file).unlink(missing_ok=True)
             self._chunk_files.clear()
+
+
+def _whisper(options: dict) -> WhisperTranscriber:
+    """Whisper with the recognition settings: model size or folder, device
+    and backend ("engine": auto, mlx or faster-whisper)."""
+    return WhisperTranscriber(
+        options.get("model") or "auto",
+        options.get("device") or "auto",
+        engine=options.get("engine") or "auto",
+    )
+
+
+register_recognition_engine(RecognitionEngine("whisper", "Whisper", _whisper))
