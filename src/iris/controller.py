@@ -14,7 +14,7 @@ from iris import downloads, engines, servers
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AUDIO_FILTERS, AudioRecorder, get_filter
-from iris.events import EventBus
+from iris.events import EventBus, brief
 from iris.llm import ConversationManager, effective_host, normalize_host, ollama_client
 from iris.personas import (
     delete_persona,
@@ -642,17 +642,28 @@ class AssistantController:
         say "Loading models". A model folder chosen in Settings is used as it
         is and never downloaded.
         """
-        try:
-            # Whisper's models; another recognition engine fetches its own
-            if kwargs.get("recognition_engine", "whisper") == "whisper":
-                self._fetch_stt(
+        steps = []
+        # Whisper's models; another recognition engine fetches its own
+        if kwargs.get("recognition_engine", "whisper") == "whisper":
+            steps.append((
+                "speech recognition model",
+                lambda: self._fetch_stt(
                     kwargs.get("whisper_model", "auto"),
                     kwargs.get("wake_word"),
                     whisper_engine=kwargs.get("whisper_engine", "auto"),
                     whisper_device=kwargs.get("whisper_device", "auto"),
-                )
-            self._fetch_turn()
-            self._fetch_tts(kwargs.get("tts_models_dir"))
+                ),
+            ))
+        steps.append(("turn detection model", self._fetch_turn))
+        steps.append(("Kokoro voice model", lambda: self._fetch_tts(kwargs.get("tts_models_dir"))))
+        # Each is tried whatever became of the others (offline, all fail):
+        # Iris starts with what it has and says what it could not fetch
+        try:
+            for what, fetch in steps:
+                try:
+                    fetch()
+                except Exception as e:
+                    self.bus.emit("error", {"message": f"Could not download the {what}: {brief(e)}"})
         finally:
             self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
 
