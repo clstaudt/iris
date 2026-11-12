@@ -128,6 +128,8 @@ def _assistant(*replies, wake_word="Iris", speak=True, plugins=(sleep.plugin,)):
     a.suspend_event = threading.Event()
     a.pause_event = threading.Event()
     a.conversation_language = "en"
+    # Speech recognition is there, so the microphone is listened to
+    a.transcriber = object()
     a.player = HeldPlayer()
     a.speech_pipeline = SpeechPipeline(InstantGenerator(), a.player)
     # The voice's languages, which a typed message's language is told among

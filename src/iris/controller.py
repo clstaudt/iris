@@ -363,9 +363,14 @@ class AssistantController:
         return {"ok": True}
 
     def set_mic(self, on: bool) -> dict:
-        """Switch the microphone. Off still answers typed messages."""
+        """Switch the microphone. Off still answers typed messages. Without
+        speech recognition, which did not load at the start, it is loaded
+        first, and the microphone opens once it is there."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
+        if on and self.assistant.transcriber is None:
+            threading.Thread(target=self._load_recognition, daemon=True).start()
+            return {"ok": True}
         if on:
             self.assistant.pause_event.clear()
         else:
@@ -405,14 +410,46 @@ class AssistantController:
         return {"ok": True}
 
     def set_voice_output(self, enabled: bool) -> dict:
-        """Switch spoken replies on or off. Switching off cuts current speech."""
+        """Switch spoken replies on or off. Switching off cuts current speech.
+        A voice that did not load is tried again first, and speaks once it
+        is there."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
+        if enabled and self.assistant.voice_error is not None:
+            threading.Thread(target=self._load_voice, daemon=True).start()
+            return {"ok": True}
         self.assistant.speak_replies = bool(enabled)
         if not enabled:
             self.assistant.speech_pipeline.stop()
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
+
+    def _load_recognition(self):
+        """Try again to load speech recognition (downloading it first), and
+        open the microphone once it is there."""
+        assistant = self.assistant
+        options = assistant.recognition_options
+        try:
+            if assistant.recognition_engine == "whisper":
+                self._fetch_stt(
+                    options.get("model", "auto"),
+                    whisper_engine=options.get("engine", "auto"),
+                    whisper_device=options.get("device", "auto"),
+                )
+        except Exception:
+            pass  # loading says why
+        finally:
+            self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
+        if assistant.load_recognition():
+            assistant.pause_event.clear()
+        self.bus.emit("config", assistant.config_info())
+
+    def _load_voice(self):
+        """Try again to load the voice, and speak replies once it is there."""
+        assistant = self.assistant
+        if assistant.load_voice():
+            assistant.speak_replies = True
+        self.bus.emit("config", assistant.config_info())
 
     def set_barge_in(self, enabled: bool) -> dict:
         """Whether speaking interrupts the voice (with echo cancellation)."""

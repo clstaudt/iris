@@ -44,6 +44,14 @@ import threading
 from collections.abc import Callable
 
 
+def brief(error: BaseException, limit: int = 240) -> str:
+    """An error as the app shows it: its first line, cut short when long
+    (download errors run to paragraphs)."""
+    lines = str(error).strip().splitlines()
+    text = lines[0].strip() if lines else type(error).__name__
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 class EventBus:
     """Minimal synchronous pub/sub bus, safe for cross-thread emit/subscribe."""
 

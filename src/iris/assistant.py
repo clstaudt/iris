@@ -18,7 +18,7 @@ from iris import engines, language
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
-from iris.events import EventBus
+from iris.events import EventBus, brief
 from iris.llm import (
     ConversationManager,
     effective_host,
@@ -282,11 +282,14 @@ class VoiceAssistant:
         # user over the voice.
         self.barge_in = barge_in
         self.echo = _echo_canceller()
+        turn_end = SmartTurn.load() if turn_detection == "smart_turn" else None
+        if turn_detection == "smart_turn" and turn_end is None:
+            self._error("Smart Turn could not be loaded, so a turn ends after a silence.")
         self.recorder = AudioRecorder(
             sample_rate,
             silence_threshold,
             silence_duration,
-            turn_end=SmartTurn.load() if turn_detection == "smart_turn" else None,
+            turn_end=turn_end,
             echo=self.echo,
             audio=audio,
         )
@@ -296,10 +299,17 @@ class VoiceAssistant:
         self.player = AudioPlayer(audio_filter=audio_filter, audio=audio)
         self.player.echo = self.echo
 
+        # Speech recognition and the voice may fail to load, offline before
+        # their models were ever downloaded: Iris then starts without them,
+        # says so, and answers typed messages, in text when it has no voice
         self.recognition_engine = recognition_engine
-        self.transcriber = engines.recognition_engine(recognition_engine).create(
-            {"model": whisper_model, "device": whisper_device, "engine": whisper_engine}
-        )
+        self.recognition_options = {
+            "model": whisper_model,
+            "device": whisper_device,
+            "engine": whisper_engine,
+        }
+        self.transcriber = None
+        self.load_recognition()
 
         # Initialize TTS with persona's engine, voice and speed
         self.tts_generator = SpeechGenerator(
@@ -307,7 +317,11 @@ class VoiceAssistant:
             self.persona.voice,
             self.persona.speed,
             models_dir=tts_models_dir,
+            prepare=False,
         )
+        # Why the voice could not be loaded; None while it speaks
+        self.voice_error: Optional[str] = None
+        self.load_voice()
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
         self.speech_pipeline.on_reply_audio = self._reply_heard
         # Told what language each piece of a reply is in, before the first
@@ -343,7 +357,9 @@ class VoiceAssistant:
             choices=tools,
         )
 
-        self.set_wake_word(wake_word, engine=whisper_engine)
+        # Asked again once recognition loads, should it not have
+        self._wanted_wake_word = wake_word
+        self._set_wanted_wake_word(engine=whisper_engine)
 
         # Initialize conversation manager with tools
         # The vision model answers when the camera, the screen or an attached
@@ -358,6 +374,54 @@ class VoiceAssistant:
         )
         if self.memory:
             self.memory.start()
+
+    def load_recognition(self) -> bool:
+        """Load speech recognition. Without it Iris cannot listen: the
+        microphone stays off, typed messages are still answered, and the
+        user is told. Returns whether it loaded."""
+        try:
+            self.transcriber = engines.recognition_engine(self.recognition_engine).create(
+                dict(self.recognition_options)
+            )
+        except Exception as e:
+            logger.exception("Speech recognition could not be loaded")
+            self.transcriber = None
+            self.pause_event.set()
+            self._error(
+                "Speech recognition could not be loaded, so Iris cannot listen. "
+                f"Typed messages are answered. {brief(e)}"
+            )
+            return False
+        if getattr(self, "conversation", None) is not None:
+            self._set_wanted_wake_word()
+        return True
+
+    def load_voice(self) -> bool:
+        """Load the persona's voice. Without it replies are shown as text,
+        and the user is told; switching the voice on tries again. Returns
+        whether it loaded."""
+        try:
+            self.tts_generator.prepare()
+        except Exception as e:
+            logger.exception("The voice could not be loaded")
+            self.voice_error = brief(e)
+            self.speak_replies = False
+            self._error(f"The voice could not be loaded, so replies are shown as text. {brief(e)}")
+            return False
+        self.voice_error = None
+        return True
+
+    def _set_wanted_wake_word(self, engine: str = "auto"):
+        """Listen for the wake word asked for at the start. Without
+        recognition there is nothing to listen with yet; a wake word that
+        cannot be set up leaves Iris listening to everything."""
+        if not self._wanted_wake_word or self.transcriber is None:
+            return
+        try:
+            self.set_wake_word(self._wanted_wake_word, engine=engine)
+        except Exception as e:
+            logger.exception("The wake word could not be set up")
+            self._error(f"The wake word could not be set up, so Iris listens without it. {brief(e)}")
 
     def _plugin_context(self) -> PluginContext:
         """What the plugins get to make their tools: long-term memory, and
@@ -1112,9 +1176,10 @@ class VoiceAssistant:
                     time.sleep(PREVIEW_SETTLE)
                     continue
 
-                # Paused, or the user is typing: keep the microphone closed
-                # (models stay loaded) and keep watching for typed turns
-                if self.pause_event.is_set() or self.hold_event.is_set():
+                # Paused, the user is typing, or nothing to recognize speech
+                # with: keep the microphone closed (models stay loaded) and
+                # keep watching for typed turns
+                if self.pause_event.is_set() or self.hold_event.is_set() or self.transcriber is None:
                     self.recorder.close_microphone()
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False

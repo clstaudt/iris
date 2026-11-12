@@ -556,6 +556,7 @@ class SpeechGenerator:
         voice: str = "alba",
         speed: float = 1.0,
         models_dir: str | Path | None = None,
+        prepare: bool = True,
     ):
         """
         Args:
@@ -563,6 +564,8 @@ class SpeechGenerator:
             voice: A voice of that engine
             speed: Speech speed multiplier, for engines that take one
             models_dir: Voice model folder chosen by the user (Kokoro's)
+            prepare: Load the engine now (prepare() raises if it cannot be
+                loaded); False leaves that to the caller
         """
         self.engine = engine
         self.voice = voice
@@ -571,7 +574,8 @@ class SpeechGenerator:
         self._engines: dict[str, SpeechEngine] = {}
         # Replies and previews may ask for speech at the same time
         self._lock = threading.Lock()
-        self.prepare()
+        if prepare:
+            self.prepare()
 
     def speaks(self, language: str) -> bool:
         """Whether replies in this language can be spoken in it."""
