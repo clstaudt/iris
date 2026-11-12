@@ -347,6 +347,21 @@ def test_a_preview_says_its_line_in_the_voice_itself_and_its_language(engines_us
     assert (engine, spoken, CODE_LANGUAGE[code]) == ("kokoro", voice, language)
 
 
+@pytest.mark.parametrize("voice", ["alba", "estelle", "giovanni", "juergen", "lola", "rafael", "daan"])
+def test_a_kyutai_voice_previews_its_line_in_its_own_language(engines_used, voice):
+    controller = AssistantController(EventBus())
+    controller.assistant = MagicMock()
+    controller.assistant.speech_pipeline = pipeline = PreviewPipeline()
+    controller.persona_preview({"name": "Nova", "engine": "kyutai", "voice": voice})
+
+    [(line, language, sound)] = pipeline.queued
+    assert language == voice_language("kyutai", voice)
+    assert line == PREVIEW_LINES[language].format(name="Nova")
+    preview = {key: sound[key] for key in ("engine", "voice", "speed")}
+    engine, spoken, code = engines_used("iris", language, preview=preview)
+    assert (engine, spoken, CODE_LANGUAGE[code]) == ("kyutai", voice, language)
+
+
 def test_kokoro_onnx_is_only_given_languages_it_takes_and_phonemes_for_the_rest():
     """kokoro-onnx refuses any other language by name: a reply in it would
     not be heard."""
