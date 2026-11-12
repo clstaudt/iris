@@ -206,3 +206,16 @@ def test_without_a_vision_model_the_images_are_left_out(mock_ollama):
     message = _sent_user_message(mock_ollama)
     assert "images" not in message
     assert "cannot be shown to you" in message["content"]
+
+
+@patch("iris.llm.ollama")
+def test_a_model_that_cannot_see_is_told_so_with_the_pictures_only(mock_ollama):
+    """The pictures stay among the files shared for a few turns; the next
+    messages, which have none, must not have it said again, or the model
+    tells the user once more on every reply that it cannot see them."""
+    cm = _manager(mock_ollama, ["completion"])
+    list(cm.chat_stream("What is this?", attachments=_image()))
+    list(cm.chat_stream("And what time is it?"))
+    message = _sent_user_message(mock_ollama)
+    assert "cannot be shown" not in message["content"]
+    assert "images" not in message
