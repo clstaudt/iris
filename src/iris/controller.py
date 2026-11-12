@@ -140,6 +140,9 @@ class AssistantController:
 
         self._loop_thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
+        # Held while recognition or the voice that did not load is loaded
+        # again, so switching it on twice loads (and downloads) it once
+        self._reloading = {"recognition": threading.Lock(), "voice": threading.Lock()}
 
         # Typed turns. Owned here rather than by the assistant so messages sent
         # while the models are still loading are answered once they are ready.
@@ -435,6 +438,14 @@ class AssistantController:
     def _load_recognition(self):
         """Try again to load speech recognition (downloading it first), and
         open the microphone once it is there."""
+        if not self._reloading["recognition"].acquire(blocking=False):
+            return
+        try:
+            self._reload_recognition()
+        finally:
+            self._reloading["recognition"].release()
+
+    def _reload_recognition(self):
         assistant = self.assistant
         options = assistant.recognition_options
         try:
@@ -454,10 +465,15 @@ class AssistantController:
 
     def _load_voice(self):
         """Try again to load the voice, and speak replies once it is there."""
-        assistant = self.assistant
-        if assistant.load_voice():
-            assistant.speak_replies = True
-        self.bus.emit("config", assistant.config_info())
+        if not self._reloading["voice"].acquire(blocking=False):
+            return
+        try:
+            assistant = self.assistant
+            if assistant.load_voice():
+                assistant.speak_replies = True
+            self.bus.emit("config", assistant.config_info())
+        finally:
+            self._reloading["voice"].release()
 
     def set_barge_in(self, enabled: bool) -> dict:
         """Whether speaking interrupts the voice (with echo cancellation)."""
