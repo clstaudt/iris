@@ -270,6 +270,32 @@ def test_the_screen_permission_reaches_the_user_beside_the_reply(stub, monkeypat
     assert "Privacy & Security > Screen Recording" in error["message"]
 
 
+def test_stop_while_the_camera_looks_lets_it_go_and_shows_no_model_the_image(stub, monkeypatch):
+    """Stop pressed while the camera warms up: the capture cannot be cut
+    short, but the camera is let go and no model is asked about the image."""
+    stub.configure(vision=True)
+    conversation = _conversation(stub, VISION_MODEL)
+    warming, stopped = threading.Event(), threading.Event()
+
+    def warm_up(seconds):
+        warming.set()
+        stopped.wait(5)
+
+    monkeypatch.setattr(camera, "time", SimpleNamespace(sleep=warm_up))
+    said = []
+    with FakeCamera() as fake:
+        reply = threading.Thread(target=lambda: said.extend(conversation.chat_stream("What am I holding?")))
+        reply.start()
+        assert warming.wait(5)
+        conversation.cancel()
+        stopped.set()
+        reply.join(5)
+    assert not reply.is_alive()
+    assert "".join(said) == "Let me look."
+    assert fake.captures[0].released
+    assert [r.model for r in stub.requests] == [MODEL]
+
+
 # Images attached to a typed message ------------------------------------------------
 
 
