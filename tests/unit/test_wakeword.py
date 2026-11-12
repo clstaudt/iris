@@ -10,6 +10,7 @@ from iris import assistant as assistant_module
 from iris import wakeword
 from iris.assistant import DEFAULT_WAKE_WINDOW, VoiceAssistant
 from iris.events import EventBus
+from iris.tts import SpeechGenerator
 from iris.wakeword import WakeWordDetector, match_sleep_word, match_wake_word
 
 
@@ -192,6 +193,8 @@ def _awake_assistant(monkeypatch, heard):
     a.status_manager = QuietStatus()
     a.display_manager = QuietDisplay()
     a.speech_pipeline = None
+    a.tts_generator = SpeechGenerator.__new__(SpeechGenerator)
+    a.tts_generator.engine = "kyutai"
     a.conversation_language = "en"
     a.replies = []
     a.chat = lambda text, response_language, source=None: a.replies.append(text)

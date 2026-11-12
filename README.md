@@ -11,7 +11,7 @@
   </a>
 
   <p align="center">
-    A fully local voice assistant powered by Whisper, Ollama, and Kokoro TTS
+    A fully local voice assistant powered by Whisper, Ollama, and Kyutai and Kokoro TTS
     <br />
     <br />
     <a href="#getting-started"><strong>Get Started »</strong></a>
@@ -63,7 +63,7 @@ Iris is a voice-controlled AI assistant that runs entirely on your local machine
 Built with:
 - **Speech-to-Text**: OpenAI's Whisper
 - **Language Model**: Ollama (any compatible model)
-- **Text-to-Speech**: Kokoro TTS
+- **Text-to-Speech**: Kyutai's Pocket TTS or Kokoro TTS, chosen per persona
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -207,7 +207,19 @@ Choose from different personality options:
 iris --persona hal
 ```
 
-Personas can be customized by editing the config files in `src/iris/personas/`.
+Personas can be customized by editing the config files in `src/iris/personas/`, or in the desktop app. Each persona picks a speech engine and one of its voices:
+
+```yaml
+name: "HAL"
+engine: "kokoro"      # or "kyutai"
+voice: "bm_lewis"     # a voice of that engine
+speed: 1.1            # Kokoro voices only
+audio_filter: "intercom"
+description: |
+  You have the personality and speaking style of HAL 9000.
+```
+
+Kyutai's Pocket TTS sounds the most natural and speaks English, French, German, Italian, Spanish, Portuguese and Dutch; replies in Japanese or Chinese fall back to Kokoro. A Kyutai voice can also be a path to a short audio file of a voice to clone.
 
 ### Vision Capabilities
 
@@ -301,14 +313,14 @@ Iris starts listening as soon as the models are loaded. Speaking and typing shar
 
 The settings panel (top right) holds the persona, the Ollama server, the language model, switches for the camera, screen capture and web search tools, and the microphone. All choices are remembered between launches.
 
-- **Personas:** besides the built-in ones, YAML files in `~/.iris/personas` appear in the menu. Each persona speaks with its own voice, except in languages that voice cannot speak.
+- **Personas:** besides the built-in ones, YAML files in `~/.iris/personas` appear in the menu. Each persona speaks with its own voice, except in languages that voice cannot speak. The pencil beside the menu edits a persona (name, speech engine, voice, speed, effect and personality, with a button to hear the voice), the plus creates one. Edits are saved to `~/.iris/personas`; an edited built-in persona can be reset.
 - **Ollama server:** empty uses `OLLAMA_HOST` (or `http://localhost:11434`). An OpenAI-style URL ending in `/v1` works too. The server is checked before Iris switches to it.
 - **Models:** the menu lists what the server has installed; switching keeps the conversation history.
 - **Speech recognition:** on Apple Silicon Macs, Whisper runs on the GPU through MLX with large-v3-turbo, which is several times faster than CPU decoding and leaves the CPU idle. Elsewhere faster-whisper runs, with large-v3-turbo on an NVIDIA GPU and small on a CPU. The CLI accepts `--whisper-engine` and `--whisper-model` to override this.
 - **Tools:** unlike the CLI, which gates them behind flags, the desktop UI enables the camera, screen capture and web search tools by default. A tool whose optional dependencies are missing is shown as not installed. Image prompts are routed to a vision model when the server has one.
 - **Model folders** (under Advanced): point Iris at speech models you already have instead of downloading them. Recognition takes a Whisper folder, either an MLX conversion (`weights.safetensors` or `weights.npz`) or a faster-whisper model (`model.bin`); Voice takes a folder holding `kokoro-v1.0.onnx` and `voices-v1.0.bin`. A folder without them is refused at once. **Download** goes back to the downloaded models.
 
-The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `setup.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `wake.set/options`, `voice.set_output`, `chat.send_text/history`, `memory.topics/topic/forget/set_amnesia`, `persona.list/set`, `llm.list/set/set_host`, `models.check/set`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `memory.updated`, `error`).
+The RPC protocol: requests are JSON-RPC 2.0 (`app.info`, `setup.info`, `assistant.start/stop/interrupt/pause/resume/hold`, `mic.set`, `wake.set/options`, `voice.set_output`, `chat.send_text/history`, `memory.topics/topic/forget/set_amnesia`, `persona.list/set/get/voices/save/delete/preview`, `llm.list/set/set_host`, `models.check/set`, `tools.set`, `audio.list_inputs/set_input`); the Python core pushes events as notifications (`config`, `state`, `audio.level`, `audio.output`, `chat.user/chunk/done`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `memory.updated`, `error`).
 
 > **Note for Cursor/VSCode terminals:** if Electron exits immediately with `Cannot set properties of undefined`, your terminal exports `ELECTRON_RUN_AS_NODE=1`. The `dev` script already clears it; when launching `electron .` manually, prefix it with `ELECTRON_RUN_AS_NODE=`.
 
@@ -368,6 +380,7 @@ The app is signed ad hoc, not with a Developer ID, and not notarized. `ui/build/
 - [Whisper](https://github.com/openai/whisper) — OpenAI's speech recognition model
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2-based Whisper implementation
 - [Ollama](https://ollama.ai/) — Local LLM inference
+- [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) — Kyutai's natural-sounding text-to-speech that runs on the CPU
 - [Kokoro TTS](https://github.com/nazdridoy/kokoro-tts) — High-quality text-to-speech engine
 - [Rich](https://github.com/Textualize/rich) — Terminal UI framework
 

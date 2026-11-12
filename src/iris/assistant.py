@@ -26,7 +26,7 @@ from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
-from iris.tts import KokoroGenerator, SpeechPipeline, is_language_supported
+from iris.tts import SpeechGenerator, SpeechPipeline
 from iris.turns import SmartTurn
 from iris.ui import DisplayManager, StatusManager
 from iris.wakeword import WakeWordDetector, match_sleep_word
@@ -125,7 +125,7 @@ class VoiceAssistant:
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
             silence_duration: Silence that ends a turn Smart Turn has not ended
-            tts_voice: Voice for TTS (overridden by persona.voice if persona is provided)
+            tts_voice: Unused: the persona's voice is spoken
             tts_speed: Speed for TTS
             quiet: If True, suppress verbose output during initialization
             persona: Persona to use for the assistant
@@ -191,8 +191,7 @@ class VoiceAssistant:
 
         # Store persona and use its voice
         self.persona = persona if persona else get_persona("iris")
-        if persona:
-            tts_voice = persona.voice
+        tts_voice = self.persona.voice
 
         if not quiet:
             self.console.print("[dim]Initializing components...[/dim]")
@@ -221,9 +220,13 @@ class VoiceAssistant:
             whisper_model, whisper_device, quiet=quiet, engine=whisper_engine
         )
 
-        # Initialize TTS with persona's voice and speed
-        self.tts_generator = KokoroGenerator(
-            tts_voice, self.persona.speed, quiet=quiet, models_dir=tts_models_dir
+        # Initialize TTS with persona's engine, voice and speed
+        self.tts_generator = SpeechGenerator(
+            self.persona.engine,
+            tts_voice,
+            self.persona.speed,
+            quiet=quiet,
+            models_dir=tts_models_dir,
         )
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
 
@@ -307,12 +310,14 @@ class VoiceAssistant:
         """Describe the loaded models and audio input for external UIs."""
         return {
             "persona": self.persona.name,
+            "persona_id": self.persona.id,
             "llm_model": self.conversation.model,
             "whisper_model": self.transcriber.model_name,
             "whisper_device": self.transcriber.device,
             "whisper_engine": self.transcriber.engine,
             "stt_model_path": str(self.transcriber.model_path or ""),
             "tts_models_dir": str(self.tts_generator.models_dir or ""),
+            "tts_engine": self.tts_generator.engine,
             "tts_voice": self.tts_generator.voice,
             "input_device": self.recorder.current_device_name(),
             "speak_replies": self.speak_replies,
@@ -597,9 +602,9 @@ class VoiceAssistant:
             self.awake_until = 0.0
             return
 
-        # Determine response language: use detected if TTS supports it,
-        # otherwise keep the current conversation language.
-        if is_language_supported(detected_language):
+        # Determine response language: use detected if the persona's voice
+        # can speak it, otherwise keep the current conversation language.
+        if self.tts_generator.speaks(detected_language):
             self.conversation_language = detected_language
         response_language = self.conversation_language
 

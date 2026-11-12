@@ -44,6 +44,7 @@ for package in (
     "ddgs",
     "primp",
     "livekit",  # its native library, for echo cancellation
+    "pocket_tts",  # the configs of its models
 ):
     package_datas, package_binaries, package_imports = collect_all(package)
     datas += package_datas

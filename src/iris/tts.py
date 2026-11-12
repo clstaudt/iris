@@ -1,21 +1,28 @@
-"""Text-to-speech generation and pipeline using kokoro-onnx."""
+"""Text-to-speech generation and pipeline using Pocket TTS or kokoro-onnx."""
 
 import os
 import queue
+import re
 import tempfile
 import threading
 import urllib.request
 import warnings
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
+import torch
 from kokoro_onnx import Kokoro
 from kokoro_onnx import tokenizer as kokoro_tokenizer
 from phonemizer.backend import EspeakBackend
 from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
+from pocket_tts import TTSModel
+from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn
+
+from iris.audio import get_filter
 
 warnings.filterwarnings("ignore")
 
@@ -397,6 +404,295 @@ def heard_part(text: str, fraction: float) -> str:
         if end < 0:
             return ""
     return text[:end].rstrip()
+ENGINES = ("kyutai", "kokoro")
+
+# Whisper language codes Pocket TTS speaks, and the model for each. Japanese
+# and Chinese are left to Kokoro.
+POCKET_LANGUAGES = {
+    "en": "english",
+    "fr": "french",
+    "it": "italian",
+    "de": "german",
+    "es": "spanish",
+    "pt": "portuguese",
+    "nl": "dutch",
+}
+# Pocket TTS's English voices; each further language has one voice of its own
+POCKET_ENGLISH_VOICES = (
+    "alba", "anna", "azelma", "bill_boerst", "caro_davy", "charles", "cosette",
+    "eponine", "eve", "fantine", "george", "jane", "jean", "javert", "marius",
+    "mary", "michael", "paul", "peter_yearsley", "stuart_bell", "vera",
+)  # fmt: skip
+# A Kokoro voice name starts with its language, then f or m for female or male
+KOKORO_VOICE_NAME = re.compile(r"[a-z][fm]_\w+")
+KOKORO_VOICE_LANGUAGES = {
+    "a": ("en", "American English"),
+    "b": ("en", "British English"),
+    "e": ("es", "Spanish"),
+    "f": ("fr", "French"),
+    "h": ("hi", "Hindi"),
+    "i": ("it", "Italian"),
+    "j": ("ja", "Japanese"),
+    "p": ("pt", "Portuguese"),
+    "z": ("zh", "Chinese"),
+}
+LANGUAGE_NAMES = {
+    "en": "English",
+    "fr": "French",
+    "it": "Italian",
+    "de": "German",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+}
+
+
+def engine_speaks(engine: str, language: str) -> bool:
+    """Whether a persona on this engine can speak its replies in a language.
+    Kyutai personas leave the languages Pocket TTS lacks to Kokoro."""
+    if engine == "kyutai" and language in POCKET_LANGUAGES:
+        return True
+    return is_language_supported(language)
+
+
+def voice_language(engine: str, voice: str) -> str:
+    """The Whisper language code of the language a voice was made for."""
+    if engine == "kokoro":
+        return KOKORO_VOICE_LANGUAGES.get(voice[:1], ("en",))[0]
+    for code, pocket_lang in POCKET_LANGUAGES.items():
+        if DEFAULT_VOICE_FOR_LANGUAGE.get(pocket_lang) == voice:
+            return code
+    return "en"
+
+
+def list_voices(engine: str, models_dir: str | Path | None = None) -> list[dict]:
+    """An engine's voices as {id, name, language}. Kokoro's come from its
+    voices file, so there are none until it is downloaded."""
+    if engine == "kokoro":
+        folder = Path(models_dir).expanduser() if models_dir else find_kokoro_models()
+        if folder is None or not (folder / KOKORO_VOICES_FILE).exists():
+            return []
+        with np.load(folder / KOKORO_VOICES_FILE) as voices:
+            names = sorted(voices.files)
+        return [
+            {
+                "id": name,
+                "name": name.split("_", 1)[-1].replace("_", " ").title(),
+                "language": KOKORO_VOICE_LANGUAGES.get(name[:1], ("", "Other"))[1],
+            }
+            for name in names
+        ]
+    names = list(POCKET_ENGLISH_VOICES) + [
+        DEFAULT_VOICE_FOR_LANGUAGE[pocket_lang]
+        for code, pocket_lang in POCKET_LANGUAGES.items()
+        if code != "en"
+    ]
+    return [
+        {
+            "id": name,
+            "name": name.replace("_", " ").title(),
+            "language": LANGUAGE_NAMES[voice_language(engine, name)],
+        }
+        for name in names
+    ]
+
+
+# Characters Pocket TTS stumbles over: the word after a dash is garbled, and
+# words joined by a non-breaking hyphen are dropped
+POCKET_REPLACEMENTS = (
+    (re.compile(r"\s*\u2014\s*|\s+\u2013\s+"), ", "),
+    (re.compile(r"[\u2010\u2011\u2013]"), "-"),
+)
+SENTENCE_END = re.compile(r"(?<=[.!?\u2026])\s+")
+# A period that ends an abbreviation, not a sentence: "z. B.", "e.g.", "Dr."
+ABBREVIATION_END = re.compile(
+    r"(?:^|[\s.])(?:\w|Dr|Mr|Mrs|Ms|Prof|St|Nr|ca|vs|etc)\.$", re.IGNORECASE
+)
+
+
+def pocket_sentences(text: str) -> list[str]:
+    """Text as Pocket TTS takes it best: one sentence at a time.
+
+    Its models are trained on single sentences. Given several at once, they
+    often stop after the first and drop the rest, the German model especially.
+    """
+    for pattern, replacement in POCKET_REPLACEMENTS:
+        text = pattern.sub(replacement, text)
+    sentences: list[str] = []
+    for part in SENTENCE_END.split(text.strip()):
+        part = part.strip(" ,")
+        if not part:
+            continue
+        # After an abbreviation, or before lower case, the sentence goes on
+        if sentences and (part[0].islower() or ABBREVIATION_END.search(sentences[-1])):
+            sentences[-1] += " " + part
+        else:
+            sentences.append(part)
+    return sentences
+
+
+class PocketGenerator:
+    """Generates speech audio with Kyutai's Pocket TTS, on the CPU.
+
+    Pocket TTS has one model per language: English loads right away, the
+    others the first time a reply is in that language.
+    """
+
+    def __init__(self, voice: str = "alba"):
+        """
+        Args:
+            voice: A Pocket TTS voice, or an audio file of a voice to clone
+        """
+        self.voice = voice
+        self._models: dict[str, TTSModel] = {}
+        self._voice_states: dict[tuple[str, str], object] = {}
+        self._model("english")
+
+    def _model(self, pocket_lang: str) -> TTSModel:
+        if pocket_lang not in self._models:
+            self._models[pocket_lang] = TTSModel.load_model(language=pocket_lang)
+        return self._models[pocket_lang]
+
+    def _voice_state(self, pocket_lang: str, voice: str):
+        key = (pocket_lang, voice)
+        if key not in self._voice_states:
+            model = self._model(pocket_lang)
+            self._voice_states[key] = model.get_state_for_audio_prompt(voice)
+        return self._voice_states[key]
+
+    def voice_for(self, language: str) -> tuple[str, str]:
+        """Pick (Pocket model language, voice) for a reply in this language.
+
+        English uses the voice itself; another language uses the voice made
+        for it, unless the voice is cloned from an audio file.
+        """
+        pocket_lang = POCKET_LANGUAGES.get(language, "english")
+        voice = self.voice
+        if pocket_lang != "english" and not Path(voice).exists():
+            voice = DEFAULT_VOICE_FOR_LANGUAGE[pocket_lang]
+        return pocket_lang, voice
+
+    def generate(self, text: str, language: str = "en") -> str | None:
+        """
+        Generate a WAV file from text.
+
+        Args:
+            text: Text to convert to speech
+            language: Whisper language code (e.g. 'en', 'fr')
+
+        Returns:
+            Path to generated WAV file, or None if generation failed
+        """
+        try:
+            pocket_lang, voice = self.voice_for(language)
+            model = self._model(pocket_lang)
+            state = self._voice_state(pocket_lang, voice)
+            sentences = pocket_sentences(text)
+            if not sentences:
+                return None
+            audio = torch.cat([model.generate_audio(state, sentence) for sentence in sentences])
+
+            temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            temp_audio.close()
+            sf.write(temp_audio.name, audio.numpy(), model.sample_rate)
+            return temp_audio.name
+
+        except Exception as e:
+            print(f"Error generating speech: {e}")
+            return None
+
+
+class SpeechGenerator:
+    """Speaks with the persona's engine and voice: Kyutai's Pocket TTS or Kokoro.
+
+    Each engine loads the first time it is needed. Kokoro also speaks the
+    languages Pocket TTS does not, and only Kokoro voices take a speed.
+    """
+
+    def __init__(
+        self,
+        engine: str = "kyutai",
+        voice: str = "alba",
+        speed: float = 1.0,
+        quiet: bool = True,
+        models_dir: str | Path | None = None,
+    ):
+        """
+        Args:
+            engine: "kyutai" or "kokoro"
+            voice: A voice of that engine
+            speed: Speech speed multiplier, for Kokoro
+            quiet: If True, skip interactive prompts (setup wizard handles downloads)
+            models_dir: Kokoro model folder chosen by the user
+        """
+        self.engine = engine
+        self.voice = voice
+        self.speed = speed
+        self.quiet = quiet
+        self.models_dir = Path(models_dir).expanduser() if models_dir else None
+        self._kokoro: KokoroGenerator | None = None
+        self._pocket: PocketGenerator | None = None
+        # Replies and previews may ask for speech at the same time
+        self._lock = threading.Lock()
+        self.prepare()
+
+    def speaks(self, language: str) -> bool:
+        """Whether replies in this language can be spoken in it."""
+        return engine_speaks(self.engine, language)
+
+    def prepare(self):
+        """Load the current engine now, so its first reply is not delayed."""
+        with self._lock:
+            self._engine(self.engine)
+
+    def _engine(self, engine: str) -> KokoroGenerator | PocketGenerator:
+        if engine == "kokoro":
+            if self._kokoro is None:
+                self._kokoro = KokoroGenerator(quiet=self.quiet, models_dir=self.models_dir)
+            return self._kokoro
+        if self._pocket is None:
+            self._pocket = PocketGenerator()
+        return self._pocket
+
+    def generate(
+        self,
+        text: str,
+        language: str = "en",
+        engine: str | None = None,
+        voice: str | None = None,
+        speed: float | None = None,
+    ) -> str | None:
+        """
+        Generate a WAV file in the persona's voice, or in the one given.
+
+        Args:
+            text: Text to convert to speech
+            language: Whisper language code (e.g. 'en', 'fr', 'ja')
+            engine, voice, speed: Instead of the persona's, e.g. for a preview
+
+        Returns:
+            Path to generated WAV file, or None if generation failed
+        """
+        engine = engine or self.engine
+        voice = voice or self.voice
+        speed = speed or self.speed
+        if (
+            engine == "kyutai"
+            and language not in POCKET_LANGUAGES
+            and is_language_supported(language)
+        ):
+            # Kokoro takes over with the voice it has for that language
+            engine, voice = "kokoro", LANGUAGE_VOICE_MAP[language]["default_voice"]
+        with self._lock:
+            try:
+                generator = self._engine(engine)
+            except Exception as e:
+                print(f"Error loading the voice: {e}")
+                return None
+            generator.voice = voice
+            if isinstance(generator, KokoroGenerator):
+                generator.speed = speed
+            return generator.generate(text, language=language)
 
 
 class SpeechPipeline:
@@ -473,8 +769,9 @@ class SpeechPipeline:
                     self.audio_queue.put(None)
                     break
 
-                # Unpack text, language and the epoch it was queued in
-                text, language, epoch = item
+                # Unpack text, language, the epoch it was queued in, and the
+                # voice it is spoken in when not the persona's (a preview)
+                text, language, epoch, sound = item
                 if epoch != self._epoch:  # stopped before its turn came
                     self.text_queue.task_done()
                     continue
@@ -484,7 +781,8 @@ class SpeechPipeline:
                 self.is_generating_flag.set()
 
                 # Generate audio file in the requested language
-                audio_file = self.generator.generate(text, language=language)
+                voice = {k: v for k, v in (sound or {}).items() if k != "audio_filter"}
+                audio_file = self.generator.generate(text, language=language, **voice)
 
                 # Clear flag when done generating
                 self.is_generating_flag.clear()
@@ -493,7 +791,7 @@ class SpeechPipeline:
                 # Put generated audio in playback queue, unless stop() came
                 # while it was being generated
                 if audio_file and epoch == self._epoch:
-                    self.audio_queue.put((audio_file, epoch, text))
+                    self.audio_queue.put((audio_file, epoch, text, sound))
                 elif audio_file:
                     Path(audio_file).unlink(missing_ok=True)
                 self.text_queue.task_done()
@@ -504,21 +802,27 @@ class SpeechPipeline:
                 item = self.audio_queue.get()
                 if item is None:  # Shutdown signal
                     break
-                audio_file, epoch, text = item
+                audio_file, epoch, text, sound = item
 
                 # Play the audio, unless it belongs to a stopped epoch; the
                 # player checks again while playing, so a stop() racing the
                 # start of the clip still silences it
                 with self._status_lock:
                     playing = epoch == self._epoch
-                    if playing:
+                    # A preview in another voice is not part of the reply
+                    if playing and not sound:
                         self._playing = text
                 if playing:
                     self.is_speaking_flag.set()
+                    effect = {}
+                    if sound and "audio_filter" in sound:
+                        name = sound["audio_filter"]
+                        effect["audio_filter"] = get_filter(name) if name else None
                     self.player.play(
                         audio_file,
                         on_level=self.on_output_level,
                         cancelled=lambda: epoch != self._epoch,
+                        **effect,
                     )
                     self.is_speaking_flag.clear()
                     with self._status_lock:
@@ -558,16 +862,18 @@ class SpeechPipeline:
                 or self.is_speaking_flag.is_set()
             )
 
-    def queue_speech(self, text: str):
+    def queue_speech(self, text: str, language: str | None = None, sound: dict | None = None):
         """
         Add text to speech pipeline (non-blocking).
 
-        Uses self.current_language for the TTS language code.
-
         Args:
             text: Text to speak
+            language: Whisper language code; self.current_language if None
+            sound: Voice to speak in instead of the persona's, e.g. for a
+                preview: engine, voice, speed and audio_filter, each optional
         """
-        self.text_queue.put((text, self.current_language, self._epoch))
+        language = language or self.current_language
+        self.text_queue.put((text, language, self._epoch, sound))
 
     def begin_reply(self):
         """Start keeping track of what is said of a new reply."""

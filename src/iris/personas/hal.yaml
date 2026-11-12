@@ -1,4 +1,5 @@
 name: "HAL"
+engine: "kokoro"
 voice: "bm_lewis"
 audio_filter: "intercom"
 speed: 1.1

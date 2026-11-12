@@ -135,13 +135,21 @@
   <div class="flex flex-col gap-6 px-5 pb-6 pt-2">
     <section class="flex flex-col gap-2">
       <h3 class="section">Persona</h3>
-      <div class="relative">
-        <select value={store.persona} onchange={onPersonaChange} class="field">
-          {#each store.personas as id}
-            <option value={id}>{store.personaNames[id] ?? id}</option>
-          {/each}
-        </select>
-        <Icon name="chevron" size={14} class="chevron" />
+      <div class="flex gap-1.5">
+        <div class="relative min-w-0 flex-1">
+          <select value={store.persona} onchange={onPersonaChange} class="field">
+            {#each store.personas as id}
+              <option value={id}>{store.personaNames[id] ?? id}</option>
+            {/each}
+          </select>
+          <Icon name="chevron" size={14} class="chevron" />
+        </div>
+        <button onclick={() => store.editPersona(store.persona)} class="square" title="Edit persona">
+          <Icon name="pencil" size={13} />
+        </button>
+        <button onclick={() => store.editPersona()} class="square" title="New persona">
+          <Icon name="plus" size={14} />
+        </button>
       </div>
     </section>
 
@@ -292,7 +300,9 @@
             {store.config.whisper_engine === "mlx" ? "MLX" : store.config.whisper_device}
           </dd>
           <dt class="text-ink-3">Voice</dt>
-          <dd class="text-ink-2">{store.config.tts_voice}</dd>
+          <dd class="text-ink-2">
+            {store.config.tts_engine === "kokoro" ? "Kokoro" : "Kyutai"} · {store.config.tts_voice}
+          </dd>
         </dl>
       </section>
 
@@ -349,6 +359,22 @@
     transition: background-color 150ms;
   }
   .small:hover {
+    background: var(--color-hover);
+    color: var(--color-ink);
+  }
+  .square {
+    display: flex;
+    height: 2.25rem;
+    width: 2.25rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.5rem;
+    border: 1px solid var(--color-line);
+    color: var(--color-ink-2);
+    transition: background-color 150ms;
+  }
+  .square:hover {
     background: var(--color-hover);
     color: var(--color-ink);
   }

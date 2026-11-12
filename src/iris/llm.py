@@ -729,7 +729,8 @@ class ConversationManager:
         # Language names for the LLM instruction
         _lang_names = {
             "en": "English", "fr": "French", "it": "Italian",
-            "ja": "Japanese", "zh": "Chinese (Mandarin)",
+            "ja": "Japanese", "zh": "Chinese (Mandarin)", "de": "German",
+            "es": "Spanish", "pt": "Portuguese", "nl": "Dutch",
         }
 
         # Recalled topics and shared files fade from context after a few turns

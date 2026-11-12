@@ -68,6 +68,20 @@ class HeldPlayer:
         pass
 
 
+class AnyVoiceGenerator(InstantGenerator):
+    """Also speaks in a voice given for a preview."""
+
+    def generate(self, text, language="en", **voice):
+        return super().generate(text, language)
+
+
+class AnyFilterPlayer(HeldPlayer):
+    """Also plays a clip with a filter of its own, as a preview has."""
+
+    def play(self, audio_file, on_level=None, cancelled=None, audio_filter=None):
+        super().play(audio_file, on_level, cancelled)
+
+
 def _wait(condition, timeout=3.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -101,6 +115,19 @@ class TestSaid:
         assert _wait(lambda: not player.playing.is_set())
         time.sleep(0.05)
         assert pipeline.said() == "The keeper rose"
+
+    def test_a_preview_in_another_voice_is_not_part_of_the_reply(self):
+        player = AnyFilterPlayer()
+        player.release.set()
+        pipeline = SpeechPipeline(AnyVoiceGenerator(), player)
+        pipeline.begin_reply()
+        pipeline.queue_speech("The keeper rose with the dawn.")
+        pipeline.queue_speech(
+            "Hi, I'm Vera.", sound={"engine": "kyutai", "voice": "vera", "audio_filter": ""}
+        )
+        pipeline.wait_for_speech()
+        assert player.played == 2
+        assert pipeline.said() == "The keeper rose with the dawn."
 
     def test_a_new_reply_starts_afresh(self):
         player = HeldPlayer()

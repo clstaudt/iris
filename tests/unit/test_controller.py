@@ -3,8 +3,11 @@
 import threading
 import time
 
+from iris.audio import AudioPlayer
 from iris.controller import AssistantController
 from iris.events import EventBus
+from iris.personas import get_persona
+from iris.tts import SpeechGenerator
 
 
 class FakePipeline:
@@ -269,3 +272,36 @@ def test_wake_word_is_set_on_the_assistant(monkeypatch):
         assert controller.assistant.wake_word is None
     finally:
         controller.stop()
+
+
+class PersonaAssistant(FakeAssistant):
+    """A running assistant whose persona can be switched."""
+
+    def __init__(self):
+        super().__init__()
+        self.persona = get_persona("iris")
+        self.conversation.add_note = lambda note: None
+        self.tts_generator = SpeechGenerator.__new__(SpeechGenerator)
+        self.tts_generator.prepare = lambda: None
+        self.player = AudioPlayer()
+
+
+def test_a_voice_that_cannot_speak_the_language_goes_back_to_english():
+    controller = AssistantController(EventBus())
+    controller.assistant = PersonaAssistant()
+    controller.assistant.conversation_language = "de"
+
+    controller.set_persona("hal")  # Kokoro has no German
+
+    assert controller.assistant.tts_generator.engine == "kokoro"
+    assert controller.assistant.conversation_language == "en"
+
+
+def test_switching_to_a_voice_that_speaks_the_language_keeps_it():
+    controller = AssistantController(EventBus())
+    controller.assistant = PersonaAssistant()
+    controller.assistant.conversation_language = "fr"
+
+    controller.set_persona("hal")
+
+    assert controller.assistant.conversation_language == "fr"

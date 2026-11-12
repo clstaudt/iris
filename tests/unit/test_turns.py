@@ -9,6 +9,7 @@ import threading
 
 from iris.assistant import VoiceAssistant
 from iris.events import EventBus
+from iris.tts import SpeechGenerator
 
 
 class RecordingPipeline:
@@ -92,3 +93,48 @@ def test_a_turn_marks_the_conversation_busy():
     assistant._run_text_turn({"text": "hi", "id": "t1"})
     assert seen == [True]
     assert not assistant._turn_active.is_set()
+
+
+class QuietStatus:
+    status_lock = threading.Lock()
+    status_understanding = False
+
+    def update_status_bar(self, pipeline):
+        pass
+
+
+class Transcript:
+    def __init__(self, text, language):
+        self.heard = (text, language)
+
+    def transcribe(self, audio_path):
+        return self.heard
+
+
+def _answer_heard(engine, text, language):
+    """Answer a spoken turn with a persona on this engine; the reply language."""
+    assistant = _bare_assistant()
+    assistant.status_manager = QuietStatus()
+    assistant.interrupt_event = threading.Event()
+    assistant.transcriber = Transcript(text, language)
+    assistant.tts_generator = SpeechGenerator.__new__(SpeechGenerator)
+    assistant.tts_generator.engine = engine
+    answered = []
+    assistant.chat = lambda text, response_language, source=None: answered.append(
+        response_language
+    )
+    assistant._answer_spoken("/tmp/heard.wav")
+    return answered[0]
+
+
+def test_a_kyutai_persona_answers_german_in_german():
+    assert _answer_heard("kyutai", "Beschreibe dich kurz.", "de") == "de"
+
+
+def test_a_kokoro_persona_keeps_to_languages_it_speaks():
+    assert _answer_heard("kokoro", "Beschreibe dich kurz.", "de") == "en"
+    assert _answer_heard("kokoro", "Bonjour.", "fr") == "fr"
+
+
+def test_a_kyutai_persona_answers_japanese_through_kokoro():
+    assert _answer_heard("kyutai", "こんにちは", "ja") == "ja"
