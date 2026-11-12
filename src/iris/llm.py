@@ -1,6 +1,5 @@
-"""LLM conversation management using Ollama."""
+"""LLM conversation management, on Ollama or an OpenAI-compatible server."""
 
-import os
 import re
 import logging
 import threading
@@ -13,44 +12,29 @@ import ollama
 from bs4 import BeautifulSoup
 
 from iris.attachments import Attachment, recorded_text
+from iris.llm_client import OpenAIClient, is_openai, normalize_host
+from iris.llm_client import effective_host as effective_host  # imported from here by callers
 from iris.memory import LIVE_TOKENS, PIN_TURNS, PINNED_TOKENS, MemoryKeeper, estimate_tokens
 from iris.personas import Persona, get_persona
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
-
-# Fallback shown when neither a server URL nor OLLAMA_HOST is configured
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
 # Rounds of tool calls one reply may take, e.g. a search, then reading a page
 MAX_TOOL_ROUNDS = 3
 
 
-def normalize_host(url: Optional[str]) -> Optional[str]:
-    """Clean up a server URL as people copy it around.
-
-    The OpenAI-compatible endpoint (".../v1") is what most tools ask for, but
-    the native client appends its own /api paths and must get the bare server.
-    Returns None for an empty value, meaning "use the default".
-    """
-    url = (url or "").strip().rstrip("/")
-    for suffix in ("/v1", "/api"):
-        if url.endswith(suffix):
-            url = url[: -len(suffix)].rstrip("/")
-    return url or None
-
-
 def ollama_client(host: Optional[str] = None, **kwargs):
-    """A client for the given server, or the ollama module itself — whose
-    default client follows OLLAMA_HOST — when no server is configured."""
+    """A client for a server URL as resolve_host keeps it: an OpenAIClient
+    for an OpenAI-compatible server, ollama's own client for Ollama, or the
+    ollama module itself (whose default client follows OLLAMA_HOST) when no
+    server is configured."""
+    host = normalize_host(host)
+    if is_openai(host):
+        return OpenAIClient(host, **kwargs)
     if not host and not kwargs:
         return ollama
-    return ollama.Client(host=normalize_host(host), **kwargs)
-
-
-def effective_host(host: Optional[str]) -> str:
-    """The server URL actually in use, for display."""
-    return normalize_host(host) or os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_URL
+    return ollama.Client(host=host, **kwargs)
 
 
 # Markup some models write into a reply that is never meant to be spoken:
@@ -319,7 +303,7 @@ class ConversationManager:
             return []
 
     def set_host(self, host: Optional[str]):
-        """Switch to another Ollama server, keeping the conversation history."""
+        """Switch to another server, keeping the conversation history."""
         self.host = normalize_host(host)
         self.client = ollama_client(self.host)
         self.reachable = True  # set_host is only called for a server that answered
