@@ -45,6 +45,7 @@ for package in (
     "primp",
     "livekit",  # its native library, for echo cancellation
     "pocket_tts",  # the configs of its models
+    "py3langid",  # its model, which tells the language a reply is written in
 ):
     package_datas, package_binaries, package_imports = collect_all(package)
     datas += package_datas
