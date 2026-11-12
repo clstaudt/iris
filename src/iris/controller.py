@@ -281,6 +281,9 @@ class AssistantController:
         # {plugin id: enabled} chosen in the UI; the others follow their default
         kwargs["tools"] = kwargs.pop("tools", {}) or {}
         amnesia = bool(kwargs.pop("amnesia", False))
+        # The app still shows the conversation when it starts a core again
+        # after one stopped: the recent turns are not shown a second time
+        restore = bool(kwargs.pop("restore_thread", True))
         # Model folders chosen in Settings; empty means download as usual
         if stt_path := kwargs.pop("stt_model_path", ""):
             kwargs["whisper_model"] = stt_path
@@ -305,7 +308,8 @@ class AssistantController:
             )
             self.assistant.conversation.set_amnesia(amnesia)
             self.bus.emit("config", self.assistant.config_info())
-            self._restore_thread()
+            if restore:
+                self._restore_thread()
         except Exception as e:
             self.bus.emit("error", {"message": f"Failed to start assistant: {e}"})
             self._publish_state("idle")
