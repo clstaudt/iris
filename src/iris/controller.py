@@ -33,6 +33,7 @@ from iris.tts import (
     find_kokoro_models,
     kokoro_files_in,
 )
+from iris.turns import SMART_TURN_FILE, SMART_TURN_REPO
 
 # When several status flags are set simultaneously, the earliest match wins.
 # Tool activity comes first: "thinking" stays set while a tool runs, and the
@@ -66,7 +67,7 @@ KOKORO_MB = 335
 # Events that make up the visible conversation. Kept here so a UI that
 # reloads (or attaches late) can rebuild its transcript; streaming chunks are
 # left out because chat.done carries the full reply.
-TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "tool.use", "error")
+TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "chat.continued", "tool.use", "error")
 TRANSCRIPT_LIMIT = 500
 
 
@@ -486,6 +487,20 @@ class AssistantController:
             if not downloads.is_cached(tiny):
                 downloads.download(tiny, self._progress("wake", "Downloading wake word model"))
 
+    def _fetch_turn(self):
+        """Download Smart Turn, which hears when the user has finished
+        speaking, unless it is cached. Without it a turn ends after a silence."""
+        if downloads.is_cached(SMART_TURN_REPO, SMART_TURN_FILE):
+            return
+        try:
+            downloads.download(
+                SMART_TURN_REPO,
+                self._progress("turn", "Downloading turn detection model"),
+                filename=SMART_TURN_FILE,
+            )
+        except Exception:
+            pass
+
     def _fetch_tts(self, tts_dir: str | None):
         """Download the voice model unless a folder was chosen or the files
         are already in one of the usual places."""
@@ -515,6 +530,7 @@ class AssistantController:
                 whisper_engine=kwargs.get("whisper_engine", "auto"),
                 whisper_device=kwargs.get("whisper_device", "auto"),
             )
+            self._fetch_turn()
             self._fetch_tts(kwargs.get("tts_models_dir"))
         finally:
             self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})

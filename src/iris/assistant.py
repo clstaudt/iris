@@ -25,6 +25,7 @@ from iris.personas import Persona, get_persona
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
 from iris.tts import KokoroGenerator, SpeechPipeline, is_language_supported
+from iris.turns import SmartTurn
 from iris.ui import DisplayManager, StatusManager
 from iris.wakeword import WakeWordDetector, match_sleep_word
 
@@ -110,7 +111,7 @@ class VoiceAssistant:
             llm_model: Ollama model name (primary model, should be fast)
             sample_rate: Audio sample rate for recording
             silence_threshold: RMS threshold for silence detection
-            silence_duration: Duration of silence to stop recording
+            silence_duration: Silence that ends a turn Smart Turn has not ended
             tts_voice: Voice for TTS (overridden by persona.voice if persona is provided)
             tts_speed: Speed for TTS
             quiet: If True, suppress verbose output during initialization
@@ -142,6 +143,8 @@ class VoiceAssistant:
 
         # Cooperative control signals for external UIs
         self.interrupt_event = threading.Event()  # barge-in: cancel current turn
+        # Whether the turn being answered was shown (chat.user) yet
+        self._announced = False
         self.stop_event = threading.Event()  # request run_loop shutdown
         self.pause_event = threading.Event()  # mic off (models stay loaded)
         self.hold_event = threading.Event()  # user is typing: keep the mic closed
@@ -180,7 +183,11 @@ class VoiceAssistant:
             self.console.print("[dim]Initializing components...[/dim]")
 
         # Initialize components
-        self.recorder = AudioRecorder(sample_rate, silence_threshold, silence_duration)
+        # Smart Turn hears when the user has finished speaking; without it
+        # (offline on a first run) a turn ends after the silence
+        self.recorder = AudioRecorder(
+            sample_rate, silence_threshold, silence_duration, turn_end=SmartTurn.load()
+        )
 
         # Initialize audio player with filter from persona
         audio_filter = get_filter(self.persona.audio_filter) if self.persona.audio_filter else None
@@ -378,6 +385,71 @@ class VoiceAssistant:
         if self.wake_word and self.awake_until > 0:
             self._stay_awake()
 
+    def _mic_closed(self) -> bool:
+        """Paused, mic off, the user typing, or shutting down."""
+        return (
+            self.pause_event.is_set()
+            or self.suspend_event.is_set()
+            or self.hold_event.is_set()
+            or self.stop_event.is_set()
+        )
+
+    def _answer_listening(self, audio_path: str, dormant: bool):
+        """Answer a turn the microphone heard, listening on until the answer
+        is spoken.
+
+        Smart Turn can take a pause for the end of a turn that was not over.
+        A user who goes on takes the turn back: the answer begun is dropped,
+        and the whole turn is answered once it is over. The microphone closes
+        when the voice starts, which it would hear.
+        """
+        while audio_path:
+            answered = threading.Event()
+            went_on = threading.Event()
+            whole_turn: list[Optional[str]] = [None]
+
+            def on_speech():
+                went_on.set()
+                self.interrupt_event.set()
+                self.speech_pipeline.stop()
+                with self.status_manager.status_lock:
+                    self.status_manager.status_listening = True
+
+            def on_level(level: float):
+                self._last_voice = time.monotonic()
+                if self.event_bus:
+                    self.event_bus.emit("audio.level", {"rms": level})
+
+            def voice_or_answer() -> bool:
+                return answered.is_set() or self.speech_pipeline.is_speaking_flag.is_set()
+
+            def listen_on(turn=audio_path):
+                whole_turn[0] = self.recorder.listen_on(
+                    turn,
+                    on_speech=on_speech,
+                    until=voice_or_answer,
+                    should_stop=self._mic_closed,
+                    on_level=on_level,
+                )
+
+            listener = threading.Thread(target=listen_on, daemon=True)
+            listener.start()
+            self._announced = False
+            self._handle_heard(audio_path, dormant)
+            answered.set()
+            listener.join()
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+
+            Path(audio_path).unlink(missing_ok=True)
+            audio_path = whole_turn[0] if went_on.is_set() else None
+            if audio_path:
+                self.interrupt_event.clear()
+                # The turn shown and the reply begun to it give way to the whole turn
+                if self._announced and self.event_bus:
+                    self.event_bus.emit("chat.continued", {})
+                dormant = False
+
     def _speak(self, text: str):
         """Queue reply text for speech, unless voice output is switched off."""
         if not self.speak_replies:
@@ -449,7 +521,8 @@ class VoiceAssistant:
             self.status_manager.status_understanding = False
         self.status_manager.update_status_bar(self.speech_pipeline)
 
-        if not text:
+        # The user went on meanwhile: the whole turn is answered instead
+        if not text or self.interrupt_event.is_set():
             return
 
         # "That's all, Iris": back to sleep, nothing to answer
@@ -469,6 +542,7 @@ class VoiceAssistant:
 
         # Display user message
         self.display_manager.show_user_message(text)
+        self._announced = True
         if self.event_bus:
             self.event_bus.emit(
                 "chat.user",
@@ -781,11 +855,9 @@ class VoiceAssistant:
                     if not audio_path:
                         continue
 
-                    # 2. Transcribe, then 3. answer (streams and speaks the reply)
-                    self._handle_heard(audio_path, dormant)
-
-                    # Cleanup
-                    Path(audio_path).unlink(missing_ok=True)
+                    # 2. Transcribe, then 3. answer (streams and speaks the
+                    # reply), listening on in case the user was not finished
+                    self._answer_listening(audio_path, dormant)
 
                 except KeyboardInterrupt:
                     self.speech_pipeline.stop()

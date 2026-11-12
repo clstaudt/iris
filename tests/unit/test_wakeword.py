@@ -187,6 +187,7 @@ def _awake_assistant(monkeypatch, heard):
     a = _bare_assistant(monkeypatch, (False, ""))
     del a._run_voice_turn  # use the real one
     a._turn_active = threading.Event()
+    a.interrupt_event = threading.Event()
     a.transcriber = Transcribes(heard)
     a.status_manager = QuietStatus()
     a.display_manager = QuietDisplay()

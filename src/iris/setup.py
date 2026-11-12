@@ -4,7 +4,7 @@ import os
 import urllib.request
 from pathlib import Path
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
@@ -18,6 +18,7 @@ from rich.progress import (
 from rich.table import Table
 
 from iris.transcription import model_repo, resolve_device, resolve_engine, resolve_model
+from iris.turns import SMART_TURN_FILE, SMART_TURN_REPO
 
 # Kokoro model download URLs
 KOKORO_MODEL_URL = (
@@ -109,6 +110,9 @@ class SetupWizard:
         if checks["kokoro_models"] == "missing":
             downloads_needed.append(("kokoro_models", "Kokoro TTS models (~360 MB)"))
 
+        if checks["turn_model"] == "missing":
+            downloads_needed.append(("turn_model", "Smart Turn model (9 MB)"))
+
         # If nothing to download, we're ready
         if not downloads_needed:
             self.console.print()
@@ -129,8 +133,8 @@ class SetupWizard:
         self.console.print("[dim]Download locations:[/dim]")
         if checks["ollama_model"] == "missing":
             self.console.print("  [dim]• Ollama models: ~/.ollama/models/[/dim]")
-        if checks["whisper"] == "missing":
-            self.console.print(f"  [dim]• Whisper model: {WHISPER_CACHE_DIR}/[/dim]")
+        if checks["whisper"] == "missing" or checks["turn_model"] == "missing":
+            self.console.print(f"  [dim]• Whisper and Smart Turn: {WHISPER_CACHE_DIR}/[/dim]")
         if checks["kokoro_models"] == "missing":
             self.console.print(f"  [dim]• Kokoro models: {KOKORO_MODELS_DIR}/[/dim]")
 
@@ -156,6 +160,9 @@ class SetupWizard:
             elif download_id == "kokoro_models":
                 if not self._download_kokoro_models():
                     return False
+            elif download_id == "turn_model":
+                if not self._download_turn_model():
+                    return False
 
         self.console.print()
         self.console.print("[bold green]✓ Setup complete![/bold green]")
@@ -174,6 +181,7 @@ class SetupWizard:
             "ollama_model": self._check_ollama_model(),
             "whisper": self._check_whisper_model(),
             "kokoro_models": self._check_kokoro_models(),
+            "turn_model": self._check_turn_model(),
         }
 
     def _display_status(self, checks: dict[str, str]):
@@ -208,6 +216,12 @@ class SetupWizard:
             table.add_row("[green]✓[/green]", "Kokoro TTS models", "cached")
         else:
             table.add_row("[yellow]↓[/yellow]", "Kokoro TTS models", "needs download")
+
+        # Smart Turn, which hears when the user has finished speaking
+        if checks["turn_model"] == "ready":
+            table.add_row("[green]✓[/green]", "Smart Turn model", "cached")
+        else:
+            table.add_row("[yellow]↓[/yellow]", "Smart Turn model", "needs download")
 
         self.console.print(table)
 
@@ -361,6 +375,27 @@ class SetupWizard:
         except Exception as e:
             self.console.print(f"[red]✗ Failed to download Whisper model: {e}[/red]")
             return False
+
+    def _check_turn_model(self) -> str:
+        """Check if the Smart Turn model is cached."""
+        try:
+            hf_hub_download(SMART_TURN_REPO, SMART_TURN_FILE, local_files_only=True)
+            return "ready"
+        except Exception:
+            return "missing"
+
+    def _download_turn_model(self) -> bool:
+        """Download the Smart Turn model (small: no progress bar)."""
+        try:
+            with self.console.status("Downloading Smart Turn model..."):
+                hf_hub_download(SMART_TURN_REPO, SMART_TURN_FILE)
+            self.console.print("[green]✓ Smart Turn model downloaded[/green]")
+            self.console.print()
+            return True
+        except Exception as e:
+            # Turns then end after a silence, as without it
+            self.console.print(f"[yellow]! Smart Turn model not downloaded: {e}[/yellow]")
+            return True
 
     def _download_kokoro_models(self) -> bool:
         """

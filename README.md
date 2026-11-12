@@ -288,6 +288,7 @@ Everything a test run writes, downloaded models included, goes into one temporar
 
 Iris starts listening as soon as the models are loaded. Speaking and typing share one conversation:
 
+- Iris answers as soon as you have finished, not after a fixed silence. A voice-activity detector (Silero) hears when you pause, and [Smart Turn](https://github.com/pipecat-ai/smart-turn), a small model from the Pipecat project, judges from your words and intonation whether you have finished or are only thinking. Should you go on after it took a pause for the end, the answer begun is dropped and your whole turn is answered. Without Smart Turn (offline on the first run) a turn ends after 3.5 seconds of silence.
 - Typed and spoken messages are answered one at a time, in order. A message sent while Iris is still answering waits as a queued bubble.
 - While you type, the microphone stays closed, so keyboard noise never becomes a spoken turn. Typing anywhere in the window goes to the message box.
 - **Pause** (or a click on the orb) holds the whole conversation: speech stops mid-sentence, the reply stops streaming, the microphone closes, and queued messages wait. **Resume** picks up where it stopped.
