@@ -179,17 +179,29 @@ class Room:
 
 
 class Speaker:
-    """An endpoint's speaker: records every clip instead of playing it."""
+    """An endpoint's speaker: records every clip instead of playing it.
+
+    As a sounddevice stream does, it plays in blocks (blocksize): the last
+    one is filled up with silence, and the stream is playing until that has
+    been played too.
+    """
 
     def __init__(self):
         self.clips: list[Clip] = []
         self._lock = threading.Lock()
+        # Until when the last clip's stream plays (its last block played)
+        self._stream_end = 0.0
 
-    def play(self, data, samplerate, **options) -> float:
+    def play(self, data, samplerate, blocksize=None, **options) -> float:
         now = time.monotonic()
         with self._lock:
             self._cut(now)
-            self.clips.append(Clip(to_rate(data, int(samplerate)), now + OUTPUT_LATENCY))
+            clip = Clip(to_rate(data, int(samplerate)), now + OUTPUT_LATENCY)
+            self.clips.append(clip)
+            frames = len(data)
+            if blocksize:
+                frames = -(-frames // int(blocksize)) * int(blocksize)
+            self._stream_end = clip.started + frames / int(samplerate)
         return OUTPUT_LATENCY
 
     def stop(self):
@@ -202,11 +214,12 @@ class Speaker:
             last.stopped = max(now, last.started)
 
     def playing(self) -> bool:
-        """Whether the last clip still has audio to play (a stopped one has
-        none, even before it was heard)."""
+        """Whether the last clip's stream is still playing, its last block
+        filled up with silence (a stopped one is not, even before it was
+        heard)."""
         with self._lock:
             last = self.clips[-1] if self.clips else None
-            return last is not None and last.stopped is None and last.end > time.monotonic()
+            return last is not None and last.stopped is None and self._stream_end > time.monotonic()
 
     def clips_between(self, start: float, end: float = float("inf")) -> list[Clip]:
         with self._lock:

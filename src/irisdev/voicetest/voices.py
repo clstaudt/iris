@@ -30,15 +30,17 @@ class UserVoice:
     def __init__(self, cache: Path):
         self.cache = cache
         self.cache.mkdir(parents=True, exist_ok=True)
-        self._generator = None
+        # A synthesizer for each speed spoken at
+        self._generators: dict[float, SpeechGenerator] = {}
 
-    def _speak(self, text: str) -> np.ndarray:
-        key = hashlib.sha1(f"{USER_ENGINE}:{USER_VOICE}:{text}".encode()).hexdigest()[:16]
+    def _speak(self, text: str, speed: float = 1.0) -> np.ndarray:
+        named = text if speed == 1.0 else f"{text}@{speed}"
+        key = hashlib.sha1(f"{USER_ENGINE}:{USER_VOICE}:{named}".encode()).hexdigest()[:16]
         path = self.cache / f"{key}.wav"
         if not path.exists():
-            if self._generator is None:
-                self._generator = SpeechGenerator(USER_ENGINE, USER_VOICE, 1.0)
-            generated = self._generator.generate(text, language="en")
+            if speed not in self._generators:
+                self._generators[speed] = SpeechGenerator(USER_ENGINE, USER_VOICE, speed)
+            generated = self._generators[speed].generate(text, language="en")
             if not generated:
                 raise RuntimeError(f"Could not synthesize the user saying: {text}")
             audio, rate = sf.read(generated, dtype="float32")
@@ -47,14 +49,15 @@ class UserVoice:
         audio, _ = sf.read(path, dtype="float32")
         return audio
 
-    def utterance(self, parts: list[Part]) -> np.ndarray:
-        """The parts said one after the other, a number being a pause."""
+    def utterance(self, parts: list[Part], speed: float = 1.0) -> np.ndarray:
+        """The parts said one after the other, a number being a pause; at a
+        speed above 1, briskly."""
         pieces = []
         for part in parts:
             if isinstance(part, (int, float)):
                 pieces.append(np.zeros(int(part * RATE), dtype=np.float32))
             else:
-                pieces.append(_trim(self._speak(part)))
+                pieces.append(_trim(self._speak(part, speed)))
         audio = np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
         peak = float(np.abs(audio).max()) if len(audio) else 0.0
         return audio * (LEVEL / peak) if peak else audio

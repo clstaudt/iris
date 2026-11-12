@@ -148,6 +148,8 @@ class ScriptedConversations:
         self.budgets = {**BUDGETS, **(budgets or {})}
         self.report = report
         self._reply_sound: Optional[float] = None
+        # When the user's last turn ended
+        self._said_end = 0.0
 
     def hold(self, conversation: Conversation) -> list[TurnResult]:
         self.assistant.clear_conversation()
@@ -166,17 +168,31 @@ class ScriptedConversations:
     def turn(self, conversation: str, number: int, turn: Turn, hand_over: bool) -> TurnResult:
         result = TurnResult(conversation, number, turn.text)
         log, speaker = self.assistant.log, self.assistant.endpoint.speaker
-        audio = self.voice.utterance(turn.parts)
+        audio = self.voice.utterance(turn.parts, turn.speed)
 
         # When the user speaks: over the reply, or once the assistant is done
         if turn.interrupt_after is not None:
             began = self._reply_sound or time.monotonic()
             wait_until(lambda: speaker.audible() and time.monotonic() - began >= turn.interrupt_after,
                        self.reply_timeout)
+        elif turn.answer_after is not None:
+            since = self._said_end
+
+            def heard_to_its_end() -> bool:
+                last = speaker.last_sound(since)
+                return (
+                    bool(log.since(since, "chat.done"))
+                    and last is not None
+                    and not speaker.audible()
+                    and time.monotonic() - last >= turn.answer_after
+                )
+
+            wait_until(heard_to_its_end, self.reply_timeout)
         else:
             wait_until(lambda: finished(self.assistant), self.reply_timeout)
             time.sleep(GAP)
         said = self.space.say(turn.text, audio)
+        self._said_end = said.speech_end
 
         pressed: list[Optional[float]] = [None]
         presser = None

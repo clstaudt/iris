@@ -29,6 +29,12 @@ class Turn:
     # The reply is listened to in silence to its end (Iris must not take its
     # own voice for the user)
     listen_through: bool = False
+    # Said this many seconds after the last of the reply was heard, as a user
+    # answers at once, rather than once Iris has finished (its speaker's
+    # stream may still be playing silence)
+    answer_after: Optional[float] = None
+    # How fast the user speaks (1 is the voice's own pace)
+    speed: float = 1.0
 
     @property
     def text(self) -> str:
@@ -50,6 +56,16 @@ CONVERSATIONS = [
         [
             Turn(["What is the capital of France?"], reply_mentions=["Paris"]),
             Turn(["And roughly how many people live there?"], reply_mentions=["million"]),
+        ],
+    ),
+    Conversation(
+        "answering at once",
+        [
+            Turn(["What is the capital of France?"], reply_mentions=["Paris"]),
+            # A brisk "Yes", a third of a second: over before the voice
+            # could be held and heard to have died away
+            Turn(["Yes."], answer_after=0.3, speed=1.8),
+            Turn(["And how many people live there?"], reply_mentions=["million"], answer_after=0.4),
         ],
     ),
     Conversation(

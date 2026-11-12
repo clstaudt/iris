@@ -43,6 +43,16 @@ class TestSpeaker:
         speaker.play(tone(1.0), RATE)
         assert speaker.clips[-2].stopped is not None
 
+    def test_the_stream_plays_on_to_the_end_of_its_last_block(self):
+        speaker = Space().endpoint("a").speaker
+        speaker.play(tone(0.1), RATE, blocksize=RATE // 2)
+        clip = speaker.clips[-1]
+        time.sleep(clip.end - time.monotonic() + 0.1)
+        # Heard no more, but still playing the silence after it
+        assert not speaker.audible() and speaker.playing()
+        time.sleep(0.45)
+        assert not speaker.playing()
+
     def test_another_rate_is_resampled(self):
         speaker = Space().endpoint("a").speaker
         speaker.play(tone(1.0, rate=24000), 24000)
