@@ -334,7 +334,8 @@ class Restart:
     memory on, the conversation comes back from it."""
 
     # Words the conversation shown again after the restart holds (its
-    # chat.user and chat.done events), each in one of them
+    # chat.user and chat.done events), each in one of them; given, the user's
+    # turns and the replies must both be shown again
     restores: list[str] = field(default_factory=list)
     name: str = ""
 

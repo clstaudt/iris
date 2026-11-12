@@ -1119,7 +1119,8 @@ class ScriptedConversations:
 
     def _restart(self, restart: Restart, number: int, conversation: Conversation) -> TurnResult:
         """Quit the assistant and start it again, once it has finished; the
-        conversation it shows again must hold what restart.restores names."""
+        conversation it shows again must hold what restart.restores names,
+        and the replies as well as the user's turns."""
         log = self.assistant.log
         wait_until(lambda: finished(self.assistant), self._timeout)
         result = TurnResult(conversation.name, number, restart.text, tags=list(conversation.tags), at="restart",
@@ -1136,6 +1137,9 @@ class ScriptedConversations:
         missing = [w for w in restart.restores if not any(w.lower() in text for text in texts)]
         if missing:
             result.fail("restored", f"the conversation shown again lacks {missing}: {texts}")
+        if restart.restores and not (result.users and result.replies):
+            result.fail("restored", f"the conversation shown again has {len(result.users)} turns of the user's "
+                                    f"and {len(result.replies)} replies")
         result.errors = [d.get("message", "") for _, _, d in log.since(start, "error")]
         for error in result.errors:
             result.fail("error", f"error: {error}")

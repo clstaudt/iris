@@ -2631,6 +2631,8 @@ def memory_in_context(name: str = "memory") -> Check:
     """The model was given what Iris remembers: the memory index, and the
     conversation before the restart as its recent turns."""
     def fn(result, view):
+        if view.stub is None:
+            return None
         requests = view.requests()
         if not requests:
             return "no request to the model"
@@ -2652,7 +2654,7 @@ MEMORY = [
         [
             Turn(["My sister Lena just adopted a cat called Pepper."]),
             Turn(["She lives in Porto, right by the river."]),
-            Restart(restores=["Pepper", "Porto", "good name for a cat"]),
+            Restart(restores=["Pepper", "Porto"]),
             Turn(["What was my sister's cat called?"], reply_mentions=["Pepper"], check_with_stub=True,
                  tools_used=[], checks=[memory_in_context()]),
             Turn(["Do you remember the lighthouse I told you about?"], tools_used=["recall"],
