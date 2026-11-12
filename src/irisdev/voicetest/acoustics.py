@@ -76,14 +76,20 @@ class Clip:
     stopped: Optional[float] = None  # when it was cut off, if it was
     # What a room made of it, worked out when first needed
     _roomed: Optional[np.ndarray] = field(default=None, repr=False)
+    # The same of the part heard, once it was cut off
+    _roomed_cut: Optional[np.ndarray] = field(default=None, repr=False)
 
     def through(self, room: "Room") -> np.ndarray:
-        """What reaches a microphone in this room of the part heard: the
-        reverberation of what was played rings on after a cut."""
+        """What reaches a microphone in this room of the part heard: after a
+        cut, only the reverberation of what was played rings on."""
+        if self.stopped is not None:
+            if self._roomed_cut is None:
+                heard = self.heard()
+                self._roomed_cut = room.apply(heard) if len(heard) else heard
+            return self._roomed_cut
         if self._roomed is None:
             self._roomed = room.apply(self.audio)
-        heard = int(round((self.end - self.started) * RATE))
-        return self._roomed[: heard + len(room.response)] if self.stopped is not None else self._roomed
+        return self._roomed
 
     @property
     def end(self) -> float:

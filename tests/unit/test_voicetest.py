@@ -8,7 +8,7 @@ import numpy as np
 import ollama
 import pytest
 
-from irisdev.voicetest.acoustics import OUTPUT_LATENCY, RATE, Space, merge, sound_span
+from irisdev.voicetest.acoustics import OUTPUT_LATENCY, RATE, Room, Space, merge, sound_span
 from irisdev.voicetest.assistant import Log
 from irisdev.voicetest.scripted import heard_share
 from irisdev.voicetest.selftalk import SelfTalk
@@ -100,6 +100,21 @@ class TestSpace:
         # The echo arrives after its delay
         assert np.abs(own[: int(0.015 * RATE)]).max() == 0
         assert np.abs(own[int(0.025 * RATE) : int(0.05 * RATE)]).max() > 0
+
+    def test_after_a_cut_only_the_room_rings_on(self):
+        space = Space(noise=0, echo_gain=1.0, echo_delay=0.0, room=Room(extra_delay=0.0))
+        a = space.endpoint("a")
+        a.play(tone(2.0), RATE)
+        time.sleep(0.5)
+        a.stop()
+        stopped = a.speaker.clips[-1].stopped
+
+        def level(audio):
+            return float(np.sqrt(np.mean(audio**2)))
+
+        before = self._hear(a, stopped - 0.2, 0.2)
+        after = self._hear(a, stopped + 0.1, 0.2)
+        assert level(after) < 0.1 * level(before)
 
     def test_a_microphone_is_never_silent(self):
         space = Space()
