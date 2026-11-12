@@ -9,6 +9,7 @@ import threading
 import time
 import warnings
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,7 @@ from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 
 from iris.audio import get_filter
+from iris.events import brief
 from iris.engines import (
     SpeechEngine,
     register_speech_engine,
@@ -516,11 +518,15 @@ class PocketGenerator(SpeechEngine):
 
         Returns:
             Path to generated WAV file, or None if generation failed
+
+        Raises:
+            Exception: The language's model or the voice could not be
+                loaded (offline, at its first use), which the caller tells
         """
+        pocket_lang, voice = self.voice_for(language)
+        model = self._model(pocket_lang)
+        state = self._voice_state(pocket_lang, voice)
         try:
-            pocket_lang, voice = self.voice_for(language)
-            model = self._model(pocket_lang)
-            state = self._voice_state(pocket_lang, voice)
             sentences = pocket_sentences(text)
             if not sentences:
                 return None
@@ -574,6 +580,10 @@ class SpeechGenerator:
         self._engines: dict[str, SpeechEngine] = {}
         # Replies and previews may ask for speech at the same time
         self._lock = threading.Lock()
+        # Told (a message for the user) when an engine, or its model for a
+        # language, cannot be loaded; once, until it speaks again
+        self.on_failure: Callable[[str], None] | None = None
+        self._failing: set[tuple[str, str]] = set()
         if prepare:
             self.prepare()
 
@@ -624,13 +634,30 @@ class SpeechGenerator:
         with self._lock:
             try:
                 generator = self._engine(engine)
-            except Exception:
+                generator.voice = voice
+                if generator.takes_speed:
+                    generator.speed = speed
+                path = generator.generate(text, language=language)
+            except Exception as e:
                 logger.exception("Could not load the voice")
+                self._failed(engine, language, e)
                 return None
-            generator.voice = voice
-            if generator.takes_speed:
-                generator.speed = speed
-            return generator.generate(text, language=language)
+            self._failing.discard((engine, language))
+            return path
+
+    def _failed(self, engine: str, language: str, error: Exception):
+        """Tell that a voice could not be loaded, once until it speaks: a
+        reply in that language is then silent, which the user would
+        otherwise not know the reason of."""
+        if (engine, language) in self._failing:
+            return
+        self._failing.add((engine, language))
+        if self.on_failure is not None:
+            name = LANGUAGE_NAMES.get(language, language)
+            self.on_failure(
+                f"The voice for {name} could not be loaded, so Iris does not speak {name} "
+                f"for now. {brief(error)}"
+            )
 
 
 # Clips of the voice remembered, to recognize its echo in a turn

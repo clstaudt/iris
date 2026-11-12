@@ -737,6 +737,7 @@ class AssistantController:
                         assistant.tts_generator.speed,
                         models_dir=tts_dir or None,
                     )
+                    generator.on_failure = assistant.tts_generator.on_failure
                     assistant.tts_generator = generator
                     assistant.speech_pipeline.generator = generator
                 self.bus.emit("config", assistant.config_info())

@@ -322,6 +322,9 @@ class VoiceAssistant:
         # Why the voice could not be loaded; None while it speaks
         self.voice_error: Optional[str] = None
         self.load_voice()
+        # A language's voice that cannot be loaded later on (Pocket TTS
+        # loads one per language at its first reply) is told too
+        self.tts_generator.on_failure = self._error
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
         self.speech_pipeline.on_reply_audio = self._reply_heard
         # Told what language each piece of a reply is in, before the first
