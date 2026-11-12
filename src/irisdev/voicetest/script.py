@@ -32,8 +32,9 @@ Part = Union[str, float]
 
 # The user waits this long after the assistant has finished before speaking
 GAP = 0.6
-# What a turn may expect of Iris
-EXPECTATIONS = ("answer", "silent", "continued", "either", "silenced", "wake", "sleep")
+# What a turn may expect of Iris ("unanswered": heard, but no reply could be
+# had, and the error says why)
+EXPECTATIONS = ("answer", "silent", "continued", "either", "silenced", "wake", "sleep", "unanswered")
 
 
 @dataclass(frozen=True)
@@ -168,7 +169,9 @@ class Check:
 
 
 # An action at a moment: "stop", "pause", "resume", ("mic", on), ("persona",
-# name), ("tool", id, on), ("send", text) or ("turn_detection", mode)
+# name), ("tool", id, on), ("send", text), ("turn_detection", mode),
+# ("model", name) (another model chosen, as in the app) or ("stub",
+# {setting: value}) (the scripted model changes, see StubModel.SETTINGS)
 Action = Union[str, tuple]
 
 

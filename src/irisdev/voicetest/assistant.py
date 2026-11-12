@@ -314,8 +314,8 @@ class IrisUnderTest:
     def configure(self, name: str, value, wait: float = CONFIG_WAIT) -> bool:
         """Change a setting as the app does, and wait for the "config" event
         that shows it. Settings: "tool" (id, on), "persona", "turn_detection",
-        "stt_model", "wake_word", "wake_options" {window, sleep_word} and
-        "mic". Returns whether it showed in time."""
+        "stt_model", "wake_word", "wake_options" {window, sleep_word}, "mic"
+        and "model". Returns whether it showed in time."""
         since = time.monotonic()
         answer, shows = self._change(name, value)
         if not answer.get("ok", False):
@@ -349,6 +349,7 @@ class IrisUnderTest:
             "stt_model": ("set_stt_model", "whisper_model", value),
             "wake_word": ("set_wake_word", "wake_word", value or ""),
             "mic": ("set_mic", "mic_on", bool(value)),
+            "model": ("set_model", "llm_model", value),
         }
         if name not in setters:
             raise ValueError(f"No setting called {name!r}")

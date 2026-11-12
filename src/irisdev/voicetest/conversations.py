@@ -9,16 +9,18 @@ tools it used, and that it answered or stayed silent (see script.py).
 CONVERSATIONS are the everyday ones. GROUPS holds them all by name, one
 group per thing tested: "search" (web search), "turn-taking",
 "interruptions", "hearing", "conversation", "performance", "model" (a
-model server in trouble), and "slow" and "network" for the long runs and
-the real web.
+model server in trouble), "vision" (the camera and the screen, scripted),
+and "slow" and "network" for the long runs and the real web.
 """
 
 import json
 import re
+import sys
 
 from iris.llm import NO_TOOLS_NOTE
 from iris.llm_client import READ_TIMEOUT
 from irisdev.voicetest import checks as c
+from irisdev.voicetest.fakesight import color_of
 from irisdev.voicetest.fakeweb import Each
 from irisdev.voicetest.script import (
     At,
@@ -34,11 +36,14 @@ from irisdev.voicetest.script import (
 from irisdev.voicetest.scripted import holds, inner_silences
 from irisdev.voicetest.stub_llm import (
     LONG,
+    MODEL,
     SHORT,
+    VISION_MODEL,
     Call,
     Rule,
     browse,
     fill,
+    images_of,
     last_tool,
     last_user,
     notes_of,
@@ -2710,6 +2715,18 @@ def refused_then_asked_without(name: str = "asked_without_tools") -> Check:
     return Check(name, fn)
 
 
+# A model chosen instead of one removed from the server
+OTHER_MODEL = "voicetest-other:latest"
+
+
+def asked_model(model: str, name: str = "model") -> Check:
+    """Every request of the turn asked this model."""
+    def fn(result, view):
+        asked = sorted({r.model for r in view.requests()})
+        return None if asked == [model] else f"asked {', '.join(asked) or 'nothing'}"
+    return Check(name, fn)
+
+
 MODEL_TROUBLE = [
     Conversation(
         "a model server that stops answering",
@@ -2773,12 +2790,203 @@ MODEL_TROUBLE = [
         tags=["model", "tools"],
     ),
     Conversation(
+        "a model server that fails part way through a reply",
+        [
+            # Ollama streams the error once the reply has begun: the first
+            # sentence is said, and the error says the server failed
+            Turn(["Tell me about the history of the bicycle."], error_mentions=["ran into a problem"]),
+            Turn(["What is the capital of France?"], reply_mentions=["Paris"], check_with_stub=True),
+        ],
+        stub_rules=[Rule("bicycle", f"{STALLED} then came the pedals.", error_after=len(STALLED.split()))],
+        needs=("stub",),
+        tags=["model", "server-error"],
+    ),
+    Conversation(
+        "a model server that answers 500",
+        [
+            Turn(["Tell me about the history of the bicycle."], expect="unanswered",
+                 error_mentions=["ran into a problem"]),
+            Turn(["What is the capital of France?"], reply_mentions=["Paris"], check_with_stub=True),
+        ],
+        stub_rules=[Rule("bicycle", status=500, error="model runner has unexpectedly stopped")],
+        needs=("stub",),
+        tags=["model", "server-error"],
+    ),
+    Conversation(
+        "the model removed from the server",
+        [
+            Turn(["What is the capital of France?"], reply_mentions=["Paris"], check_with_stub=True),
+            # The model is gone: the user is told which, and where to choose another
+            Turn(["And how many people live there?"], expect="unanswered",
+                 actions=[(At.finished(0.0), ("stub", {"missing": True}))],
+                 error_mentions=["not on the server"]),
+            # Another model is chosen, and answers
+            Turn(["What is the capital of France?"], reply_mentions=["Paris"], check_with_stub=True,
+                 actions=[(At.finished(0.0), ("model", OTHER_MODEL))], checks=[asked_model(OTHER_MODEL)]),
+        ],
+        needs=("stub",),
+        tags=["model", "missing"],
+    ),
+    Conversation(
         "a model that says it has no tool support",
         [Turn(["What is the capital of France?"], model_requests=1, checks=[c.no_tool_offer()])],
         tools={"web": True},
         stub_options={"refuse_tools": True, "capabilities": ["completion"]},
         needs=("stub",),
         tags=["model", "tools"],
+    ),
+]
+
+
+# Camera and screen ---------------------------------------------------------------------------
+
+
+def holding(messages: list[dict]) -> str:
+    """The scripted model on what the camera shows it."""
+    images = images_of(messages)
+    color = color_of(images[-1]) if images else None
+    return f"You are holding something {color}, it looks like a mug." if color else "I cannot see it, sorry."
+
+
+def on_screen(messages: list[dict]) -> str:
+    images = images_of(messages)
+    color = color_of(images[-1]) if images else None
+    return f"There is a {color} window in the middle of your screen." if color else "I cannot see it, sorry."
+
+
+LOOK_RULES = [Rule(r"\b(holding|look)", tool=("look", lambda m: {}), after_tool=holding)]
+SCREEN_RULES = [Rule(r"\bscreen\b", tool=("capture_screen", lambda m: {}), after_tool=on_screen)]
+
+
+def seen_by(model: str, color: str, name: str = "vision") -> Check:
+    """The turn's image went to this model alone, showing the color; the
+    vision model is offered no tools, and no request was refused."""
+    def fn(result, view):
+        requests = view.requests()
+        refused = [r for r in requests if r.status]
+        if refused:
+            return f"a request was refused: {refused[0].status} {refused[0].error}"
+        shown = [r for r in requests if r.images]
+        if not shown:
+            return "no request showed the model an image"
+        wrong = sorted({r.model for r in shown if r.model != model})
+        if wrong:
+            return f"the image went to {', '.join(wrong)}"
+        if model == VISION_MODEL and any(r.tools for r in shown):
+            return "the vision model was offered tools"
+        seen = color_of(shown[-1].images[-1])
+        return None if seen == color else f"the image shows {seen or 'nothing known'}, not {color}"
+    return Check(name, fn)
+
+
+def nothing_shown(name: str = "vision") -> Check:
+    """No model was shown the image, and the model was told it could not be."""
+    def fn(result, view):
+        requests = view.requests()
+        if any(r.images for r in requests):
+            return f"a request showed {requests[-1].model} an image"
+        refused = [r for r in requests if r.status]
+        if refused:
+            return f"a request was refused: {refused[0].status} {refused[0].error}"
+        told = [t for r in requests for t in r.tool_messages() if "cannot be shown" in t]
+        return None if told else "the model was not told the image cannot be shown"
+    return Check(name, fn)
+
+
+def looked(count: int = 1, name: str = "camera") -> Check:
+    """The camera was opened this many times in the turn and let go each
+    time, and Iris showed it was looking."""
+    def fn(result, view):
+        captures = view.camera.between(view.running.since, view.end) if view.camera else []
+        if len(captures) != count:
+            return f"the camera was used {len(captures)} times, expected {count}"
+        if not all(capture.released for capture in captures):
+            return "the camera was not let go"
+        return None if c.windows(view, "looking") else "never looking"
+    return Check(name, fn)
+
+
+def captured_screen(name: str = "screen") -> Check:
+    """The screen was captured in the turn, and Iris showed it."""
+    def fn(result, view):
+        captures = view.screen.captures if view.screen else []
+        if not [x for x in captures if view.running.since <= x.start <= view.end]:
+            return "the screen was not captured"
+        return None if c.windows(view, "capturing_screen") else "never capturing the screen"
+    return Check(name, fn)
+
+
+VISION = [
+    Conversation(
+        "what am I holding",
+        [
+            # The camera's frame goes to the model that sees, which answers
+            Turn(["What am I holding?"], tools_used=["look"], reply_mentions=["red"], check_with_stub=True,
+                 checks=[seen_by(VISION_MODEL, "red"), looked()]),
+            # Looking again takes a fresh frame
+            Turn(["Look again, please. What is it?"], tools_used=["look"], reply_mentions=["red"],
+                 check_with_stub=True, checks=[seen_by(VISION_MODEL, "red"), looked()]),
+            # A question that needs no eyes is answered without the camera
+            Turn(["Thanks. What is the capital of France?"], tools_used=[], reply_mentions=["Paris"],
+                 check_with_stub=True),
+        ],
+        tools={"camera": True},
+        camera={"color": "red"},
+        stub_rules=LOOK_RULES,
+        stub_options={"vision": True},
+        needs=("stub",),
+        tags=["vision", "camera"],
+    ),
+    Conversation(
+        "a model that sees answers its own camera image",
+        [Turn(["What am I holding?"], tools_used=["look"], reply_mentions=["green"], check_with_stub=True,
+              checks=[seen_by(MODEL, "green"), looked()])],
+        tools={"camera": True},
+        camera={"color": "green"},
+        stub_rules=LOOK_RULES,
+        stub_options={"vision": True, "capabilities": ["completion", "tools", "vision"]},
+        needs=("stub",),
+        tags=["vision", "camera"],
+    ),
+    Conversation(
+        "the camera without a model that can see",
+        [
+            # The image is left out, the model says it cannot see, and the
+            # app says why
+            Turn(["What am I holding?"], tools_used=["look"], reply_mentions=["cannot see"],
+                 check_with_stub=True, error_mentions=["can see images"], checks=[nothing_shown(), looked()]),
+            Turn(["Never mind. What is the capital of France?"], tools_used=[], reply_mentions=["Paris"],
+                 check_with_stub=True),
+        ],
+        tools={"camera": True},
+        stub_rules=LOOK_RULES,
+        needs=("stub",),
+        tags=["vision", "camera"],
+    ),
+    Conversation(
+        "what is on my screen",
+        [Turn(["What is on my screen right now?"], tools_used=["capture_screen"], reply_mentions=["blue"],
+              check_with_stub=True, checks=[seen_by(VISION_MODEL, "blue"), captured_screen()])],
+        tools={"screen": True},
+        screen={"color": "blue"},
+        stub_rules=SCREEN_RULES,
+        stub_options={"vision": True},
+        needs=("stub",),
+        tags=["vision", "screen"],
+    ),
+    Conversation(
+        "a screen Iris may not record",
+        # macOS gives such an app a black capture: the model cannot see it,
+        # and on a Mac the user is told where to allow it
+        [Turn(["What is on my screen right now?"], tools_used=["capture_screen"], reply_mentions=["cannot see"],
+              check_with_stub=True, error_mentions=["Screen Recording"] if sys.platform == "darwin" else [],
+              checks=[captured_screen()])],
+        tools={"screen": True},
+        screen={"black": True},
+        stub_rules=SCREEN_RULES,
+        stub_options={"vision": True},
+        needs=("stub",),
+        tags=["vision", "screen", "permission"],
     ),
 ]
 
@@ -2798,6 +3006,7 @@ GROUPS = {
     "conversation": CONVERSATION,
     "performance": PERFORMANCE,
     "model": MODEL_TROUBLE,
+    "vision": VISION,
     # Long runs (pytest -m voice_slow): Whisper's sizes, a session of 60 turns
     "slow": whisper_cells() + [session_of_60()],
     # The real web (pytest -m voice_network, IRIS_VOICETEST_WEB=real)
@@ -2805,7 +3014,7 @@ GROUPS = {
 }
 # The groups held by default (pytest -m voice)
 DEFAULT_GROUPS = ("basic", "search", "turn-taking", "interruptions", "hearing", "conversation", "performance",
-                  "model")
+                  "model", "vision")
 
 
 def group(*names: str) -> list[Conversation]:

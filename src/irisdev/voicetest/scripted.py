@@ -791,7 +791,7 @@ class ScriptedConversations:
 
     def _expects_reply(self, running: Running) -> bool:
         expectation = running.turn.expectation
-        if running.merged_into_next or expectation in ("silent", "silenced", "sleep"):
+        if running.merged_into_next or expectation in ("silent", "silenced", "sleep", "unanswered"):
             return False
         if expectation == "wake":
             return len(words(running.result.said)) > 2
@@ -962,6 +962,14 @@ class ScriptedConversations:
             if expectation in ("silent", "sleep") or (expectation == "wake" and not self._expects_reply(running)):
                 time.sleep(max(0.0, running.ref_end + NO_REPLY_WATCH - time.monotonic()))
                 wait_until(lambda: finished(assistant), self._timeout)
+            elif expectation == "unanswered":
+                # Over once the turn was heard and what went wrong was shown
+                def told() -> bool:
+                    users = log.since(running.ref_end, "chat.user")
+                    return bool(users) and bool(log.since(users[-1][0], "error")) and finished(assistant)
+
+                if not wait_until(told, self._timeout):
+                    running.result.fail("complete", f"no error within {self._timeout:.0f} s")
             elif expectation == "silenced" or running.merged_into_next:
                 wait_until(lambda: finished(assistant), self._timeout)
             elif turn.presses_stop:
@@ -1044,6 +1052,12 @@ class ScriptedConversations:
         elif name == "turn_detection":
             self._touched.setdefault("turn_detection", ("turn_detection", "smart_turn"))
             assistant.configure("turn_detection", args[0])
+        elif name == "model":
+            self._touched.setdefault("model", ("model", getattr(assistant, "options", {}).get("llm_model")))
+            assistant.configure("model", args[0])
+        elif name == "stub" and self.stub is not None:
+            before = self._configure_stub(args[0])
+            self._saved["stub"] = {**before, **self._saved.get("stub", {})}
         else:
             owner.result.fail("action", f"no action called {name!r}")
 
@@ -1223,6 +1237,13 @@ class ScriptedConversations:
         elif expectation == "silent":
             if result.heard or result.spoke:
                 fail("silent", f"answered something not addressed to it (heard: {result.heard!r})")
+        elif expectation == "unanswered":
+            # Heard, but no reply could be had: what went wrong is shown
+            # (error_mentions) and nothing is said
+            if not result.heard:
+                fail("heard", "did not hear the turn")
+            if result.spoke:
+                fail("spoke", "spoke a reply it could not have")
         elif expectation == "sleep":
             if not log.since(start, "sleep", end):
                 fail("sleep", "did not fall asleep")
