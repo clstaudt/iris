@@ -57,10 +57,28 @@ def ollama_client(host: Optional[str] = None, **kwargs):
     return ollama.Client(host=host, **{"timeout": MODEL_TIMEOUT, **kwargs})
 
 
-def failure_message(error: Exception, host: Optional[str]) -> str:
+def model_missing(error: Exception) -> bool:
+    """Whether the server said it has no such model: it was removed after it
+    was chosen, or never there. Ollama answers 404 "model '...' not found",
+    OpenAI-compatible servers 404 "The model ... does not exist"."""
+    return (
+        isinstance(error, ollama.ResponseError)
+        and error.status_code == 404
+        and "model" in str(error.error).lower()
+    )
+
+
+def failure_message(error: Exception, host: Optional[str], model: Optional[str] = None) -> str:
     """What the user is told when the model could not answer. A server out
-    of reach, or one that stopped answering, is said to be so in words that
-    fit any kind of server; other errors are passed on as they are."""
+    of reach, one that stopped answering or ran into a problem of its own,
+    and a model it does not have are said to be so in words that fit any
+    kind of server; other errors are passed on as they are.
+
+    Args:
+        error: What the request raised
+        host: The server, as kept
+        model: The model asked, which the server may not have
+    """
     server = f"The model server at {effective_host(host)}"
     if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError)):
         return f"{server} cannot be reached."
@@ -70,6 +88,19 @@ def failure_message(error: Exception, host: Optional[str]) -> str:
         return f"{server} did not answer in time."
     if isinstance(error, (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)):
         return f"The connection to the model server at {effective_host(host)} was lost."
+    if isinstance(error, ollama.ResponseError):
+        # Ollama's client adds the status code to the message, -1 for an
+        # error the server streamed once the reply had begun
+        reason = str(error.error).strip() or "it gave no reason"
+        if model_missing(error):
+            named = f"The model {model}" if model else "The model"
+            return (
+                f"{named} is not on the server at {effective_host(host)}. "
+                "Choose another one in Settings."
+            )
+        if error.status_code >= 500 or error.status_code == -1:
+            return f"{server} ran into a problem: {reason}"
+        return f"The language model could not answer: {reason}"
     return f"The language model could not answer: {error}"
 
 
@@ -227,6 +258,8 @@ class ConversationManager:
         # server it began on, and cancel() cuts that one off, also after a
         # switch to another server
         self._streaming = None
+        # The model last asked for a reply, which an error may be about
+        self.asked: Optional[str] = None
         self.memory = memory
         # Recalled topics stay in context for a few turns: {topic_id: turns left}
         self.pinned: dict[int, int] = {}
@@ -712,6 +745,7 @@ class ConversationManager:
     def _ask(self, model: str, messages: list, **extra):
         """Ask the model for a streamed reply to these messages, on the
         server the reply began on."""
+        self.asked = model
         return (self._streaming or self._reply_client()).chat(
             model=model, messages=system_first(messages), stream=True, **extra
         )

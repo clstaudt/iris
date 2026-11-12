@@ -19,7 +19,13 @@ from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus
-from iris.llm import ConversationManager, effective_host, failure_message, split_speech
+from iris.llm import (
+    ConversationManager,
+    effective_host,
+    failure_message,
+    model_missing,
+    split_speech,
+)
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.plugin import Plugin, PluginContext
@@ -1025,9 +1031,14 @@ class VoiceAssistant:
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = False
 
-            error_msg = failure_message(e, self.conversation.host)
+            conversation = self.conversation
+            error_msg = failure_message(e, conversation.host, getattr(conversation, "asked", None))
             if self.event_bus:
-                self.event_bus.emit("error", {"message": error_msg})
+                event = {"message": error_msg}
+                if model_missing(e):
+                    # Retracted by the app once another model is chosen
+                    event["kind"] = "model_missing"
+                self.event_bus.emit("error", event)
             logger.exception("Reply failed")
             return error_msg
 
