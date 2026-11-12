@@ -117,9 +117,9 @@ PAUSED_END = re.compile(r"[.!?…:;,。！？、，：；।॥][\"'”’)\]」
 EMOJI = re.compile(
     "["
     "\U0001f000-\U0001faff"  # pictographs, emoticons, transport, flags, skin tones
-    "☀-➿"  # miscellaneous symbols and dingbats
-    "⬀-⯿"  # arrows, stars and squares
-    "Ⓜ️‍⃣"
+    "\u2600-\u27bf"  # miscellaneous symbols and dingbats
+    "\u2b00-\u2bff"  # arrows, stars and squares
+    "\u24c2\ufe0f\u200d\u20e3"  # circled M, emoji presentation, joiner, keycap
     "]+"
 )
 # Where streamed text may be cut for speech: after a sentence or at a line.

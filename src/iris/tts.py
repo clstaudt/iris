@@ -314,7 +314,7 @@ class KokoroGenerator(SpeechEngine):
 
 # Characters that stand alone, as Japanese and Chinese (and Korean) put no
 # spaces between words
-STANDS_ALONE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]")
+STANDS_ALONE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
 
 
 def heard_part(text: str, fraction: float) -> str:
