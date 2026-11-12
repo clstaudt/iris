@@ -852,11 +852,18 @@ class IrisStore {
     this.activeSetup = id;
     this.saveSetups();
     const config = this.config;
+    let onItsServer = true;
     if ((target.ollama_host ?? "") !== (config?.ollama_host ?? "")) {
       // With the setup's model, not the one last used on that server
-      await this.setOllamaHost(target.ollama_host ?? "", target.llm_model);
+      const error = await this.setOllamaHost(target.ollama_host ?? "", target.llm_model);
+      if (error) {
+        // The server in use stays, and so does its model: the setup's model
+        // is one of the other server's
+        onItsServer = false;
+        this.messages.push({ role: "error", text: error, streaming: false });
+      }
     }
-    if (target.llm_model && target.llm_model !== this.config?.llm_model) {
+    if (onItsServer && target.llm_model && target.llm_model !== this.config?.llm_model) {
       await this.setModel(target.llm_model);
     }
     if (target.stt_model_path && target.stt_model_path !== config?.stt_model_path) {
