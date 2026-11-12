@@ -10,7 +10,7 @@ from faster_whisper.vad import get_vad_model
 
 from iris import audio as audio_module
 from iris.audio import AudioRecorder
-from iris.turns import FRAME, HOLD_BACKOFF, PRE_SPEECH, SAMPLE_RATE, SpeechDetector, TurnTracker
+from iris.turns import FRAME, PRE_SPEECH, SAMPLE_RATE, SpeechDetector, TurnTracker
 
 FRAME_SECONDS = FRAME / SAMPLE_RATE
 
@@ -372,15 +372,15 @@ class TestOverTheVoice:
             monkeypatch, recording, answered_after=frames(5.0), cancelling=cancelling
         )
         assert path is None
-        holds = 2 if cancelling else 1
-        assert (voice.holds, voice.releases, spoke) == (holds, holds, [])
-        if cancelling:
-            assert voice.held_in[1] - voice.released_in[0] < frames(0.5)
+        # The first burst holds the voice; after a hold for echo the second
+        # is too short to hold it again, and ends while the voice speaks on
+        assert (voice.holds, voice.releases, spoke) == (1, 1, [])
 
-    def test_echo_held_again_soon_holds_the_voice_less_often(self, monkeypatch):
+    def test_echo_holds_the_voice_once_in_a_reply(self, monkeypatch):
         # A canceller that takes out some of the voice, not enough: bursts of
-        # its echo every 1.2 s. The second hold that heard only echo within
-        # HOLD_AGAIN starts the back-off, whatever the canceller says
+        # its echo every 1.2 s. Each hold stops and restarts the voice, so
+        # after the first that heard only echo, bursts like these no longer
+        # hold it: the voice goes on without stuttering
         burst = np.full(SAMPLE_RATE * 3 // 10, 0.8)
         gap = np.zeros(SAMPLE_RATE * 9 // 10)
         recording = np.concatenate([np.zeros(SAMPLE_RATE)] + [burst, gap] * 5 + [np.zeros(SAMPLE_RATE * 2)])
@@ -388,9 +388,34 @@ class TestOverTheVoice:
             monkeypatch, recording, answered_after=frames(8.0), cancelling=True
         )
         assert path is None and spoke == []
-        assert voice.holds == voice.releases
-        assert voice.holds < 5
-        assert voice.held_in[2] - voice.released_in[1] >= frames(HOLD_BACKOFF)
+        assert (voice.holds, voice.releases) == (1, 1)
+
+    def test_after_two_holds_for_echo_the_voice_is_not_held_again(self, monkeypatch):
+        # Echo that stops once the voice is held: a short burst holds it,
+        # then stretches just past the longer speech a hold takes after echo.
+        # The first stretch holds it a second time; after that, the voice
+        # goes on to its end
+        burst = np.full(SAMPLE_RATE * 3 // 10, 0.8)
+        stretch = np.full(SAMPLE_RATE * 11 // 10, 0.8)
+        gap = np.zeros(SAMPLE_RATE)
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), burst, gap, stretch, gap, stretch, gap, stretch, np.zeros(SAMPLE_RATE * 2)]
+        )
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(10.0), cancelling=True)
+        assert spoke == [] and path is None
+        assert (voice.holds, voice.releases) == (2, 2)
+
+    def test_after_a_hold_for_echo_a_user_who_speaks_on_still_stops_the_voice(self, monkeypatch):
+        # An echo burst holds the voice and is let go; then the user talks
+        # over the voice, on and on: that holds it again and is their turn
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.8), np.zeros(SAMPLE_RATE),
+             np.full(SAMPLE_RATE * 3, 0.3), np.zeros(SAMPLE_RATE * 4)]
+        )
+        path, voice, spoke = self._listen(monkeypatch, recording, cancelling=True)
+        assert path is not None
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (2, 1, [True])
 
     def test_echo_kept_while_the_voice_may_not_be_held_is_judged_when_it_ends(self, monkeypatch):
         # An echo burst starts the back-off; a second one comes during it, and

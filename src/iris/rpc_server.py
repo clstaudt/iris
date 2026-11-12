@@ -14,12 +14,15 @@ Usage::
 """
 
 import json
+import logging
 import os
 import queue
 import signal
 import sys
 import threading
 import traceback
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from iris.controller import AssistantController
 from iris.events import EventBus
@@ -140,6 +143,26 @@ def serve(read_line, methods: dict, write_frame, immediate=IMMEDIATE, concurrent
     thread.join(timeout=5)
 
 
+def log_the_voice():
+    """Keep what the voice did over speech (each hold, what it was judged to
+    be, where the voice went on) in ~/.iris/voice.log, to tell why a voice
+    stuttered in a real room. IRIS_VOICE_LOG names another file; empty, it
+    keeps none."""
+    path = os.environ.get("IRIS_VOICE_LOG", str(Path.home() / ".iris" / "voice.log"))
+    if not path:
+        return
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=1, encoding="utf-8")
+    except OSError:
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    log = logging.getLogger("iris.voice")
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+
+
 def main():
     # Stdout purity: RPC frames get a private copy of the real stdout, and
     # file descriptor 1 is pointed at stderr. That catches native libraries
@@ -148,6 +171,7 @@ def main():
     rpc_out = os.fdopen(os.dup(1), "w", encoding="utf-8")
     os.dup2(2, 1)
     sys.stdout = sys.stderr
+    log_the_voice()
 
     bus = EventBus()
     controller = AssistantController(bus)
