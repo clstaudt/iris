@@ -56,8 +56,10 @@ pythonpath = ["src"]
 markers = [
     "integration: tests requiring external services (ollama, kokoro, whisper)",
     "voice: conversations with Iris in a virtual room (speech models, minutes)",
+    "voice_slow: Whisper's sizes and a session of 60 turns (speech models, an hour)",
+    "voice_network: web search over the real network (IRIS_VOICETEST_WEB=real)",
 ]
-addopts = "-m 'not integration and not voice'"
+addopts = "-m 'not integration and not voice and not voice_slow and not voice_network'"
 
 [tool.ruff]
 line-length = 100
