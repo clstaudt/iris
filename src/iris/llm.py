@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from iris.attachments import Attachment, recorded_text
 from iris.llm_client import MODEL_TIMEOUT, READ_TIMEOUT, OpenAIClient, is_openai, normalize_host
 from iris.llm_client import effective_host as effective_host  # imported from here by callers
+from iris.markup import MarkupFilter, TypedCall, strip_markup
 from iris.memory import LIVE_TOKENS, PIN_TURNS, PINNED_TOKENS, MemoryKeeper, estimate_tokens
 from iris.personas import Persona, get_persona
 
@@ -23,6 +24,10 @@ warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
 # Rounds of tool calls one reply may take, e.g. a search, then reading a page
 MAX_TOOL_ROUNDS = 3
+# Told the model when a round has to answer without tools: the last one, and
+# one asked again after a reply that was nothing but a call it cannot make
+NO_MORE_TOOLS_NOTE = "Answer the user now from what you have. No more tools can be used."
+NO_TOOLS_NOTE = "No tools can be used now. Answer the user in words."
 
 
 def ollama_client(host: Optional[str] = None, **kwargs):
@@ -53,63 +58,6 @@ def failure_message(error: Exception, host: Optional[str]) -> str:
     if isinstance(error, (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)):
         return f"The connection to the model server at {effective_host(host)} was lost."
     return f"The language model could not answer: {error}"
-
-
-# Markup some models write into a reply that is never meant to be spoken:
-# their reasoning, and tool calls typed out as text instead of made
-UNSPOKEN_TAGS = ("think", "tool_call")
-
-
-class UnspokenFilter:
-    """Drops <think>...</think> and <tool_call>...</tool_call> from streamed
-    text. A tag can be split across chunks, so text that might start one is
-    held back until the next chunk shows whether it does."""
-
-    def __init__(self):
-        self.held = ""
-        self.closing = None  # the closing tag being waited for
-
-    def feed(self, text: str) -> str:
-        self.held += text
-        out = []
-        while self.held:
-            if self.closing:
-                end = self.held.find(self.closing)
-                if end < 0:
-                    # Keep only what could be the start of the closing tag
-                    self.held = self.held[-(len(self.closing) - 1) :]
-                    break
-                self.held = self.held[end + len(self.closing) :]
-                self.closing = None
-                continue
-            start = self.held.find("<")
-            if start < 0:
-                out.append(self.held)
-                self.held = ""
-                break
-            out.append(self.held[:start])
-            self.held = self.held[start:]
-            tag = next((t for t in UNSPOKEN_TAGS if self.held.startswith(f"<{t}>")), None)
-            if tag:
-                self.held = self.held[len(tag) + 2 :]
-                self.closing = f"</{tag}>"
-            elif any(f"<{t}>".startswith(self.held) for t in UNSPOKEN_TAGS):
-                break  # may still become a tag
-            else:
-                out.append("<")
-                self.held = self.held[1:]
-        return "".join(out)
-
-    def flush(self) -> str:
-        """Text held back at the end; an unclosed tag is dropped."""
-        rest = "" if self.closing else self.held
-        self.held, self.closing = "", None
-        return rest
-
-
-def strip_unspoken(text: str) -> str:
-    unspoken = UnspokenFilter()
-    return (unspoken.feed(text) + unspoken.flush()).strip()
 
 
 # A bullet or numbered list marker at the start of a line
@@ -540,7 +488,7 @@ class ConversationManager:
         """Keep the exchange: in memory when there is one, else in history."""
         # Only what was said: a tool call typed out as text, left in the
         # history, would be imitated in later replies
-        answer = strip_unspoken(answer)
+        answer = strip_markup(answer)
         if self.memory is not None and self.amnesia:
             self.unremembered.append({"role": "user", "content": prompt})
             self.unremembered.append({"role": "assistant", "content": answer})
@@ -672,18 +620,13 @@ class ConversationManager:
 
         Yields:
             Chunks of response text, without reasoning or tool calls a model
-            wrote out as text
+            wrote out as text (see iris.markup)
         """
         self.reply = None
         self._cancelled.clear()
-        unspoken = UnspokenFilter()
-        for chunk in self._reply_stream(
+        yield from self._reply_stream(
             prompt, response_language, on_tool_use, source, attachments or []
-        ):
-            if text := unspoken.feed(chunk):
-                yield text
-        if rest := unspoken.flush():
-            yield rest
+        )
         if keep:
             self._record(recorded_text(prompt, attachments or []), self.reply, source)
 
@@ -777,139 +720,117 @@ class ConversationManager:
         messages.append(user_message)
 
         # A model chosen for its sight may not take tools
-        use_tools = self.tools and self.tools.has_tools()
+        use_tools = bool(self.tools and self.tools.has_tools())
         if use_tools and model != self.model:
             use_tools = "tools" in (self._capabilities(model) or set())
+        schemas = self.tools.get_schemas() if use_tools else None
 
-        # If tools available, let LLM decide if it needs them
-        if use_tools:
-            stream = self._ask(model, messages, tools=self.tools.get_schemas())
-
-            # The reply streams as it comes, so the voice can start before
-            # the model has finished; text before a tool call ("Let me look
-            # that up") is said while the tool runs
-            full_response = []
-            tool_calls = None
-
+        # The reply streams as it comes, so the voice can start before the
+        # model has finished; text before a tool call ("Let me look that
+        # up") is said while the tool runs. Each round may end in tool
+        # calls, whose results the next round answers.
+        spoken: list[str] = []
+        rounds = 0
+        response_model = model
+        asked_for_words = False
+        while True:
+            if self._cancelled.is_set():
+                return
+            stream = self._ask(response_model, messages, **({"tools": schemas} if schemas else {}))
+            markup = MarkupFilter()
+            said, tool_calls = [], None
             for chunk in stream:
                 message_chunk = chunk.get("message", {})
-                chunk_text = message_chunk.get("content") or ""
-                if chunk_text:
-                    full_response.append(chunk_text)
-                    yield chunk_text
-
-                # Check for tool calls - they might appear in any chunk, not just the last
+                if text := markup.feed(message_chunk.get("content") or ""):
+                    said.append(text)
+                    yield text
+                # Tool calls may come in any chunk, not just the last
                 if message_chunk.get("tool_calls"):
                     tool_calls = message_chunk["tool_calls"]
+            if text := markup.flush():
+                said.append(text)
+                yield text
+            spoken += said
 
-            # If LLM wants to use tools, execute them and get new response
-            if tool_calls:
-                spoken = list(full_response)
-                rounds = 0
-                while tool_calls:
-                    rounds += 1
-                    # Build message with tool call
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": "".join(full_response),
-                            "tool_calls": tool_calls,
-                        }
-                    )
+            # A call written out as text is run as if made, when it is
+            # unambiguous; otherwise it is only left unsaid. A reply that
+            # was nothing but such a call is asked for again, in words.
+            if not tool_calls and markup.calls:
+                tool_calls = self._typed_calls(markup.calls, schemas)
+                if not tool_calls and not "".join(said).strip() and not asked_for_words:
+                    asked_for_words = True
+                    schemas = None
+                    messages.append({"role": "system", "content": NO_TOOLS_NOTE})
+                    continue
+            if not tool_calls:
+                break
 
-                    # A tool that returned an image is answered by the vision model
-                    uses_vision = False
-                    for tool_call in tool_calls:
-                        tool_name = tool_call["function"]["name"]
-                        tool_args = tool_call["function"].get("arguments", {})
+            rounds += 1
+            messages.append(
+                {"role": "assistant", "content": "".join(said), "tool_calls": tool_calls}
+            )
+            uses_vision = self._run_tools(tool_calls, messages, on_tool_use)
+            if uses_vision is None:
+                return  # cancelled
+            # A tool that returned an image is answered by the vision model
+            response_model = self.vision_model if (uses_vision and self.vision_model) else model
 
-                        if self._cancelled.is_set():
-                            return
-                        if on_tool_use:
-                            on_tool_use(tool_name, tool_args)
+            # Tools stay on offer, so a search can be followed by reading
+            # a page: without them a model writes its next call out as
+            # text. A separate vision model, and the last round, answer
+            # without tools.
+            offer_tools = rounds < MAX_TOOL_ROUNDS and response_model == model
+            schemas = self.tools.get_schemas() if offer_tools else None
+            if not offer_tools:
+                messages.append({"role": "system", "content": NO_MORE_TOOLS_NOTE})
 
-                        # Execute the tool (it shows its activity meanwhile)
-                        result = self.tools.execute(tool_name, **tool_args)
-                        if result.get("success") and result.get("pin_topic") is not None:
-                            self.pinned[result["pin_topic"]] = PIN_TURNS
+        answer = "".join(spoken)
+        # Without tools, kept in the conversation history as cleaned text
+        self.reply = answer if use_tools else self.clean_markdown(answer)
 
-                        # Format tool response for LLM
-                        tool_msg = {"role": "tool", "content": ""}
+    @staticmethod
+    def _typed_calls(calls: list[TypedCall], schemas: Optional[list]) -> Optional[list]:
+        """Calls written out as text that can be run as if made: of a tool
+        offered with the request, with arguments that parse."""
+        offered = {schema["function"]["name"] for schema in schemas or []}
+        runnable = [c for c in calls if c.name in offered and c.arguments is not None]
+        for call in calls:
+            if call not in runnable:
+                logger.info("Left out a tool call written as text: %r", call)
+        if not runnable:
+            return None
+        return [{"function": {"name": c.name, "arguments": c.arguments}} for c in runnable]
 
-                        # Check if tool execution failed
-                        if not result.get("success"):
-                            # Tool failed - tell LLM about the error
-                            tool_msg["content"] = (
-                                f"Error: {result.get('message', 'Tool execution failed')}"
-                            )
-                            messages.append(tool_msg)
-                            continue
+    def _run_tools(self, tool_calls: list, messages: list, on_tool_use) -> Optional[bool]:
+        """Run a round's tool calls, adding their results to the messages.
+        Returns whether one returned an image, or None if the reply was
+        cancelled before all had run."""
+        uses_vision = False
+        for tool_call in tool_calls:
+            tool_name = tool_call["function"]["name"]
+            tool_args = tool_call["function"].get("arguments", {})
 
-                        # If tool returned an image, include it
-                        if result.get("image"):
-                            uses_vision = True
-                            tool_msg["images"] = [result["image"]]
-                            tool_msg["content"] = result.get("message", "Image captured")
-                        elif result.get("result"):
-                            tool_msg["content"] = str(result["result"])
-                        else:
-                            tool_msg["content"] = result.get("message", "Tool executed")
+            if self._cancelled.is_set():
+                return None
+            if on_tool_use:
+                on_tool_use(tool_name, tool_args)
 
-                        messages.append(tool_msg)
+            # Execute the tool (it shows its activity meanwhile)
+            result = self.tools.execute(tool_name, **tool_args)
+            if result.get("success") and result.get("pin_topic") is not None:
+                self.pinned[result["pin_topic"]] = PIN_TURNS
 
-                    # Choose model: use vision model if vision was used, otherwise primary model
-                    response_model = (
-                        self.vision_model if (uses_vision and self.vision_model) else model
-                    )
-
-                    # Tools stay on offer, so a search can be followed by reading
-                    # a page: without them a model writes its next call out as
-                    # text, which would be shown and spoken. A separate vision
-                    # model, and the last round, answer without tools.
-                    offer_tools = rounds < MAX_TOOL_ROUNDS and response_model == model
-                    extra = {"tools": self.tools.get_schemas()} if offer_tools else {}
-                    if not offer_tools:
-                        messages.append(
-                            {
-                                "role": "system",
-                                "content": "Answer the user now from what you have. "
-                                "No more tools can be used.",
-                            }
-                        )
-                    if self._cancelled.is_set():
-                        return
-                    stream = self._ask(response_model, messages, **extra)
-
-                    # Stream the answer as it comes; a round may end in more
-                    # tool calls instead
-                    full_response, tool_calls = [], None
-                    for chunk in stream:
-                        message_chunk = chunk.get("message", {})
-                        chunk_text = message_chunk.get("content") or ""
-                        if chunk_text:
-                            full_response.append(chunk_text)
-                            spoken.append(chunk_text)
-                            yield chunk_text
-                        if message_chunk.get("tool_calls"):
-                            tool_calls = message_chunk["tool_calls"]
-
-                # Store in history
-                answer = "".join(spoken)
-                self.reply = answer
-                return
+            # A failed tool's error goes to the model; an image is shown to it
+            tool_msg = {"role": "tool", "content": ""}
+            if not result.get("success"):
+                tool_msg["content"] = f"Error: {result.get('message', 'Tool execution failed')}"
+            elif result.get("image"):
+                uses_vision = True
+                tool_msg["images"] = [result["image"]]
+                tool_msg["content"] = result.get("message", "Image captured")
+            elif result.get("result"):
+                tool_msg["content"] = str(result["result"])
             else:
-                answer = "".join(full_response)
-                self.reply = answer
-                return
-
-        # No tools - standard streaming
-        stream = self._ask(model, messages)
-
-        full_response = []
-        for chunk in stream:
-            chunk_text = chunk["message"]["content"]
-            full_response.append(chunk_text)
-            yield chunk_text
-
-        # Kept in the conversation history as cleaned text
-        self.reply = self.clean_markdown("".join(full_response))
+                tool_msg["content"] = result.get("message", "Tool executed")
+            messages.append(tool_msg)
+        return uses_vision

@@ -666,11 +666,18 @@ def listening_after(seconds: float = 2.0, name: str = "listening") -> Check:
     return fn
 
 
+# What tool markup written as text leaves in a reply (see iris.markup)
+MARKUP = ("<tool_call", "</tool_call", "<function", "</function", "<|", "[TOOL_CALLS]", "arguments")
+
+
 def no_markup(name: str = "markup") -> Check:
+    """No tool markup in the reply, as shown while it streams in or once
+    complete."""
     @check(name)
     def fn(result, view):
-        texts = [d.get("text", "") for _, d in dones(view)]
-        bad = [t[:80] for t in texts if "<tool_call>" in t or "arguments" in t]
+        streamed = "".join(d.get("text", "") for _, _, d in view.events("chat.chunk"))
+        texts = [d.get("text", "") for _, d in dones(view)] + [streamed]
+        bad = [t[:80] for t in texts if any(mark in t for mark in MARKUP)]
         return f"tool markup in the reply: {bad}" if bad else None
     return fn
 

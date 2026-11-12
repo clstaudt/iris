@@ -17,7 +17,9 @@ offered, when the tool call and the first byte went out, and whether the
 client hung up before the reply was complete.
 
 A rule can also stand for a model server in trouble: one that stalls part
-way through a reply (stall_after), as a network that drops out does.
+way through a reply (stall_after), as a network that drops out does, or a
+small model that writes its tool call into the reply as text (as_text),
+streamed in pieces that split the markup (chunk).
 """
 
 import json
@@ -188,6 +190,11 @@ class Rule:
     # Words of the reply sent before it stalls: nothing more comes, and the
     # connection is held open until the client gives up
     stall_after: Optional[int] = None
+    # The call written into the reply as text, instead of made:
+    # callable(call) -> the reply
+    as_text: Optional[Callable[[Call], str]] = None
+    # Characters per streamed piece of the reply, instead of a word each
+    chunk: Optional[int] = None
 
     def matches(self, messages: list[dict]) -> bool:
         if callable(self.match):
@@ -208,6 +215,7 @@ class Answer:
     call: Optional[Call] = None
     first_token: Optional[float] = None
     stall_after: Optional[int] = None
+    chunk: Optional[int] = None
 
 
 # The record of a request -------------------------------------------------------
@@ -452,6 +460,9 @@ class StubModel:
                 return Answer(rule.no_tools or SHORT, first_token=rule.first_token)
             return Answer(out, first_token=rule.first_token)
         if rule.tool:
+            if rule.tool[0] in offered and rule.as_text is not None:
+                return Answer(rule.as_text(rule.call(messages)), first_token=rule.first_token,
+                              chunk=rule.chunk)
             if rule.tool[0] in offered:
                 return Answer(call=rule.call(messages), first_token=rule.first_token)
             return Answer(rule.no_tools if rule.no_tools is not None else SHORT, first_token=rule.first_token)
@@ -459,7 +470,8 @@ class StubModel:
             text = rule.reply(messages) if callable(rule.reply) else rule.reply
         else:
             text = reply_to(messages)
-        return Answer(text, first_token=rule.first_token, stall_after=rule.stall_after)
+        return Answer(text, first_token=rule.first_token, stall_after=rule.stall_after,
+                      chunk=rule.chunk)
 
     def _record(self, body: dict) -> StubRequest:
         messages = body.get("messages") or []
@@ -569,7 +581,10 @@ class StubModel:
     def _stream(self, handler, answer: Answer, record: StubRequest):
         """The reply streamed word by word, as Ollama streams it."""
         text = answer.call.lead_in if answer.call else answer.text
-        pieces = re.findall(r"\s*\S+|\s+$", text)
+        if answer.chunk:
+            pieces = [text[i : i + answer.chunk] for i in range(0, len(text), answer.chunk)]
+        else:
+            pieces = re.findall(r"\s*\S+|\s+$", text)
         handler.send_response(200)
         handler.send_header("Content-Type", "application/x-ndjson")
         handler.send_header("Transfer-Encoding", "chunked")

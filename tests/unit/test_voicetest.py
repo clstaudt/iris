@@ -407,6 +407,16 @@ class TestStubRules:
         stub.set_rules([Rule("search", tool=search())])
         assert stub.answer([{"role": "user", "content": "Search the web"}], []).text == SHORT
 
+    def test_a_call_can_be_written_as_text_in_small_pieces(self, stub):
+        stub.set_rules([Rule("search", tool=search("comet"), lead_in="Wait.", chunk=4,
+                             as_text=lambda call: f"{call.lead_in} <{call.name}>{call.arguments['query']}")])
+        client = ollama.Client(host=stub.url)
+        stream = client.chat(model=MODEL, messages=[{"role": "user", "content": "Search it"}],
+                             tools=[{"type": "function", "function": {"name": "search"}}], stream=True)
+        chunks = list(stream)
+        assert [c.message.content for c in chunks if c.message.content] == ["Wait", ". <s", "earc", "h>co", "met"]
+        assert not any(c.message.tool_calls for c in chunks)
+
     def test_notes_are_left_out_of_what_rules_match(self, stub):
         message = {"role": "user", "content": "(Note: The user is speaking in Chinese (Mandarin). Respond in "
                                               "Chinese (Mandarin).)\n\nyes please"}

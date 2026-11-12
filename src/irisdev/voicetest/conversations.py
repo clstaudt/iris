@@ -13,8 +13,10 @@ model server in trouble), and "slow" and "network" for the long runs and
 the real web.
 """
 
+import json
 import re
 
+from iris.llm import NO_TOOLS_NOTE
 from iris.llm_client import READ_TIMEOUT
 from irisdev.voicetest import checks as c
 from irisdev.voicetest.fakeweb import Each
@@ -1526,6 +1528,12 @@ FAILING_SEARCH = [
 # Web search off, on and off again; tool markup written as text ----------------------------------
 
 MARS = "Search the web for today's news about the Mars mission."
+
+
+def told_no_tools(messages: list[dict]) -> bool:
+    """Iris asked again, for an answer in words (iris.llm.NO_TOOLS_NOTE, in
+    a message of its own at the end)."""
+    return bool(messages) and NO_TOOLS_NOTE in (messages[-1].get("content") or "")
 MARKUP = '<tool_call>{"name": "search", "arguments": {"query": "Mars mission news"}}</tool_call>'
 
 
@@ -1558,10 +1566,12 @@ WEB_SWITCH = [
     ),
     Conversation(
         "tool markup written as text",
-        [Turn([MARS], spoken_excludes=["<tool_call>", "arguments"], checks=[c.no_markup()])],
-        stub_rules=[Rule("search", tool=search(), no_tools=MARKUP)],
-        # UnspokenFilter leaves the reply empty, and nothing is spoken
-        expected_failures=["T1:*"],
+        # Search is off: the call cannot be made, so it is left unsaid, and
+        # Iris asks again for an answer in words
+        [Turn([MARS], spoken_excludes=["<tool_call>", "arguments"], tools_used=[],
+              reply_mentions=["cannot search"], check_with_stub=True, checks=[c.no_markup()])],
+        stub_rules=[Rule(told_no_tools, "I cannot search the web right now."),
+                    Rule("search", tool=search(), no_tools=MARKUP)],
         needs=("stub",),
         tags=["search", "switch"],
     ),
@@ -2659,6 +2669,31 @@ def gave_up_on_the_stall(name: str = "gave_up") -> Check:
     return Check(name, fn)
 
 
+def tool_call_tag(call: Call) -> str:
+    """A call as some small models write it: in <tool_call> tags."""
+    written = json.dumps({"name": call.name, "arguments": call.arguments})
+    return f"{call.lead_in} <tool_call>{written}</tool_call>"
+
+
+def json_call(call: Call) -> str:
+    """A call written as a bare JSON object, the whole reply."""
+    return json.dumps({"name": call.name, "parameters": call.arguments})
+
+
+def token_call(call: Call) -> str:
+    """A call after a special token, the arguments first."""
+    return "<|tool_call|>" + json.dumps([{"arguments": call.arguments, "name": call.name}])
+
+
+# A tool not on offer, called at the end of a reply, the closing tag doubled
+GOOD_NIGHT = "Good night! Sleep well.\n\n<function=end_conversation>\n</function>\n</tool_call>"
+SKY_RESULTS = {
+    "comet": "Comet news: the comet is brightest on Friday night, low in the west.",
+    "meteor": "Meteor shower news: the shower peaks on the twelfth, after midnight.",
+    "eclipse": "Eclipse news: the next total eclipse crosses Spain in August.",
+}
+
+
 MODEL_TROUBLE = [
     Conversation(
         "a model server that stops answering",
@@ -2673,6 +2708,38 @@ MODEL_TROUBLE = [
         reply_timeout=READ_TIMEOUT + 60,
         needs=("stub",),
         tags=["model", "timeout"],
+    ),
+    Conversation(
+        "tool calls written as text",
+        [
+            # Each call is run as if made: what is said before it is said,
+            # and none of the markup, which streams in three characters at
+            # a time, is shown or spoken
+            Turn(["Search the web for news about the comet."], tools_used=["search"],
+                 search_mentions=["comet"], reply_mentions=["Friday"], check_with_stub=True,
+                 spoken_excludes=["tool call", "arguments", "query"], checks=[c.no_markup()]),
+            Turn(["And the meteor shower?"], tools_used=["search"], search_mentions=["meteor"],
+                 reply_mentions=["twelfth"], check_with_stub=True,
+                 spoken_excludes=["parameters", "query"], checks=[c.no_markup()]),
+            Turn(["When is the next eclipse?"], tools_used=["search"], search_mentions=["eclipse"],
+                 reply_mentions=["August"], check_with_stub=True,
+                 spoken_excludes=["tool call", "arguments"], checks=[c.no_markup()]),
+            # A call of a tool that is not on offer is only left unsaid
+            Turn(["Thanks, that is all for tonight."], tools_used=[], reply_mentions=["Sleep well"],
+                 check_with_stub=True, spoken_excludes=["function", "end conversation", "tool call"],
+                 checks=[c.no_markup()]),
+        ],
+        tools={"web": True},
+        web={"results": SKY_RESULTS, "delay": 0.5},
+        stub_rules=[
+            Rule("comet", tool=search(lambda m: "comet news"), lead_in="Let me look that up.",
+                 as_text=tool_call_tag, chunk=3),
+            Rule("meteor", tool=search(lambda m: "meteor shower news"), as_text=json_call, chunk=3),
+            Rule("eclipse", tool=search(lambda m: "eclipse news"), as_text=token_call, chunk=3),
+            Rule("all for tonight", GOOD_NIGHT, chunk=3),
+        ],
+        needs=("stub",),
+        tags=["model", "markup"],
     ),
 ]
 
