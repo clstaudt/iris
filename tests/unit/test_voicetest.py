@@ -4,6 +4,7 @@ self-talk are held and measured. Nothing here loads a speech model."""
 
 import http.client
 import json
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 
 from iris.events import EventBus
 from iris.llm import ConversationManager
+from iris.memory import MemoryStore
 from iris.plugins import web
 from iris.status import StatusManager
 from iris.tools import Tools
@@ -40,7 +42,7 @@ from irisdev.voicetest.acoustics import (
 from irisdev.voicetest.assistant import IrisUnderTest, Log, unwatch_verdicts, watch_verdicts
 from irisdev.voicetest.conversations import DEFAULT_GROUPS, GROUPS, all_conversations, group
 from irisdev.voicetest.fakeweb import Each, FakeWeb, as_results, latest_match, match_query
-from irisdev.voicetest.script import EXPECTATIONS, At, Check, Conversation, Say, Silence, Turn
+from irisdev.voicetest.script import EXPECTATIONS, At, Check, Conversation, Restart, Say, Silence, Turn
 from irisdev.voicetest.scripted import (
     BUDGETS,
     CHIMES,
@@ -889,8 +891,10 @@ class TestScript:
         assert len({c.name for c in conversations}) == len(conversations)
         assert set(DEFAULT_GROUPS) <= set(GROUPS) and group("basic")[0].name == "a question and a follow-up"
         for conversation in conversations:
-            turns = [t for t in conversation.turns if isinstance(t, (Turn, Silence))]
+            turns = [t for t in conversation.turns if isinstance(t, (Turn, Silence, Restart))]
             assert turns == conversation.turns, conversation.name
+            for topic in conversation.memory_topics:
+                assert conversation.memory and {"title", "gist", "summary"} <= set(topic), conversation.name
             for entry in conversation.expected_failures:
                 number, colon, name = entry.partition(":")
                 if colon:
@@ -1001,6 +1005,30 @@ def test_settings_wait_for_the_config_that_shows_them():
         iris.configure("volume", 3)
 
 
+def test_memory_starts_iris_again_with_a_memory_of_its_own(monkeypatch, tmp_path):
+    """The app runs Iris with memory; the voice test, without it unless a
+    conversation asks for it, and then in a new memory each time."""
+    monkeypatch.setenv("IRIS_MEMORY_DB", str(tmp_path / "memory.db"))
+    iris = object.__new__(IrisUnderTest)
+    iris.log, iris.home, iris.options, iris._memories = Log(), tmp_path, {"memory": False}, 0
+    iris.controller = None
+    started = []
+
+    def restart():
+        started.append((iris.options["memory"], os.environ["IRIS_MEMORY_DB"]))
+        iris.log("config", {"memory": iris.options["memory"]})
+
+    iris.restart = restart
+    assert iris.configure("memory", True) and iris.configure("memory", False) and iris.configure("memory", True)
+    assert started == [(True, str(tmp_path / "memory-1.db")), (False, str(tmp_path / "memory-1.db")),
+                       (True, str(tmp_path / "memory-2.db"))]
+
+    store = MemoryStore(":memory:")
+    iris.controller = SimpleNamespace(assistant=SimpleNamespace(memory=SimpleNamespace(store=store)))
+    iris.seed_memory([{"title": "Nazaré", "gist": "a lighthouse", "summary": "A red lighthouse."}])
+    assert [t.title for t in store.topics()] == ["Nazaré"] and store.recent_turns() == []
+
+
 # Holding conversations, with a stand-in assistant ---------------------------------------------
 
 
@@ -1033,6 +1061,8 @@ class StandIn:
         self.think, self.reply = think, reply
         # An error to report with each reply
         self.error = None
+        # What a recognizer hears the voice say
+        self.heard_back = ""
         self.persona = "iris"
         self.settings = []
         self._history = []
@@ -1105,6 +1135,21 @@ class StandIn:
 
     def voice_queued(self):
         return False
+
+    def restart(self):
+        """Quit and start again; the conversation is shown again, as Iris
+        shows it from its memory."""
+        self.log("state", {"state": "idle"})
+        for message in self._history:
+            if message["role"] == "user":
+                self.log("chat.user", {"text": message["content"], "source": "voice"})
+            else:
+                self.log("chat.done", {"text": message["content"], "interrupted": False})
+        self.log("state", {"state": "listening"})
+
+    def transcribe(self, path):
+        """What a recognizer hears its voice say: heard_back, when set."""
+        return self.heard_back, "en"
 
 
 @pytest.fixture
@@ -1213,6 +1258,46 @@ class TestHolding:
         [quiet] = runner.hold(Conversation("none", [Turn(["four"], at=At.finished(0.2),
                                                          error_mentions=["stopped"])]))
         assert quiet.failed == ["error"]
+
+    def test_a_restart_between_turns_shows_the_conversation_again(self, held):
+        runner, fake, space = held
+        results = runner.hold(Conversation("restart", [
+            Turn(["hello there"], at=At.finished(0.2)),
+            Restart(restores=["hello there", "Reply to hello there"]),
+            Turn(["and again"], at=At.finished(0.2)),
+            Restart(restores=["banana"]),
+        ]))
+        first, restart, third, missing = results
+        assert first.passed and third.passed, (first.failures, third.failures)
+        assert restart.passed and restart.said == "(restart)"
+        assert restart.users == [(restart.users[0][0], "voice", "hello there")]
+        assert [text for _, text, _ in restart.replies] == ["Reply to hello there"]
+        # What was shown again is no turn of the user's
+        assert third.heard == "and again" and third.users == [(third.users[0][0], "voice", "and again")]
+        assert missing.failed == ["restored"]
+        assert len(fake.log.since(0, "action.restart")) == 2
+        stand_in = SimpleNamespace(**{k: getattr(fake, k) for k in ("log", "endpoint")})
+        elsewhere = ScriptedConversations(stand_in, space, FakeVoice(), report=lambda line: None)
+        [skipped] = elsewhere.hold(Conversation("no restart", [Restart()]))
+        assert skipped.skipped == "the assistant cannot be restarted"
+
+    def test_the_voice_reads_what_it_is_given_and_the_turn_is_judged_on_its_words(self, held):
+        runner, fake, space = held
+        [result] = runner.hold(Conversation("reading", [
+            Turn(["一二三"], reading=["ichi ni san shi go roku"], at=At.finished(0.2))]))
+        assert result.passed, result.failures
+        said = space.utterances[0]
+        assert said.text == "一二三" and said.speech_end - said.speech_start == pytest.approx(0.9, abs=0.05)
+
+    def test_what_the_voice_is_heard_saying_is_compared_with_the_reply(self, held):
+        runner, fake, space = held
+        fake.heard_back = "Reply to hello"
+        [heard] = runner.hold(Conversation("heard", [Turn(["hello"], at=At.finished(0.2), spoken_share=0.9)]))
+        assert heard.passed, heard.failures
+        assert heard.spoken == "Reply to hello"
+        fake.heard_back = "Chinese letter, Chinese letter"
+        [garbled] = runner.hold(Conversation("garbled", [Turn(["hello"], at=At.finished(0.2), spoken_share=0.9)]))
+        assert garbled.failed == ["spoken_share"]
 
     def test_a_turn_not_called_for_is_skipped(self, held):
         runner, fake, space = held

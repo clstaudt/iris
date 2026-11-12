@@ -10,6 +10,7 @@ same interface.
 """
 
 import copy
+import os
 import threading
 import time
 from collections import defaultdict
@@ -186,6 +187,8 @@ class IrisUnderTest:
             "audio": endpoint,
         }
         self.start_timeout = start_timeout
+        # Memories it was started with (set_memory)
+        self._memories = 0
         self.controller: Optional[AssistantController] = None
         # The Whisper size it started with
         self.default_stt = ""
@@ -218,9 +221,19 @@ class IrisUnderTest:
 
     def restart(self):
         """A new Iris on the same endpoint and log: nothing of the last one's
-        conversation, echo canceller or loaded voice carries over."""
+        conversation, echo canceller or loaded voice carries over, except
+        what it keeps in its memory."""
         self.close()
         self.start()
+
+    def set_memory(self, on: bool):
+        """Start Iris again with long-term memory on, as the app runs it, in
+        a memory of its own (a new one each time), or off."""
+        if on:
+            self._memories += 1
+            os.environ["IRIS_MEMORY_DB"] = str(self.home / f"memory-{self._memories}.db")
+        self.options["memory"] = on
+        self.restart()
 
     def _count_model_rounds(self):
         """Log each request to the model as "model.ask" {round}, to count the
@@ -269,7 +282,18 @@ class IrisUnderTest:
         self.controller.send_text(text)
 
     def clear_conversation(self):
+        """A new conversation: nothing said before, and in English again."""
         self.assistant.conversation.conversation_history.clear()
+        self.assistant.conversation_language = "en"
+        self.assistant.conversation.language = "en"
+
+    def seed_memory(self, topics: list[dict]):
+        """Topics remembered from earlier conversations ({title, gist,
+        summary}), as filing leaves them: listed in the memory index, their
+        turns long out of the recent conversation."""
+        store = self.assistant.memory.store
+        for topic in topics:
+            store.create_topic(topic["title"], topic["gist"], topic["summary"])
 
     def speaking(self) -> bool:
         """Whether it is still speaking its reply (optional for an assistant
@@ -315,7 +339,8 @@ class IrisUnderTest:
         """Change a setting as the app does, and wait for the "config" event
         that shows it. Settings: "tool" (id, on), "persona", "turn_detection",
         "stt_model", "wake_word", "wake_options" {window, sleep_word}, "mic"
-        and "model". Returns whether it showed in time."""
+        and "memory" (which starts Iris again). Returns whether it showed in
+        time."""
         since = time.monotonic()
         answer, shows = self._change(name, value)
         if not answer.get("ok", False):
@@ -327,6 +352,9 @@ class IrisUnderTest:
         """Change a setting: the controller's answer, and a test of whether
         a config shows the change."""
         controller = self.controller
+        if name == "memory":
+            self.set_memory(bool(value))
+            return {"ok": True}, lambda config: config.get("memory") == bool(value)
         if name == "tool":
             plugin, on = value
 
