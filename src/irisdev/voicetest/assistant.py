@@ -301,9 +301,12 @@ class IrisUnderTest:
             generating = pipeline.is_generating_flag.is_set() and pipeline._generating_epoch == pipeline._epoch
         return generating or not pipeline.text_queue.empty() or not pipeline.audio_queue.empty()
 
-    def refresh_context(self):
-        """Read the model's context length again (the scripted model's changed)."""
+    def refresh_model(self):
+        """Read what the model is again (the scripted model's changed): its
+        context length and capabilities, forgetting tools it refused."""
         conversation = self.assistant.conversation
+        conversation._capability_cache.clear()
+        conversation._no_tools.clear()
         conversation.max_context_tokens = conversation._get_model_context_length()
 
     def configure(self, name: str, value, wait: float = CONFIG_WAIT) -> bool:

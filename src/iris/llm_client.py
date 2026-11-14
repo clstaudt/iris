@@ -25,6 +25,25 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 API_KEY_ENV = "IRIS_LLM_API_KEY"
 # How long resolve_host waits for a server to say what it is
 PROBE_TIMEOUT = 5.0
+# How long a request to the model waits for the server. Without a limit, a
+# network that stalls mid-reply leaves Iris thinking until Stop is pressed.
+#
+# Connecting: on a working network a server, local or remote, accepts a
+# connection within a second, and TCP sends a lost first packet again after
+# 1 and 3 more seconds. 10 seconds rides out a few lost packets; a server
+# that has not answered by then is out of reach (the system itself would
+# wait more than a minute to say so).
+CONNECT_TIMEOUT = 10.0
+# Reading, the longest the server may send nothing, before the first chunk
+# or between two. A healthy server's longest silence comes before the first
+# chunk: Ollama loads the model (tens of seconds for a large one read from
+# disk) and reads the whole prompt (seconds to tens of seconds for a few
+# thousand tokens on a large model) before it streams anything. After that
+# chunks come several times a second, a reasoning model's included, as its
+# reasoning is streamed too. A minute covers a large model started cold,
+# with room to spare; a server silent for longer has stopped answering.
+READ_TIMEOUT = 60.0
+MODEL_TIMEOUT = httpx.Timeout(READ_TIMEOUT, connect=CONNECT_TIMEOUT)
 # Fields OpenAI-compatible servers use for a model's context length in /models
 CONTEXT_KEYS = ("context_length", "max_model_len", "max_context_length", "context_window")
 # Paths of single calls that people copy along with a server URL
@@ -213,15 +232,16 @@ class OpenAIClient:
     def __init__(
         self,
         host: str,
-        timeout: Optional[float] = None,
+        timeout=MODEL_TIMEOUT,
         transport: Optional[httpx.BaseTransport] = None,
         **kwargs,
     ):
         """
         Args:
             host: The server's OpenAI base URL, ending in /v1
-            timeout: Seconds to wait for the server; None waits as long as
-                a reply takes, as ollama.Client does
+            timeout: Seconds (or an httpx.Timeout) to wait for the server:
+                to connect, and for each chunk of a reply; None waits for
+                ever
             transport: How requests are sent (tests answer them themselves)
         """
         self.base = normalize_host(host)

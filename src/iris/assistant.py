@@ -19,7 +19,7 @@ from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus
-from iris.llm import ConversationManager, effective_host, split_speech
+from iris.llm import ConversationManager, effective_host, failure_message, split_speech
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.plugin import Plugin, PluginContext
@@ -926,6 +926,14 @@ class VoiceAssistant:
                 if self.event_bus:
                     self.event_bus.emit("chat.done", {"text": answer, "interrupted": interrupted})
 
+            except Exception:
+                # The reply broke off (the server stopped answering, say):
+                # what came of it stays shown, as a reply cut short
+                if full_response and self.event_bus:
+                    self.event_bus.emit(
+                        "chat.done", {"text": "".join(full_response), "interrupted": True}
+                    )
+                raise
             finally:
                 # Clear thinking status if still set
                 with self.status_manager.status_lock:
@@ -950,7 +958,7 @@ class VoiceAssistant:
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = False
 
-            error_msg = f"The language model could not answer: {e}"
+            error_msg = failure_message(e, self.conversation.host)
             if self.event_bus:
                 self.event_bus.emit("error", {"message": error_msg})
             logger.exception("Reply failed")

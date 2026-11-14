@@ -294,7 +294,7 @@ class FakeOllama:
     calls: list = []
     delay = 0.0
 
-    def __init__(self, host=None):
+    def __init__(self, host=None, **kwargs):
         self._client = FakeHttp()
 
     def chat(self, model, messages, format, options, stream, think=None):

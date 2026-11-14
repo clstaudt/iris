@@ -8,12 +8,16 @@ tools it used, and that it answered or stayed silent (see script.py).
 
 CONVERSATIONS are the everyday ones. GROUPS holds them all by name, one
 group per thing tested: "search" (web search), "turn-taking",
-"interruptions", "hearing", "conversation", "performance", and "slow" and
-"network" for the long runs and the real web.
+"interruptions", "hearing", "conversation", "performance", "model" (a
+model server in trouble), and "slow" and "network" for the long runs and
+the real web.
 """
 
+import json
 import re
 
+from iris.llm import NO_TOOLS_NOTE
+from iris.llm_client import READ_TIMEOUT
 from irisdev.voicetest import checks as c
 from irisdev.voicetest.fakeweb import Each
 from irisdev.voicetest.script import (
@@ -1524,6 +1528,12 @@ FAILING_SEARCH = [
 # Web search off, on and off again; tool markup written as text ----------------------------------
 
 MARS = "Search the web for today's news about the Mars mission."
+
+
+def told_no_tools(messages: list[dict]) -> bool:
+    """Iris asked again, for an answer in words (iris.llm.NO_TOOLS_NOTE, in
+    a message of its own at the end)."""
+    return bool(messages) and NO_TOOLS_NOTE in (messages[-1].get("content") or "")
 MARKUP = '<tool_call>{"name": "search", "arguments": {"query": "Mars mission news"}}</tool_call>'
 
 
@@ -1556,10 +1566,12 @@ WEB_SWITCH = [
     ),
     Conversation(
         "tool markup written as text",
-        [Turn([MARS], spoken_excludes=["<tool_call>", "arguments"], checks=[c.no_markup()])],
-        stub_rules=[Rule("search", tool=search(), no_tools=MARKUP)],
-        # UnspokenFilter leaves the reply empty, and nothing is spoken
-        expected_failures=["T1:*"],
+        # Search is off: the call cannot be made, so it is left unsaid, and
+        # Iris asks again for an answer in words
+        [Turn([MARS], spoken_excludes=["<tool_call>", "arguments"], tools_used=[],
+              reply_mentions=["cannot search"], check_with_stub=True, checks=[c.no_markup()])],
+        stub_rules=[Rule(told_no_tools, "I cannot search the web right now."),
+                    Rule("search", tool=search(), no_tools=MARKUP)],
         needs=("stub",),
         tags=["search", "switch"],
     ),
@@ -2635,6 +2647,142 @@ def session_of_60() -> Conversation:
 PERFORMANCE = SLOW_MODEL + LONG_CONTEXT
 
 
+# A model server in trouble ------------------------------------------------------------------
+
+# What a reply that stalls sends: a sentence for the voice, and a word more
+STALLED = "The bicycle was invented in the early nineteenth century. And"
+
+
+def gave_up_on_the_stall(name: str = "gave_up") -> Check:
+    """The reply stalled, and Iris hung up once nothing had come for the
+    read timeout: not sooner, and not much later."""
+    def fn(result, view):
+        stalled = [r for r in view.requests() if r.stalled]
+        if not stalled:
+            return "the reply never stalled"
+        if stalled[0].closed is None:
+            return "Iris did not give up on the reply"
+        waited = stalled[0].closed - stalled[0].stalled
+        if not READ_TIMEOUT - 1 <= waited <= READ_TIMEOUT + 5:
+            return f"Iris gave up {waited:.1f} s after the reply stalled"
+        return None
+    return Check(name, fn)
+
+
+def tool_call_tag(call: Call) -> str:
+    """A call as some small models write it: in <tool_call> tags."""
+    written = json.dumps({"name": call.name, "arguments": call.arguments})
+    return f"{call.lead_in} <tool_call>{written}</tool_call>"
+
+
+def json_call(call: Call) -> str:
+    """A call written as a bare JSON object, the whole reply."""
+    return json.dumps({"name": call.name, "parameters": call.arguments})
+
+
+def token_call(call: Call) -> str:
+    """A call after a special token, the arguments first."""
+    return "<|tool_call|>" + json.dumps([{"arguments": call.arguments, "name": call.name}])
+
+
+# A tool not on offer, called at the end of a reply, the closing tag doubled
+GOOD_NIGHT = "Good night! Sleep well.\n\n<function=end_conversation>\n</function>\n</tool_call>"
+SKY_RESULTS = {
+    "comet": "Comet news: the comet is brightest on Friday night, low in the west.",
+    "meteor": "Meteor shower news: the shower peaks on the twelfth, after midnight.",
+    "eclipse": "Eclipse news: the next total eclipse crosses Spain in August.",
+}
+
+
+def refused_then_asked_without(name: str = "asked_without_tools") -> Check:
+    """The turn's first request offered tools and was refused; the next
+    offered none, and its system prompt says nothing of them."""
+    def fn(result, view):
+        requests = view.requests()
+        if len(requests) < 2:
+            return f"{len(requests)} requests"
+        first, second = requests[:2]
+        if not first.refused:
+            return "the first request was not refused"
+        if second.tools or "'search' function" in second.system:
+            return "the request made again still offers tools"
+        return None
+    return Check(name, fn)
+
+
+MODEL_TROUBLE = [
+    Conversation(
+        "a model server that stops answering",
+        [
+            # The first sentence is said; then nothing comes, and the turn
+            # ends with an error that says so
+            Turn(["Tell me about the history of the bicycle."], error_mentions=["stopped answering"],
+                 checks=[gave_up_on_the_stall()]),
+            Turn(["What is the capital of France?"], reply_mentions=["Paris"], check_with_stub=True),
+        ],
+        stub_rules=[Rule("bicycle", f"{STALLED} then came the pedals.", stall_after=len(STALLED.split()))],
+        reply_timeout=READ_TIMEOUT + 60,
+        needs=("stub",),
+        tags=["model", "timeout"],
+    ),
+    Conversation(
+        "tool calls written as text",
+        [
+            # Each call is run as if made: what is said before it is said,
+            # and none of the markup, which streams in three characters at
+            # a time, is shown or spoken
+            Turn(["Search the web for news about the comet."], tools_used=["search"],
+                 search_mentions=["comet"], reply_mentions=["Friday"], check_with_stub=True,
+                 spoken_excludes=["tool call", "arguments", "query"], checks=[c.no_markup()]),
+            Turn(["And the meteor shower?"], tools_used=["search"], search_mentions=["meteor"],
+                 reply_mentions=["twelfth"], check_with_stub=True,
+                 spoken_excludes=["parameters", "query"], checks=[c.no_markup()]),
+            Turn(["When is the next eclipse?"], tools_used=["search"], search_mentions=["eclipse"],
+                 reply_mentions=["August"], check_with_stub=True,
+                 spoken_excludes=["tool call", "arguments"], checks=[c.no_markup()]),
+            # A call of a tool that is not on offer is only left unsaid
+            Turn(["Thanks, that is all for tonight."], tools_used=[], reply_mentions=["Sleep well"],
+                 check_with_stub=True, spoken_excludes=["function", "end conversation", "tool call"],
+                 checks=[c.no_markup()]),
+        ],
+        tools={"web": True},
+        web={"results": SKY_RESULTS, "delay": 0.5},
+        stub_rules=[
+            Rule("comet", tool=search(lambda m: "comet news"), lead_in="Let me look that up.",
+                 as_text=tool_call_tag, chunk=3),
+            Rule("meteor", tool=search(lambda m: "meteor shower news"), as_text=json_call, chunk=3),
+            Rule("eclipse", tool=search(lambda m: "eclipse news"), as_text=token_call, chunk=3),
+            Rule("all for tonight", GOOD_NIGHT, chunk=3),
+        ],
+        needs=("stub",),
+        tags=["model", "markup"],
+    ),
+    Conversation(
+        "a model without tool support",
+        [
+            # Refused with tools, the request is made again without them
+            Turn(["What is the capital of France?"], model_requests=2, checks=[refused_then_asked_without()]),
+            # ...and from then on the model is not offered any
+            Turn(["Search the web for news about the comet."], model_requests=1, tools_used=[],
+                 reply_mentions=["cannot search"], check_with_stub=True, checks=[c.no_tool_offer()]),
+        ],
+        tools={"web": True},
+        stub_rules=[Rule("comet", tool=search(), no_tools="I cannot search the web.")],
+        stub_options={"refuse_tools": True},
+        needs=("stub",),
+        tags=["model", "tools"],
+    ),
+    Conversation(
+        "a model that says it has no tool support",
+        [Turn(["What is the capital of France?"], model_requests=1, checks=[c.no_tool_offer()])],
+        tools={"web": True},
+        stub_options={"refuse_tools": True, "capabilities": ["completion"]},
+        needs=("stub",),
+        tags=["model", "tools"],
+    ),
+]
+
+
 # The groups --------------------------------------------------------------------------------
 
 TURN_TAKING = ([answering_at_once(shift) for shift in (0.0, 0.3, 0.6)] + [SPRINGFIELD] + GOING_ON + ONE_BREATH
@@ -2649,13 +2797,15 @@ GROUPS = {
     "hearing": HEARING,
     "conversation": CONVERSATION,
     "performance": PERFORMANCE,
+    "model": MODEL_TROUBLE,
     # Long runs (pytest -m voice_slow): Whisper's sizes, a session of 60 turns
     "slow": whisper_cells() + [session_of_60()],
     # The real web (pytest -m voice_network, IRIS_VOICETEST_WEB=real)
     "network": NETWORK,
 }
 # The groups held by default (pytest -m voice)
-DEFAULT_GROUPS = ("basic", "search", "turn-taking", "interruptions", "hearing", "conversation", "performance")
+DEFAULT_GROUPS = ("basic", "search", "turn-taking", "interruptions", "hearing", "conversation", "performance",
+                  "model")
 
 
 def group(*names: str) -> list[Conversation]:

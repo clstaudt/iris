@@ -8,6 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+import httpx
 import numpy as np
 import ollama
 import pytest
@@ -252,6 +253,39 @@ class TestStubModel:
         assert reply_to([{"role": "user", "content": "Explain it in detail"}]) == LONG
         assert reply_to([{"role": "system", "content": "story"}, {"role": "user", "content": "Hi"}]) == SHORT
 
+    def test_a_model_without_tool_support_refuses_them_as_ollama_does(self):
+        stub = StubModel(first_token=0.0, per_word=0.0, refuse_tools=True, capabilities=["completion"])
+        try:
+            client = ollama.Client(host=stub.url)
+            assert client.show(MODEL).capabilities == ["completion"]
+            schema = {"type": "function", "function": {"name": "search"}}
+            with pytest.raises(ollama.ResponseError) as refused:
+                list(client.chat(model=MODEL, messages=[{"role": "user", "content": "Hi"}],
+                                 tools=[schema], stream=True))
+            assert refused.value.status_code == 400 and "does not support tools" in refused.value.error
+            assert stub.requests[-1].refused
+            reply = client.chat(model=MODEL, messages=[{"role": "user", "content": "Hi"}], stream=True)
+            assert "".join(c.message.content for c in reply) == SHORT
+        finally:
+            stub.close()
+
+    def test_a_reply_can_stall_until_the_client_gives_up(self):
+        stub = StubModel(rules=[Rule("stall", "One two three four.", stall_after=2)],
+                         first_token=0.0, per_word=0.0)
+        try:
+            client = ollama.Client(host=stub.url, timeout=0.3)
+            said = []
+            with pytest.raises(httpx.ReadTimeout):
+                for chunk in client.chat(model=MODEL, messages=[{"role": "user", "content": "stall"}],
+                                         stream=True):
+                    said.append(chunk.message.content)
+            assert "".join(said) == "One two"
+            record = stub.requests[-1]
+            assert record.stalled is not None and record.finished is None
+            assert under_test.wait_until(lambda: record.closed is not None, 2)
+        finally:
+            stub.close()
+
     def test_a_reply_cut_off_does_not_break_the_server(self):
         stub = StubModel(first_token=0.0, per_word=0.05)
         try:
@@ -388,6 +422,16 @@ class TestStubRules:
         assert stub.answer([{"role": "user", "content": "Search the web"}], []).text == "<tool_call>{}</tool_call>"
         stub.set_rules([Rule("search", tool=search())])
         assert stub.answer([{"role": "user", "content": "Search the web"}], []).text == SHORT
+
+    def test_a_call_can_be_written_as_text_in_small_pieces(self, stub):
+        stub.set_rules([Rule("search", tool=search("comet"), lead_in="Wait.", chunk=4,
+                             as_text=lambda call: f"{call.lead_in} <{call.name}>{call.arguments['query']}")])
+        client = ollama.Client(host=stub.url)
+        stream = client.chat(model=MODEL, messages=[{"role": "user", "content": "Search it"}],
+                             tools=[{"type": "function", "function": {"name": "search"}}], stream=True)
+        chunks = list(stream)
+        assert [c.message.content for c in chunks if c.message.content] == ["Wait", ". <s", "earc", "h>co", "met"]
+        assert not any(c.message.tool_calls for c in chunks)
 
     def test_notes_are_left_out_of_what_rules_match(self, stub):
         message = {"role": "user", "content": "(Note: The user is speaking in Chinese (Mandarin). Respond in "
@@ -913,6 +957,8 @@ class StandIn:
         self.endpoint = space.endpoint("fake")
         self.log = Log()
         self.think, self.reply = think, reply
+        # An error to report with each reply
+        self.error = None
         self.persona = "iris"
         self.settings = []
         self._history = []
@@ -944,6 +990,8 @@ class StandIn:
         # As Iris does, the reply is complete before it has been spoken
         reply = f"Reply to {text}"
         self.log("chat.done", {"text": reply, "interrupted": False})
+        if self.error:
+            self.log("error", {"message": self.error})
         while self.endpoint.speaker.playing():
             time.sleep(0.02)
         self._history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
@@ -1075,6 +1123,22 @@ class TestHolding:
                                                            during=[(At.reply_audible(0.3), Say(["hmm"]))])]))
         assert "aside" in result.failed
         assert result.asides and result.asides[0][1] == "hmm"
+
+    def test_an_error_fails_a_turn_unless_it_is_expected(self, held):
+        runner, fake, space = held
+        fake.error = "The model server stopped answering."
+        results = runner.hold(Conversation("errors", [
+            Turn(["one"], at=At.finished(0.2), error_mentions=["stopped answering"]),
+            Turn(["two"], at=At.finished(0.2)),
+            Turn(["three"], at=At.finished(0.2), error_mentions=["cannot be reached"]),
+        ]))
+        assert [r.failed for r in results] == [[], ["error"], ["error", "error"]]
+        assert results[2].failures == ["no error mentions any of ['cannot be reached']",
+                                       "error: The model server stopped answering."]
+        fake.error = None
+        [quiet] = runner.hold(Conversation("none", [Turn(["four"], at=At.finished(0.2),
+                                                         error_mentions=["stopped"])]))
+        assert quiet.failed == ["error"]
 
     def test_a_turn_not_called_for_is_skipped(self, held):
         runner, fake, space = held
