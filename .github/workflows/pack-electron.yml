@@ -79,11 +79,35 @@ jobs:
           gh release upload "$tag" "$f" --repo "$GITHUB_REPOSITORY" --clobber
         done
 
-    # Builds of main keep their disk image as an artifact for a few days, as
-    # do manual runs that ask for it; a full storage quota does not fail the
-    # build (a disk image is about 460 MB)
+    # Each build of main replaces the disk image of the rolling "latest"
+    # pre-release, whose tag moves to the commit built. Release files do not
+    # expire and do not count against Actions storage; it stays a
+    # pre-release, so a version's release remains the latest release
+    - name: Update the latest pre-release
+      if: github.ref == 'refs/heads/main'
+      working-directory: ui
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        git tag -f latest "$GITHUB_SHA"
+        git push -f origin refs/tags/latest
+        notes="The app built from main at ${GITHUB_SHA::7} ($(date -u +%Y-%m-%d)), signed ad hoc and not notarized."
+        if gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          gh release edit latest --repo "$GITHUB_REPOSITORY" --prerelease --latest=false --notes "$notes"
+        else
+          gh release create latest --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
+            --title "Iris (latest build of main)" --notes "$notes"
+        fi
+        # The disk image's name holds the version: earlier ones go
+        for asset in $(gh release view latest --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
+          gh release delete-asset latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
+        done
+        gh release upload latest release/*.dmg --repo "$GITHUB_REPOSITORY" --clobber
+
+    # A manual run on another branch can keep its disk image for three days;
+    # a full storage quota does not fail the build
     - uses: actions/upload-artifact@v7
-      if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.keep)
+      if: github.event_name == 'workflow_dispatch' && inputs.keep
       continue-on-error: true
       with:
         name: Iris-${{ github.sha }}-macos-arm64
