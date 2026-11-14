@@ -4,6 +4,7 @@ and deleted, a voice in use only once its personas have another. Hugging
 Face and the models are stand-ins: nothing is downloaded."""
 
 import base64
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -226,6 +227,21 @@ def test_a_voice_in_use_is_deleted_only_once_its_personas_have_another():
 
 def test_only_a_cloned_voice_is_deleted():
     assert AssistantController(EventBus()).voice_delete("anna")["ok"] is False
+
+
+def test_a_voice_deleted_is_logged_with_its_folder(caplog):
+    folder = made("Ada")
+    with caplog.at_level(logging.INFO, logger="iris.cloning"):
+        assert AssistantController(EventBus()).voice_delete("clone:ada")["ok"]
+    [said] = [r.getMessage() for r in caplog.records if "removing" in r.getMessage()]
+    assert "clone:ada" in said and str(folder) in said
+
+
+def test_a_cloned_voice_that_is_not_here_does_not_play():
+    result = AssistantController(EventBus()).persona_preview(
+        {"name": "Noam", "engine": "kyutai", "voice": "clone:noam-2"}
+    )
+    assert result == {"ok": False, "error": "The voice Noam 2 cannot be found"}
 
 
 # ---------------------------------------------------------------------------

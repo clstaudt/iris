@@ -306,7 +306,6 @@ def main():
             params.get("data", ""), params.get("name", "")
         ),
         "voice.clone": lambda params: controller.voice_clone(params),
-        "voice.forget": lambda params: controller.cloning.forget(params.get("voice", "")),
         # The Voices page: every voice, the cloned ones managed, and each
         # made ready for Iris's languages
         "voice.list": lambda params: controller.voice_list(),

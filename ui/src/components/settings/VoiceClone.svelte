@@ -14,10 +14,10 @@
   // with it (each language's cloning model downloaded first): the voice is
   // cloned once it is made for all of them. The voice made is one of the
   // engine's voices from then on, listed with the others; this offers to
-  // make one. In the voice library (keep), the voices made are kept, and a
-  // cloned voice cloned again is made again in place, keeping its name and
-  // its personas; for a persona, a voice made and not saved with it goes
-  // when the editor closes, and cloning again makes another.
+  // make one. Every voice made stays, saved with a persona or not, until it
+  // is deleted on the Voices page. There (keep), a cloned voice cloned
+  // again is made again in place, keeping its name and its personas; for a
+  // persona, cloning again makes another voice.
 
   let {
     draft,
@@ -62,8 +62,6 @@
   let level = $state(0);
   let seconds = $state(0);
   let picker = $state<HTMLInputElement | null>(null);
-  /** Voices made in this editor: the ones not kept go when it closes */
-  const made: string[] = [];
 
   const cloned = $derived(draft.voice.startsWith(PREFIX));
   const TITLES: Record<Step, string> = {
@@ -99,9 +97,6 @@
   onDestroy(() => {
     unsubscribe();
     if (step === "recording") rpc("voice.record", { on: false, keep: false }).catch(() => {});
-    // A voice made here and not saved with a persona goes; the core keeps
-    // one a persona speaks with
-    for (const voice of made) rpc("voice.forget", { voice }).catch(() => {});
   });
 
   // Cloning is Kyutai's: another engine closes it
@@ -213,7 +208,6 @@
       return;
     }
     const voice = result.voice.id;
-    if (!keep) made.push(voice);
     madeVoice = voice;
     making = result.jobs ?? [];
     if (!making.length) await finish();
@@ -231,12 +225,9 @@
     if (!voice) return;
     madeVoice = "";
     making = [];
-    // Cloned again before saving: the voice made before is not kept
-    const replaced = !keep && made.includes(draft.voice) && draft.voice !== voice ? draft.voice : null;
     await store.loadVoices();
     onchoose(voice);
     step = "closed";
-    if (replaced) rpc("voice.forget", { voice: replaced }).catch(() => {});
     const named = store.voices?.engines.kyutai?.find((v) => v.id === voice)?.name ?? "";
     await store.previewVoice({ ...$state.snapshot(draft), name: draft.name.trim() || named, voice });
   }
