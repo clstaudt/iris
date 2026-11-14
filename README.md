@@ -195,6 +195,8 @@ description: |
 
 Kyutai's Pocket TTS sounds the most natural and speaks English, French, German, Italian, Spanish, Portuguese and Dutch; replies in Hindi, Japanese or Chinese fall back to Kokoro. Kokoro speaks English, French, Italian, Spanish, Portuguese, Hindi, Japanese and Chinese; a Kokoro persona's replies in German or Dutch fall back to Pocket TTS. A persona speaks English in its own voice, and another language in its own voice when that voice was made for it, in a native voice otherwise. Each part of a reply is spoken in the language it is written in, told from its words, so an Italian answer to an English question is not read with an English accent. A Kyutai voice can also be the path to a short audio file of a voice to clone.
 
+A Kyutai persona can also speak in a voice cloned in the app: under the voices in the persona editor, Clone a voice records a text read aloud, or takes an audio file (WAV, MP3, M4A, FLAC). Kyutai hands out the model that clones only to a Hugging Face account that accepted its terms on [huggingface.co/kyutai/pocket-tts](https://huggingface.co/kyutai/pocket-tts); the editor links there and asks for an access token, which Hugging Face's own login keeps. A cloned voice is kept in `~/.iris/voices` and is the same voice in every language Pocket TTS speaks; each language's cloning model is fetched the first time the voice speaks it. Only clone a voice you have permission to use.
+
 ### Settings
 
 Settings (top right) open as a window of their own, in two pages. All choices are remembered between launches.
