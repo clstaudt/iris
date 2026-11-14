@@ -239,7 +239,10 @@
     </div>
 
     <section class="flex flex-col gap-3">
-      <h3 class="s-section">Voice</h3>
+      <div class="flex items-center justify-between gap-2">
+        <h3 class="s-section">Voice</h3>
+        <button class="manage" onclick={() => store.openSettings("voices")}>Manage voices</button>
+      </div>
       {#if engines.length > 1}
         <div class="s-seg self-start" role="radiogroup" aria-label="Speech engine">
           {#each engines as engine}
@@ -383,6 +386,14 @@
   .title:focus {
     border-color: var(--color-line-strong);
     background: var(--color-raised);
+  }
+  /* To the Voices page, where voices are managed */
+  .manage {
+    font-size: 11.5px;
+    color: var(--color-ink-3);
+  }
+  .manage:hover {
+    color: var(--color-ink);
   }
   .voices {
     display: grid;
