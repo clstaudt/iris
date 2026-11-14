@@ -219,7 +219,7 @@ KOKORO_ABROAD = {
     "nl": ("kyutai", "daan", "dutch"),
     "hi": ("kokoro", "hf_alpha", "hi"),
     "ja": ("kokoro", "jf_alpha", "ja"),
-    "zh": ("kokoro", "zf_xiaoni", "cmn"),
+    "zh": ("kokoro", "zf_xiaoxiao", "cmn"),
 }
 SPOKEN_WITH = {
     "computer": {"en": ("kokoro", "af_sarah", "en-us"), **KOKORO_ABROAD},
@@ -234,7 +234,7 @@ SPOKEN_WITH = {
         "nl": ("kyutai", "daan", "dutch"),
         "hi": ("kokoro", "hf_alpha", "hi"),
         "ja": ("kokoro", "jf_alpha", "ja"),
-        "zh": ("kokoro", "zf_xiaoni", "cmn"),
+        "zh": ("kokoro", "zf_xiaoxiao", "cmn"),
     },
 }
 # The language each code of the engines stands for

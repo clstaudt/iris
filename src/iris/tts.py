@@ -175,7 +175,8 @@ KOKORO_VOICES_URL = (
 # speaks English well, so a persona keeps its own voice in English; another
 # language is spoken by the persona's voice when it was made for it, by that
 # language's default voice otherwise. Kokoro has no German or Dutch voices:
-# those are left to Pocket TTS.
+# those are left to Pocket TTS. Of the Chinese voices, Whisper understands
+# nineteen words in twenty from zf_xiaoxiao, a third from zf_xiaoni.
 LANGUAGE_VOICE_MAP = {
     "en": {"code": "en-us", "default_voice": "af_bella", "voice_prefixes": "ab"},
     "fr": {"code": "fr-fr", "default_voice": "ff_siwis", "voice_prefixes": "f"},
@@ -184,7 +185,7 @@ LANGUAGE_VOICE_MAP = {
     "pt": {"code": "pt-br", "default_voice": "pf_dora", "voice_prefixes": "p"},
     "hi": {"code": "hi", "default_voice": "hf_alpha", "voice_prefixes": "h"},
     "ja": {"code": "ja", "default_voice": "jf_alpha", "voice_prefixes": "j"},
-    "zh": {"code": "cmn", "default_voice": "zf_xiaoni", "voice_prefixes": "z"},
+    "zh": {"code": "cmn", "default_voice": "zf_xiaoxiao", "voice_prefixes": "z"},
 }
 
 
