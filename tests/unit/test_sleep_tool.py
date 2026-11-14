@@ -134,7 +134,7 @@ def _assistant(*replies, wake_word="Iris", speak=True, plugins=(sleep.plugin,)):
     a.speech_pipeline = SpeechPipeline(InstantGenerator(), a.player)
     # The languages a typed message's language is told among, all spoken
     a.tts_generator = SimpleNamespace(
-        languages=lambda: frozenset({"en", "de", "fr", "it"}), speaks=lambda language: True
+        languages=lambda: frozenset({"en", "de", "fr", "it"}), speaks=lambda language: True, ready=lambda language: True
     )
     a.tools = Tools(list(plugins), a._plugin_context())
     with patch("iris.llm.ollama") as mock_ollama:

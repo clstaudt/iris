@@ -224,6 +224,9 @@ class Voice:
     def speaks(self, language):
         return True
 
+    def ready(self, language):
+        return True
+
     def languages(self):
         return frozenset({"en", "de", "fr"})
 

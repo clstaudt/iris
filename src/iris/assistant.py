@@ -8,6 +8,7 @@ import re
 import threading
 import time
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
@@ -186,6 +187,10 @@ class VoiceAssistant:
     _ending = False
     # Until then the microphone stays closed after parting words
     _quiet_until = 0.0
+    # Told (engine, voice, language) when a reply comes to a language the
+    # persona's voice speaks but is not ready for: the app makes it ready,
+    # where the user sees it (iris.readiness)
+    on_voice_not_ready: Optional[Callable[[str, str, str], None]] = None
 
     def __init__(
         self,
@@ -857,7 +862,10 @@ class VoiceAssistant:
     def _speak(self, text: str):
         """Queue reply text for speech, unless voice output is switched off.
         A piece in a language the persona's voice does not speak properly is
-        only shown: no other voice says it in its place."""
+        only shown: no other voice says it in its place. So is one in a
+        language the voice is not ready for yet: what it needs is never
+        fetched or made here, unseen, but by the app, with its progress in
+        the conversation, and the voice speaks the language once it is."""
         if not self.speak_replies:
             return
         clean_text = self.conversation.clean_markdown(text)
@@ -867,8 +875,39 @@ class VoiceAssistant:
         if not self.tts_generator.speaks(spoken_in):
             self._shown_only(spoken_in)
             return
+        if not self.tts_generator.ready(spoken_in):
+            self._not_ready(spoken_in)
+            return
         self._reply_voiced = True
         self.speech_pipeline.queue_speech(clean_text, language=spoken_in)
+
+    def _not_ready(self, language_code: str):
+        """A piece of the reply is shown, not spoken: the persona's voice
+        speaks its language, but is not ready for it yet. The app is told,
+        to make it ready with its progress shown; without one to tell, the
+        user is told once for the voice and language."""
+        self._reply_unspoken = True
+        if not self._reply_voiced:
+            self._report_timing()
+        generator = self.tts_generator
+        if self.on_voice_not_ready is not None:
+            self.on_voice_not_ready(generator.engine, generator.voice, language_code)
+            return
+        told = (generator.engine, generator.voice, language_code)
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        name = LANGUAGE_NAMES.get(language_code, language_code)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{self.persona.name}'s voice is not ready for {name} yet: "
+                    f"replies in {name} are shown until it is.",
+                    "kind": "not_ready",
+                    "language": language_code,
+                },
+            )
 
     def _shown_only(self, language_code: str):
         """A piece of the reply is shown and not spoken, its language one the
