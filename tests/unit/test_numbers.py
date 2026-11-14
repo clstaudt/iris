@@ -67,10 +67,18 @@ def test_numbers_are_said_as_the_language_says_them(language, text, said):
 
 def test_text_without_numbers_and_other_languages_are_left_alone():
     assert numbers_in_words("Guten Tag.", "de") == "Guten Tag."
-    # English and Hindi voices read their digits right
-    assert numbers_in_words("It costs $23.50 at 10:15.", "en") == "It costs $23.50 at 10:15."
+    # Hindi voices read their digits right
     assert numbers_in_words("तापमान 18 डिग्री", "hi") == "तापमान 18 डिग्री"
     assert LANGUAGES == {"de", "fr", "it", "es", "pt", "nl", "ja"}
+
+
+def test_english_keeps_its_digits_but_says_money_in_words():
+    """Pocket TTS's English model reads numbers, but said "$3.50" as three
+    dollars."""
+    assert numbers_in_words("Entry costs $3.50 at 10:15 on November 27.", "en") == (
+        "Entry costs three dollars fifty cents at 10:15 on November 27.")
+    assert numbers_in_words("£1, $1,200 or €2.05.", "en") == (
+        "one pound, one thousand, two hundred dollars or two euros five cents.")
 
 
 @pytest.mark.parametrize("language", sorted(LANGUAGES))

@@ -622,9 +622,9 @@ class PocketGenerator(SpeechEngine):
             pocket_lang, voice = self.voice_for(language)
             model = self._model(pocket_lang)
             state = self._voice_state(pocket_lang, voice)
-            # Only the English model reads digits: "am Gas im November"
-            if pocket_lang != "english":
-                text = numbers_in_words(text, language)
+            # Only the English model reads digits ("am Gas im November"),
+            # and it drops the cents of an amount of money
+            text = numbers_in_words(text, language if pocket_lang != "english" else "en")
             sentences = pocket_sentences(text)
             if not sentences:
                 return None

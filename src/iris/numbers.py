@@ -67,12 +67,37 @@ AFTER = r"(?![\d:/]|[.,]\d)"
 
 def numbers_in_words(text: str, language: str) -> str:
     """The text with its numbers as words in this language (one of
-    LANGUAGES); other languages' text as it is."""
-    if language not in LANGUAGES or not any(c.isdigit() for c in text):
+    LANGUAGES), or in English its amounts of money; other languages' text
+    as it is."""
+    if not any(c.isdigit() for c in text):
+        return text
+    if language == "en":
+        return _english_money(text)
+    if language not in LANGUAGES:
         return text
     if language == "ja":
         return _japanese(text)
     return _spaced(text, language)
+
+
+# Money in English: units (one, more) and cents (one, more)
+ENGLISH_MONEY = {"$": ("dollar", "dollars", "cent", "cents"), "£": ("pound", "pounds", "penny", "pence"),
+                 "€": ("euro", "euros", "cent", "cents")}
+
+
+def _english_money(text: str) -> str:
+    """Amounts of money in English words. Pocket TTS's English model reads
+    numbers, but says "$3.50" as three dollars."""
+    def said(match: re.Match) -> str:
+        one, more, cent, cents = ENGLISH_MONEY[match[1]]
+        units = int(match[2].replace(",", ""))
+        out = f"{num2words(units, lang='en')} {one if units == 1 else more}"
+        if match[3] and int(match[3].ljust(2, "0")):
+            pennies = int(match[3].ljust(2, "0"))
+            out += f" {num2words(pennies, lang='en')} {cent if pennies == 1 else cents}"
+        return out
+
+    return re.sub(r"([$£€])\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?(?![\d.,]\d)", said, text)
 
 
 # Number words ------------------------------------------------------------------------------
