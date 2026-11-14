@@ -277,11 +277,17 @@ def test_an_offline_first_start_reports_each_download_and_starts(stub, offline, 
         tried.extend(target.name for _, target in files)
         raise OFFLINE
 
+    def download_hub_files(files, on_progress, interval=0.5):
+        tried.extend(file.filename.rsplit("/", 1)[-1] for file in files)
+        raise OFFLINE
+
     monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: False)
+    monkeypatch.setattr(downloads, "files_cached", lambda files: False)
     monkeypatch.setattr(downloads, "download", download)
     monkeypatch.setattr(downloads, "download_files", download_files)
-    monkeypatch.setattr("iris.controller.find_kokoro_models", lambda: None)
-    monkeypatch.setattr("iris.controller.DEFAULT_KOKORO_DIR", tmp_path)
+    monkeypatch.setattr(downloads, "download_hub_files", download_hub_files)
+    monkeypatch.setattr("iris.speech_models.find_kokoro_models", lambda: None)
+    monkeypatch.setattr("iris.speech_models.DEFAULT_KOKORO_DIR", tmp_path)
 
     bus = EventBus()
     seen = Recorded(bus)
@@ -299,15 +305,20 @@ def test_an_offline_first_start_reports_each_download_and_starts(stub, offline, 
     try:
         assert wait_until(lambda: seen.last("config") is not None, 10)
         errors = seen.errors()
-        # Every download was tried, whatever became of the one before
+        # Every download was tried, whatever became of the one before,
+        # the voices first
         assert tried == [
-            "Systran/faster-whisper-small",
-            SMART_TURN_FILE,
+            "model.safetensors",
+            "tokenizer.json",
+            "alba.safetensors",
             tts.KOKORO_MODEL_FILE,
             tts.KOKORO_VOICES_FILE,
+            SMART_TURN_FILE,
+            "Systran/faster-whisper-small",
         ]
         assert any(e.startswith("Could not download the speech recognition model:") for e in errors)
         assert any(e.startswith("Could not download the Kokoro voice model:") for e in errors)
+        assert any(e.startswith("Could not download the Kyutai voice model:") for e in errors)
         assert not any(e.startswith("Failed to start assistant") for e in errors)
         # The setup screen's progress is done with
         assert seen.last("setup.progress")["label"] == ""
@@ -328,11 +339,12 @@ def test_a_failed_download_does_not_keep_the_others_from_being_fetched(monkeypat
         fetched.append(filename)
 
     monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: False)
+    monkeypatch.setattr(downloads, "files_cached", lambda files: True)  # Pocket TTS is here
     monkeypatch.setattr(downloads, "download", download)
     monkeypatch.setattr(downloads, "download_files", lambda files, on_progress: fetched.extend(
         target.name for _, target in files))
-    monkeypatch.setattr("iris.controller.find_kokoro_models", lambda: None)
-    monkeypatch.setattr("iris.controller.DEFAULT_KOKORO_DIR", tmp_path)
+    monkeypatch.setattr("iris.speech_models.find_kokoro_models", lambda: None)
+    monkeypatch.setattr("iris.speech_models.DEFAULT_KOKORO_DIR", tmp_path)
     bus = EventBus()
     seen = Recorded(bus)
     AssistantController(bus)._fetch_models(

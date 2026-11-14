@@ -8,6 +8,7 @@
   import StatusZone from "./components/StatusZone.svelte";
   import Transcript from "./components/Transcript.svelte";
   import Walkthrough from "./components/walkthrough/Walkthrough.svelte";
+  import { connectConversation } from "./lib/orb.svelte";
   import { store } from "./lib/state.svelte";
 
   onMount(() => {

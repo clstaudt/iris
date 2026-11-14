@@ -313,7 +313,7 @@ def test_the_greeting_is_queued_as_iris_first_turn(monkeypatch):
 
     monkeypatch.setattr("iris.controller.VoiceAssistant", Assistant)
     monkeypatch.setattr(AssistantController, "_fetch_models", lambda self, kwargs: None)
-    monkeypatch.setattr(AssistantController, "_pick_vision_model", lambda self, preferred: None)
+    monkeypatch.setattr(AssistantController, "_pick_vision_model", lambda self, *args: None)
     controller = AssistantController(EventBus())
     controller.start({"greet": True, "persona": "iris"})
     assert _wait_for(lambda: controller.assistant is not None)

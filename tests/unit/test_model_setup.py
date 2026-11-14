@@ -165,11 +165,16 @@ def test_a_failed_download_is_reported_and_the_others_still_come(tmp_path, monke
     monkeypatch.setattr(downloads, "download", download)
     monkeypatch.setattr("iris.speech_models.find_kokoro_models", lambda: tmp_path)
 
-    with pytest.raises(RuntimeError, match="Speech recognition: No connection"):
-        AssistantController(EventBus())._fetch_models(
-            {"whisper_model": "small", "whisper_engine": "faster-whisper", "whisper_device": "cpu"}
-        )
+    bus = EventBus()
+    events = _record(bus)
+    AssistantController(bus)._fetch_models(
+        {"whisper_model": "small", "whisper_engine": "faster-whisper", "whisper_device": "cpu"}
+    )
     assert fetched == [SMART_TURN_FILE]
+    errors = [data["message"] for kind, data in events if kind == "error"]
+    assert errors == [
+        "Could not download the speech recognition model: Max retries exceeded: connection refused"
+    ]
 
 
 def test_chosen_folders_are_used_as_they_are(tmp_path, monkeypatch):
