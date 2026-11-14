@@ -29,6 +29,11 @@ The test looks into the core through methods of its own:
 
 Their moments are the test's: milliseconds since the epoch.
 
+How well the model answers does not matter to the test, so every chat
+request asks it to answer without reasoning first: an OpenAI-compatible
+server through its chat template (enable_thinking off), Ollama with think
+off. Iris itself asks for no such thing.
+
     python -m irisdev.e2e_core
 """
 
@@ -249,14 +254,36 @@ def _watched_lines(self, *args, **kwargs):
     return MODEL.watch(self, _iter_lines(self, *args, **kwargs))
 
 
+def without_reasoning(path: str, body: dict) -> dict:
+    """A chat request's body, asking the model to answer at once: for an
+    OpenAI-compatible server (/chat/completions) through its chat template,
+    for Ollama (/api/chat) with think off. Any other request is as it was."""
+    if path.endswith("/chat/completions"):
+        template = {**(body.get("chat_template_kwargs") or {}), "enable_thinking": False}
+        return {**body, "chat_template_kwargs": template}
+    if path.endswith("/api/chat"):
+        return {**body, "think": False}
+    return body
+
+
+_build_request = httpx.Client.build_request
+
+
+def _built_without_reasoning(self, method, url, *args, **kwargs):
+    if isinstance(kwargs.get("json"), dict):
+        kwargs["json"] = without_reasoning(httpx.URL(url).path, kwargs["json"])
+    return _build_request(self, method, url, *args, **kwargs)
+
+
 def main():
     # The microphone and the speaker are taken from here when the assistant
     # is built, after the app has asked for it
     audio.SYSTEM = Breakable(LAPTOP)
     cloning.KYUTAI = StandInKyutai()
     # Both Ollama's client and Iris's own for other servers read a streamed
-    # reply line by line
+    # reply line by line, and build each request through httpx
     httpx.Response.iter_lines = _watched_lines
+    httpx.Client.build_request = _built_without_reasoning
     rpc_server.main({"e2e.speaker": speaker, "e2e.model": MODEL.report})
 
 
