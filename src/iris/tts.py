@@ -35,6 +35,7 @@ from iris.engines import (
     speech_engine,
     spoken_languages,
 )
+from iris.events import brief
 from iris.numbers import numbers_in_words
 
 warnings.filterwarnings("ignore")
@@ -619,9 +620,6 @@ class PocketGenerator(SpeechEngine):
         model = self._model(pocket_lang)
         state = self._voice_state(pocket_lang, voice)
         try:
-            pocket_lang, voice = self.voice_for(language)
-            model = self._model(pocket_lang)
-            state = self._voice_state(pocket_lang, voice)
             # Only the English model reads digits ("am Gas im November"),
             # and it drops the cents of an amount of money
             text = numbers_in_words(text, language if pocket_lang != "english" else "en")
@@ -678,9 +676,14 @@ class SpeechGenerator:
         self._engines: dict[str, SpeechEngine] = {}
         # Replies and previews may ask for speech at the same time
         self._lock = threading.Lock()
+        # Told (a message for the user) when an engine, or its model for a
+        # language, cannot be loaded; once, until it speaks again
+        self.on_failure: Callable[[str], None] | None = None
+        self._failing: set[tuple[str, str]] = set()
         # (engine, language) prepared for their first reply
         self._prepared: set[tuple[str, str]] = set()
-        self.prepare()
+        if prepare:
+            self.prepare()
 
     def speaks(self, language: str) -> bool:
         """Whether replies in this language can be spoken in it."""

@@ -241,10 +241,10 @@ def test_the_conversation_is_shown_again_after_a_restart(tmp_path):
     controller._restore_thread()
 
     assert shown == [
-        ("chat.user", {"text": "My sister's cat is called Pepper.", "source": "voice"}),
-        ("chat.done", {"text": "Pepper is a good name for a cat.", "interrupted": False}),
-        ("chat.user", {"text": "明日の東京の天気は？", "source": "text"}),
-        ("chat.done", {"text": "晴れです。", "interrupted": False}),
+        ("chat.user", {"text": "My sister's cat is called Pepper.", "source": "voice", "restored": True}),
+        ("chat.done", {"text": "Pepper is a good name for a cat.", "interrupted": False, "restored": True}),
+        ("chat.user", {"text": "明日の東京の天気は？", "source": "text", "restored": True}),
+        ("chat.done", {"text": "晴れです。", "interrupted": False, "restored": True}),
     ]
     assert [(e["type"], e["data"]) for e in controller.history()["events"]] == shown
 
@@ -253,6 +253,72 @@ def test_the_conversation_is_shown_again_after_a_restart(tmp_path):
     controller.assistant = SimpleNamespace(memory=None)
     controller._restore_thread()
     assert shown == []
+
+
+def test_the_conversation_before_a_restart_comes_back_marked_as_such():
+    """The app shows these turns above whatever it said meanwhile."""
+    bus = EventBus()
+    controller = AssistantController(bus)
+    turns = [
+        {"role": "user", "text": "Hi", "source": "text"},
+        {"role": "system", "text": "a note", "source": None},
+        {"role": "assistant", "text": "Hello", "source": None},
+    ]
+    store = type("Store", (), {"recent_turns": lambda self: turns})()
+    memory = type("Memory", (), {"store": store})()
+    controller.assistant = type("Assistant", (), {"memory": memory})()
+    controller._restore_thread()
+
+    events = controller.history()["events"]
+    assert events == [
+        {"type": "chat.user", "data": {"text": "Hi", "source": "text", "restored": True}},
+        {"type": "chat.done", "data": {"text": "Hello", "interrupted": False, "restored": True}},
+    ]
+
+
+def test_a_silent_microphone_is_warned_about_once(monkeypatch):
+    """A real microphone always hears some noise: exact zeros for more than
+    four seconds mean the system withholds it. That is said once, not with
+    every level, and said again after another such silence."""
+    now = [100.0]
+    monkeypatch.setattr("iris.controller.time.monotonic", lambda: now[0])
+    bus = EventBus()
+    warnings = []
+    bus.subscribe(lambda event_type, data: warnings.append(data) if event_type == "error" else None)
+    AssistantController(bus)
+
+    def levels(rms, seconds):
+        for _ in range(round(seconds * 15)):
+            bus.emit("audio.level", {"rms": rms})
+            now[0] += 1 / 15
+
+    levels(0.0, 3.8)
+    assert warnings == []
+    levels(0.0, 6)
+    assert len(warnings) == 1
+    assert "silence" in warnings[0]["message"]
+    # Sound, then a pause in it: no warning
+    levels(0.02, 1)
+    levels(0.0, 3.8)
+    assert len(warnings) == 1
+    levels(0.0, 1)
+    assert len(warnings) == 2
+
+
+def test_the_silence_warning_names_what_to_do_where_iris_runs(monkeypatch):
+    """Only macOS withholds a microphone silently, and it asks for it under
+    the app's name: Iris when packaged, the dev server's app in development."""
+    monkeypatch.setattr("iris.controller.sys.platform", "linux")
+    elsewhere = silent_microphone_message()
+    assert "macOS" not in elsewhere and "System Settings" not in elsewhere
+    assert "muted" in elsewhere
+
+    monkeypatch.setattr("iris.controller.sys.platform", "darwin")
+    development = silent_microphone_message()
+    assert "Terminal" in development and "System Settings" in development
+    monkeypatch.setattr("iris.controller.sys.frozen", True, raising=False)
+    packaged = silent_microphone_message()
+    assert "for Iris" in packaged and "Terminal" not in packaged
 
 
 def test_work_shows_through_a_paused_mic(monkeypatch):
