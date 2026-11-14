@@ -275,13 +275,25 @@ export interface PersonaSettings {
 export interface VoiceInfo {
   id: string;
   name: string;
+  /** The language it was made for, as shown */
   language: string;
+  /** Whisper codes of the languages it speaks properly */
+  languages?: string[];
+}
+
+/** A language Iris talks in. */
+export interface LanguageInfo {
+  /** Whisper code */
+  code: string;
+  name: string;
 }
 
 export interface VoiceOptions {
   engines: Record<SpeechEngine, VoiceInfo[]>;
   /** The engines in the core's order, with their names */
   engine_info?: EngineInfo[];
+  /** The languages Iris talks in, in order */
+  languages?: LanguageInfo[];
   filters: string[];
 }
 
@@ -614,6 +626,25 @@ class IrisStore {
           streaming: false,
         });
         break;
+
+      // Something to know that is not a fault, such as replies shown and
+      // not spoken. It goes above the reply streaming in, where it stays
+      // when the transcript is rebuilt (the reply comes whole after it)
+      case "notice": {
+        const notice: ChatMessage = {
+          role: "system",
+          text: (data.message as string) ?? "",
+          kind: data.kind as string | undefined,
+          streaming: false,
+        };
+        if (this.streamingIndex !== null) {
+          this.messages.splice(this.streamingIndex, 0, notice);
+          this.streamingIndex++;
+        } else {
+          this.messages.push(notice);
+        }
+        break;
+      }
     }
   }
 
