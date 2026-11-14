@@ -179,7 +179,7 @@ A persona is who Iris is: a name, a personality, a voice, and the words that wak
 - **HAL**: inspired by HAL 9000, calm and mission-focused.
 - **Computer**: matter-of-fact, like the USS Enterprise computer.
 
-There you edit a persona or create one: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited built-in persona can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`):
+There you edit a persona or create one: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited built-in persona can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`); a change to the file of the persona in use is taken on while Iris runs, from its next reply:
 
 ```yaml
 name: "HAL"

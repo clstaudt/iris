@@ -59,6 +59,7 @@ class FakeAssistant:
         self.transcriber = object()
         self.voice_error = None
         self.persona = kwargs.get("persona")
+        self._turn_active = threading.Event()
         self.wake_word = kwargs.get("wake_word")
         self.sleep_word = kwargs.get("sleep_word")
 
@@ -70,6 +71,7 @@ class FakeAssistant:
         self.wake_word = word or None
 
     set_persona_words = VoiceAssistant.set_persona_words
+    replying = VoiceAssistant.replying
 
     def config_info(self):
         return {

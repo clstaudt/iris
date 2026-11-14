@@ -305,6 +305,23 @@ def delete_persona(persona_id: str) -> bool:
     return persona_id in PERSONAS
 
 
+def persona_stamp(persona_id: str) -> Optional[tuple]:
+    """Which file the persona of this id is read from, and when it last
+    changed, to notice it changing on disk; None when no file holds it."""
+    found = None
+    for persona_dir in get_persona_dirs():
+        for path in persona_dir.glob("*.yaml"):
+            if path.stem.lower() == persona_id:
+                found = path
+    if found is None:
+        return None
+    try:
+        stat = found.stat()
+    except OSError:
+        return None
+    return (str(found), stat.st_mtime_ns, stat.st_size)
+
+
 def find_persona(persona_id: str) -> Optional[Persona]:
     """The persona of this id, or None."""
     return PERSONAS.get(persona_id)
