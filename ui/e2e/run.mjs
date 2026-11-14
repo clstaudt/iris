@@ -577,7 +577,14 @@ try {
 
   await step("first run: Iris starts with the choices, and greets the user", async () => {
     await walkthroughStep("ready").waitFor({ timeout: 5000 });
-    check(await page.getByText(model).count(), "the summary does not show the model");
+    const stage = (id) => walkthroughStep("ready").locator(`[data-stage="${id}"]`);
+    check((await stage("llm").innerText()).includes(model), "the pipeline does not show the model");
+    check((await stage("wake").innerText()).includes(WAKE_WORD), "the pipeline does not show the wake word");
+    // A stage leads back to the step that sets it
+    await stage("wake").click();
+    await walkthroughStep("extras").waitFor({ timeout: 5000 });
+    await page.locator('nav[aria-label="Steps"] button[aria-label="Ready"]').click();
+    await walkthroughStep("ready").waitFor({ timeout: 5000 });
     const since = Date.now();
     await footerButton("Start talking").click();
     await until("the conversation", () => page.locator("textarea").count(), 10_000);
