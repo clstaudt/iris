@@ -1065,7 +1065,9 @@ try {
   await step("voice cloning: Save is offered for what changed, a voice cloned again too, and Cancel takes it back", async () => {
     const save = page.locator("button.s-btn.primary", { hasText: "Save" });
     const effect = (name) => page.locator("button.toggle", { hasText: exactly(name) });
-    const pick = (name) => page.locator(".voice button.pick", { hasText: exactly(name) });
+    // By its name alone: the tile shows the languages it speaks beside it
+    const pick = (name) => page.locator(".voice button.pick", { has: page.locator(".name", { hasText: exactly(name) }) });
+    const chosen = (name) => page.locator(".voice.active .pick .name", { hasText: exactly(name) });
     const offered = async (yes, after) =>
       check((await save.isEnabled()) === yes, `Save is ${yes ? "not " : ""}offered after ${after}`);
     await openSettings("Personas");
@@ -1085,7 +1087,7 @@ try {
     await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
     const made = Date.now();
     await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: speechSample() });
-    await until("the voice cloned again", () => page.locator(".voice.active .pick", { hasText: exactly("Iris 2") }).count(), 120_000);
+    await until("the voice cloned again", () => chosen("Iris 2").count(), 120_000);
     await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
     await voiceDone();
     await offered(true, "cloning a voice");
@@ -1098,7 +1100,7 @@ try {
     await offered(true, "choosing the voice cloned again");
     // Cancel goes back to what is saved
     await page.locator("button.s-btn", { hasText: "Cancel" }).click();
-    await until("her saved voice", () => page.locator(".voice.active .pick", { hasText: exactly("Iris") }).count());
+    await until("her saved voice", () => chosen("Iris").count());
     await offered(false, "Cancel");
   });
 
