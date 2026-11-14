@@ -29,7 +29,7 @@ git clone https://github.com/clstaudt/iris.git
 cd iris
 uv sync                 # the Python core
 cd ui
-npm install
+npm ci
 npm run dev             # starts Vite, Electron and the Python core
 ```
 
