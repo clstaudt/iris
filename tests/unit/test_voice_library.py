@@ -134,7 +134,7 @@ def _sampled(service):
 
 
 def test_cloned_again_a_voice_keeps_its_name_and_personas_and_drops_the_old(
-    kyutai, heard_by_energy
+    kyutai, heard_by_energy, caplog
 ):
     folder = made("Ada")
     (folder / "german.safetensors").write_bytes(b"made of the old sample")
@@ -143,7 +143,8 @@ def test_cloned_again_a_voice_keeps_its_name_and_personas_and_drops_the_old(
     service = Cloning(lambda t, d: None, changed=changed.append)
     _sampled(service)
 
-    result = service.clone("Someone else", replace="clone:ada")
+    with caplog.at_level(logging.INFO, logger="iris.cloning"):
+        result = service.clone("Someone else", replace="clone:ada")
 
     assert result == {"ok": True, "voice": {"id": "clone:ada", "name": "Ada", "language": "Cloned"}}
     assert (folder / cloning.SAMPLE_FILE).read_bytes() != old_sample
@@ -152,6 +153,9 @@ def test_cloned_again_a_voice_keeps_its_name_and_personas_and_drops_the_old(
     assert (folder / "english.safetensors").read_bytes() != b"made when cloned"
     assert changed == ["clone:ada"]
     assert [v["id"] for v in cloned_voices()] == ["clone:ada"]
+    # What it replaces is logged, with the folder
+    [said] = [r.getMessage() for r in caplog.records if "replaced" in r.getMessage()]
+    assert "clone:ada" in said and str(folder) in said
 
 
 def test_a_voice_that_cannot_be_made_again_stays_as_it_was(kyutai, heard_by_energy):
