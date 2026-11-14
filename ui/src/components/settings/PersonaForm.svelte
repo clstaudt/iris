@@ -51,17 +51,20 @@
     });
   }
 
-  onMount(async () => {
-    const id = store.editingPersona;
+  /** Show a persona as it is saved, with nothing to save. False when it is
+   *  gone. */
+  async function load(id: string) {
     const loaded = id ? await store.loadPersona(id) : { ...NEW_PERSONA };
-    if (!loaded) {
-      store.editingPersona = store.persona;
-      return;
-    }
+    if (!loaded) return false;
     loaded.wake_word ||= loaded.name;
     loaded.sleep_word ??= "";
     draft = loaded;
     saved = editable(loaded);
+    return true;
+  }
+
+  onMount(async () => {
+    if (!(await load(store.editingPersona))) store.editingPersona = store.persona;
   });
 
   const isNew = $derived(!draft?.id);
@@ -138,12 +141,7 @@
       store.editingPersona = store.persona;
       return;
     }
-    const loaded = await store.loadPersona(draft.id!);
-    if (loaded) {
-      loaded.wake_word ||= loaded.name;
-      loaded.sleep_word ??= "";
-      draft = loaded;
-    }
+    await load(draft.id!);
   }
 
   async function remove() {
@@ -152,7 +150,13 @@
       confirmDelete = true;
       return;
     }
-    await store.deletePersona(draft.id);
+    const id = draft.id;
+    const shipped = draft.shipped;
+    await store.deletePersona(id);
+    confirmDelete = false;
+    // A persona that ships with Iris is shown as it ships once reset: the
+    // editor stays on it, so nothing else would show it anew
+    if (shipped && (await load(id))) return;
     store.editingPersona = store.persona;
   }
 </script>

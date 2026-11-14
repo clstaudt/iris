@@ -77,7 +77,7 @@
     if (step === "recording") rpc("voice.record", { on: false, keep: false }).catch(() => {});
     // A voice made here and not saved with a persona goes; the core keeps
     // one a persona speaks with
-    for (const voice of made) rpc("voice.forget", { voice }).catch(() => {});
+    for (const voice of made) store.forgetVoice(voice).catch(() => {});
   });
 
   // Cloning is Kyutai's: another engine closes it
@@ -187,7 +187,7 @@
     await store.loadVoices();
     onchoose(voice);
     step = "closed";
-    if (replaced) rpc("voice.forget", { voice: replaced }).catch(() => {});
+    if (replaced) store.forgetVoice(replaced).catch(() => {});
     await store.previewVoice({ ...$state.snapshot(draft), voice });
   }
 
