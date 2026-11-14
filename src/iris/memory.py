@@ -66,6 +66,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     persona TEXT NOT NULL,
+    -- its focus, if it has one (see iris.roles)
+    role TEXT,
     created REAL NOT NULL,
     -- its last turn
     updated REAL NOT NULL
@@ -172,7 +174,10 @@ class MemoryStore:
 
     def _into_threads(self):
         """A database from before threads: everything in it becomes the
-        first thread, with Iris."""
+        first thread, with Iris and no role."""
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(threads)")}
+        if "role" not in columns:  # threads from before roles
+            self._db.execute("ALTER TABLE threads ADD COLUMN role TEXT")
         for table in ("turns", "topics"):
             columns = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
             if "thread_id" not in columns:
@@ -208,17 +213,22 @@ class MemoryStore:
 
     # -- threads ------------------------------------------------------------
 
-    def create_thread(self, persona: str) -> int:
-        """A new thread with this persona (its id), as its first turn is stored."""
+    def create_thread(self, persona: str, role: Optional[str] = None) -> int:
+        """A new thread with this persona and role (its id), as its first
+        turn is stored. Neither changes afterwards."""
         now = time.time()
         return self._write(
-            "INSERT INTO threads (persona, created, updated) VALUES (?, ?, ?)",
-            (persona, now, now),
+            "INSERT INTO threads (persona, role, created, updated) VALUES (?, ?, ?, ?)",
+            (persona, role, now, now),
         )
 
+    def clear_role(self, role: str):
+        """The role is gone: its threads go on without one."""
+        self._write("UPDATE threads SET role = NULL WHERE role = ?", (role,))
+
     def threads(self) -> list[dict]:
-        """Every thread, the one talked in last first: {id, persona, title,
-        created, updated}."""
+        """Every thread, the one talked in last first: {id, persona, role,
+        title, created, updated}."""
         rows = self._query(self._THREADS + " ORDER BY th.updated DESC, th.id DESC")
         return [self._titled(row) for row in rows]
 
