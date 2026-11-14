@@ -117,7 +117,7 @@ def test_a_core_started_again_does_not_show_the_conversation_twice(monkeypatch):
         controller, seen = _controller(monkeypatch)
         controller.start({})
         assert _wait_for(lambda: len(seen.of("chat.done")) == 1)
-        assert seen.of("chat.user") == [{"text": "Hello", "source": "voice"}]
+        assert seen.of("chat.user") == [{"text": "Hello", "source": "voice", "restored": True}]
         controller.stop()
         assert _wait_for(lambda: not controller.info()["running"])
 

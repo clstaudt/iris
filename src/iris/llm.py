@@ -836,10 +836,7 @@ class ConversationManager:
             # Said with the pictures; they stay among the files shared for a
             # few turns, and saying it on each of them had the model tell the
             # user again on every reply
-            user_message["content"] += (
-                "\n\n(The images cannot be shown to you: no model that can see "
-                "images is installed. Let the user know.)"
-            )
+            user_message["content"] += "\n\n" + IMAGES_UNSEEN
         messages.append(user_message)
 
         # The reply streams as it comes, so the voice can start before the

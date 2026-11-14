@@ -1162,6 +1162,7 @@ class IrisStore {
       console.error("[store] init failed:", err);
       this.messages.push({ role: "error", text: `Iris could not be reached: ${err}`, streaming: false });
     }
+    sayMicNotice();
   }
 
   /** The core stopped and was started again (the error saying so came
@@ -1186,7 +1187,6 @@ class IrisStore {
     } catch (err) {
       this.messages.push({ role: "error", text: `Iris could not be started again: ${err}`, streaming: false });
     }
-    sayMicNotice();
   }
 
   /** Save the first-launch choices and start Iris with them. The setup

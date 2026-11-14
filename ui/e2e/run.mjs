@@ -1,9 +1,11 @@
 // End-to-end test of the app's UI against the real Python core.
 //
 // The built UI (ui/dist) runs in headless Chrome; window.iris, which Electron's
-// preload provides in the app, is bridged to a core started for the test. The
-// core gets a home folder of its own, so the tester's personas, memory and
-// settings are left alone; the speech models already on this computer are used.
+// preload provides in the app, is bridged to a core started for the test,
+// through the app's own bridge (electron/python-bridge.ts), which reports a
+// core that stops and starts it again. The core gets a home folder of its
+// own, so the tester's personas, memory and settings are left alone; the
+// speech models already on this computer are used.
 // Its microphone and speaker are a virtual room (irisdev.e2e_core), which
 // holds only Iris's own voice coming back: the real room is never heard, and
 // nothing sounds on the speakers. Iris sleeps until a wake word nobody says.
@@ -53,74 +55,53 @@ const python =
   process.env.E2E_PYTHON ??
   path.join(REPO, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 
-/** Every event the core pushed, in order. */
+/** Every event the core pushed, and the bridge told, in order. */
 const events = [];
-const pending = new Map();
-let nextId = 1;
 let pushEvent = () => {};
-let core;
+let bridge;
 
-/** Start a core; a restart starts another with the same home and memory. */
+/** Start a core through the app's own bridge, which starts it again when it
+ *  stops; a restart of the app starts another with the same home and memory. */
 function startCore(log) {
-  core = spawn(python, ["-m", "irisdev.e2e_core"], {
-    cwd: REPO,
-    env: {
-      ...process.env,
+  const coreLog = fs.createWriteStream(path.join(OUT, log));
+  bridge = new PythonBridge(
+    REPO,
+    false,
+    "",
+    {
       HOME: home,
       USERPROFILE: home,
       HF_HOME: process.env.HF_HOME ?? path.join(realHome, ".cache", "huggingface"),
       IRIS_MODELS_DIR: process.env.IRIS_MODELS_DIR ?? path.join(realHome, ".iris", "models"),
       IRIS_MEMORY_DB: path.join(home, "memory.db"),
-      PYTHONPATH: path.join(REPO, "src"),
-      PYTHONUNBUFFERED: "1",
     },
-  });
-  const coreLog = fs.createWriteStream(path.join(OUT, log));
-  core.stderr.pipe(coreLog);
-  core.stdin.on("error", () => {}); // a request to a core on its way out
-  core.on("exit", () => {
-    for (const { reject } of pending.values()) reject(new Error("the core exited"));
-    pending.clear();
-  });
-  readline.createInterface({ input: core.stdout }).on("line", (line) => {
-    let frame;
-    try {
-      frame = JSON.parse(line);
-    } catch {
-      coreLog.write(line + "\n");
-      return;
-    }
-    if (frame.id !== undefined && pending.has(frame.id)) {
-      const { resolve, reject } = pending.get(frame.id);
-      pending.delete(frame.id);
-      if (frame.error) reject(new Error(frame.error.message));
-      else resolve(frame.result);
-    } else if (frame.method === "event") {
-      events.push({ ...frame.params, at: Date.now() });
-      pushEvent(frame.params.type, frame.params.data);
-    }
-  });
+    { command: python, args: ["-m", "irisdev.e2e_core"] }
+  );
+  bridge.onLog = (line) => coreLog.write(line + "\n");
+  bridge.onEvent = (type, data) => {
+    events.push({ type, data, at: Date.now() });
+    pushEvent(type, data);
+  };
 }
 
 /** Stop the core as quitting the app does, and start a new one. */
 async function restartCore() {
   await Promise.race([rpc("assistant.stop").catch(() => {}), quiet(5000)]);
-  const exited = new Promise((resolve) => core.once("exit", resolve));
-  core.kill();
-  await exited;
+  const pid = bridge.pid;
+  bridge.kill();
+  await until("the core to end", () => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  });
   startCore("core-2.log");
 }
 
 function rpc(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    if (core.exitCode !== null || core.signalCode !== null || !core.stdin.writable) {
-      reject(new Error("the core is not running"));
-      return;
-    }
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    core.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-  });
+  return bridge.call(method, params);
 }
 
 startCore("core.log");
@@ -130,12 +111,14 @@ startCore("core.log");
 // A server the test runs itself, with the OpenAI-compatible API, so that
 // switching servers is tested whatever E2E_HOST is, and what a model is sent
 // can be seen. Its models give one fixed reply: markdown, with an emoji and
-// HTML a page could carry. One of them says it sees images.
+// HTML a page could carry. One of them says it sees images, unless the test
+// wants a server where none can see.
 const STUB_MODELS = [
   { id: "stub-large" },
   { id: "stub-small" },
   { id: "stub-vision", capabilities: ["vision"] },
 ];
+let stubSees = true;
 const STUB_REPLY =
   "Here is **the stub's answer** \u{1F642}\n\n" +
   "- first point\n- second point\n\n" +
@@ -150,7 +133,8 @@ const stub = http.createServer((request, response) => {
     const route = request.url.split("?")[0];
     if (request.method === "GET" && route === "/v1/models") {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ object: "list", data: STUB_MODELS.map((m) => ({ ...m, object: "model" })) }));
+      const models = STUB_MODELS.filter((m) => stubSees || !m.capabilities?.includes("vision"));
+      response.end(JSON.stringify({ object: "list", data: models.map((m) => ({ ...m, object: "model" })) }));
     } else if (request.method === "POST" && route === "/v1/chat/completions") {
       const payload = JSON.parse(body || "{}");
       if (!payload.stream) {
@@ -235,6 +219,13 @@ await page.addInitScript(
       chooseFolder: async () => null,
       presence: false,
       setPresence: (on) => window.__irisPresence(on),
+      onOrb: () => () => {},
+      sendOrbInputs: () => {},
+      onOrbInputs: () => () => {},
+      presenceCommand: () => {},
+      onPresenceCommand: () => () => {},
+      presenceHover: () => {},
+      presenceDrag: async () => false,
       platform: "test",
     };
   },
@@ -1131,6 +1122,8 @@ try {
 
   await step("attachments: a model that cannot see is told so with the pictures, and not again after", async () => {
     Object.assign(usual, { host: config().ollama_host, model: config().llm_model });
+    // A server where no model sees, or its vision model would take the picture
+    stubSees = false;
     await runOn(stubUrl, "stub-large");
     try {
       await toConversation();
@@ -1149,6 +1142,7 @@ try {
       check(!/cannot be shown/.test(sent.text), "a message without pictures tells the model again that it cannot see them");
       await voiceDone();
     } finally {
+      stubSees = true;
       await runOn(usual.host, usual.model);
     }
   });
@@ -1379,6 +1373,26 @@ try {
     await page.keyboard.press("Escape");
     await page.locator("textarea").waitFor({ timeout: 5000 });
     check(presence.join() === "true,false,true,false", `presence went ${presence.join()}`);
+  });
+
+  await step("the core stops: the app says so, starts it again, and goes on", async () => {
+    await toConversation();
+    const messages = page.locator(".bubble.user, .bubble.assistant, .bubble.error");
+    const shown = await messages.count();
+    const since = Date.now();
+    process.kill(bridge.pid, "SIGKILL");
+    await page.getByText("Iris stopped unexpectedly (stopped by SIGKILL). Starting it again.").waitFor({ timeout: 10_000 });
+    await eventAfter("core.restarted", since, () => true, 30_000);
+    // The app starts the assistant in the new core, with its settings
+    await eventAfter("config", since, () => true, 180_000);
+    check(config().wake_word === WAKE_WORD, "the new core was not started with the settings");
+    check(config().llm_model === model, `the new core runs ${config().llm_model}`);
+    await rpc("mic.set", { on: false });
+    // The conversation stays shown, once
+    check((await messages.count()) === shown + 1, `${shown} messages before, ${await messages.count()} after`);
+    const typed = await ask("Reply with exactly: back again.");
+    const done = await eventAfter("chat.done", typed, () => true, 180_000);
+    check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
   });
 
   /** Set a switch of the open stage, and wait for the core to apply it. */

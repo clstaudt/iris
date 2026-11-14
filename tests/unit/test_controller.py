@@ -229,7 +229,8 @@ def test_the_conversation_before_a_restart_comes_back_marked_as_such():
         {"role": "assistant", "text": "Hello", "source": None},
     ]
     store = type("Store", (), {"recent_turns": lambda self: turns})()
-    controller.assistant = type("Assistant", (), {"memory": type("Memory", (), {"store": store})()})()
+    memory = type("Memory", (), {"store": store})()
+    controller.assistant = type("Assistant", (), {"memory": memory})()
     controller._restore_thread()
 
     events = controller.history()["events"]
