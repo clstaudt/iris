@@ -80,7 +80,8 @@ export interface ThreadInfo {
   /** The persona's id, Iris for one whose persona is gone */
   persona: string;
   persona_name: string;
-  /** Its earliest topic once memory has filed one, else its first words */
+  /** Its earliest topic once memory has filed one, else the user's first
+   *  words; "" until the user has said anything */
   title: string;
   created: number;
   /** When it was last talked in (seconds since the epoch) */

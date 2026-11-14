@@ -1796,6 +1796,12 @@ try {
   const tile = (name) => tiles.filter({ has: page.locator(".name", { hasText: exactly(name) }) });
   const threads = () => rpc("threads.list");
   const shoot = (name) => page.screenshot({ path: path.join(OUT, `threads-${name}.png`) });
+  /** The open thread once the reply is kept: a new thread is stored with it */
+  const stored = (other) =>
+    until("the thread to be stored", async () => {
+      const listed = await threads();
+      return listed.open !== null && listed.open !== other && listed;
+    }, 15_000);
 
   /** Show the threads beside the conversation, or hide them. */
   async function showThreads(on = true) {
@@ -1838,6 +1844,10 @@ try {
     firstThread = listed.open;
     const first = listed.threads.find((t) => t.id === firstThread);
     check(first.persona === "iris", `the first thread is with ${first.persona}`);
+    // Titled only by what the user said: never by Iris's greeting
+    const greeting = events.find((e) => e.type === "chat.done")?.data.text ?? "";
+    check(!first.title || !greeting.startsWith(first.title.replace(/…$/, "")),
+      `the thread is titled by Iris's greeting: ${first.title}`);
     check((await threadLabel()) === "Iris", `the thread is labelled ${await threadLabel()}`);
     check(!(await sidebar.count()), "the threads show from the start");
     check(!(await tiles.count()), "the new thread's personas show");
@@ -1849,6 +1859,10 @@ try {
     await threadItem(firstThread).waitFor({ timeout: 5000 });
     check(await threadItem(firstThread).evaluate((el) => el.classList.contains("active")), "the open thread is not marked");
     check((await threadItem(firstThread).locator(".who").innerText()) === "Iris", "the persona is not named");
+    // Until the user has said anything, it is a new thread
+    const title = (await threads()).threads.find((t) => t.id === firstThread).title;
+    const shown = await threadItem(firstThread).locator(".title").innerText();
+    check(shown === (title || "New thread"), `the thread is shown as ${shown}`);
     check((await settings()).sidebar === true, "the sidebar is not kept open");
     await shoot("sidebar");
   });
@@ -1875,9 +1889,8 @@ try {
     const done = await eventAfter("chat.done", typed, () => true, 180_000);
     check(done.data.text.trim(), "HAL did not answer");
     await voiceDone();
-    const listed = await threads();
+    const listed = await stored(firstThread);
     halThread = listed.open;
-    check(halThread !== null && halThread !== firstThread, "the new thread was not stored");
     check(listed.threads.find((t) => t.id === halThread).persona === "hal", "the thread is not HAL's");
     check(listed.threads.find((t) => t.id === halThread).title === "Reply with one word: hello.",
       "the thread is not titled by its first words");
@@ -1900,7 +1913,7 @@ try {
     await page.locator('button[title="Memory"]').click();
     const memoryPanel = page.locator('aside[aria-label="Memory"]');
     const title = memoryPanel.locator("h2 span");
-    const firstTitle = (await threads()).threads.find((t) => t.id === firstThread).title;
+    const firstTitle = (await threads()).threads.find((t) => t.id === firstThread).title || "New thread";
     await until("the thread's title in memory", async () => (await title.innerText()) === firstTitle, 5000);
     await shoot("memory");
     await page.locator('button[title="Close memory"]').click();
@@ -1991,8 +2004,7 @@ try {
     const typed = await ask("Reply with one word: ready.");
     await eventAfter("chat.done", typed, () => true, 180_000);
     await voiceDone();
-    const computer = (await threads()).open;
-    check(computer !== null && computer !== firstThread, "Computer's thread was not stored");
+    const computer = (await stored(firstThread)).open;
     await page.locator('button[title="Memory"]').click();
     const memoryPanel = page.locator('aside[aria-label="Memory"]');
     await memoryPanel.locator("button.s-btn", { hasText: "Forget this thread" }).click();

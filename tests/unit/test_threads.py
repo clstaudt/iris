@@ -161,7 +161,7 @@ def test_filing_files_each_exchange_into_topics_of_its_own_thread(store):
     assert store.unfiled_exchanges() == []
 
 
-def test_a_thread_is_titled_by_its_first_topic_else_its_first_words(store):
+def test_a_thread_is_titled_by_its_first_topic_else_the_user_s_first_words(store):
     thread = store.create_thread("iris")
     _exchange(
         store,
@@ -174,11 +174,14 @@ def test_a_thread_is_titled_by_its_first_topic_else_its_first_words(store):
     store.create_topic(thread, "Flights", "Friday", "Arriving Friday.")
     assert store.thread(thread)["title"] == "Lisbon trip"
 
-    # An opening of Iris's own has only its reply
+    # Nothing of Iris's own titles a thread: until the user has said
+    # anything, it has no title (the app calls it a new thread)
     greeted = store.create_thread("iris")
     store.add_turn(greeted, "system", "Greet the user.")
     store.add_turn(greeted, "assistant", "Hello! I'm here whenever you want to talk.")
-    assert store.thread(greeted)["title"] == "Hello! I'm here whenever you want to talk."
+    assert store.thread(greeted)["title"] == ""
+    store.add_turn(greeted, "user", "Thanks, what's the weather?", "voice")
+    assert store.thread(greeted)["title"] == "Thanks, what's the weather?"
 
 
 def test_threads_are_listed_the_one_talked_in_last_first(store, monkeypatch):
