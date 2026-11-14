@@ -1024,21 +1024,9 @@ class AudioRecorder:
             _follow_system(self.audio)
 
     def _open_capture(self) -> "_Capture":
-        """Open the microphone chosen, or the system's default.
-
-        PortAudio may know the devices from before one came or went: when it
-        cannot open the microphone, the devices are read anew and it is
-        tried once more. The PortAudioError of that second try is raised.
-        """
-        seen = _generation(self.audio)
-        try:
-            return _Capture(self.audio, self.sample_rate, self._device_index())
-        except sd.PortAudioError as error:
-            logger.warning("The microphone could not be opened (%s); reading the devices anew",
-                           error)
-            if not _refresh(self.audio, seen):
-                raise
-            return _Capture(self.audio, self.sample_rate, self._device_index())
+        """Open the microphone chosen, or the system's default (see
+        _open_microphone)."""
+        return _open_microphone(self.audio, self.sample_rate, self._device_index)
 
     def _reopen(self, lost: "_Capture") -> "_Capture":
         """Open the microphone again after its stream was lost.
@@ -1060,19 +1048,12 @@ class AudioRecorder:
                 if self._capture is None:
                     raise queue.Empty
                 return self._capture  # opened again by another listener
-            lost.close()
             self._capture = None
             self._heard_until = None
-            stalled = not lost.gone
-            if stalled:
-                if lost.after_stall and not lost.delivered:
-                    raise MicrophoneError("The microphone delivers no sound")
-                logger.warning("The microphone stopped delivering sound; reading the devices anew")
-                _refresh(self.audio, lost.generation)
-            capture = self._open_capture()
-            capture.after_stall = stalled
-            self._capture = capture
-            return capture
+            self._capture = _reopen_microphone(
+                self.audio, self.sample_rate, self._device_index, lost
+            )
+            return self._capture
 
     @staticmethod
     def _level_meter(on_level: Callable[[float], None] | None) -> Callable[[np.ndarray], None]:
@@ -1339,6 +1320,89 @@ SOUND_CHECK_REPORT = 0.05
 SOUND_CHECK_LIMIT = 300.0
 
 
+def _open_microphone(
+    audio: SoundDevice, sample_rate: int, device: Callable[[], int | None]
+) -> "_Capture":
+    """Open a capture of the microphone device() names (None: the system's
+    default).
+
+    PortAudio may know the devices from before one came or went: when it
+    cannot open the microphone, the devices are read anew and it is tried
+    once more, device() asked again. The PortAudioError of that second try
+    is raised.
+    """
+    seen = _generation(audio)
+    try:
+        return _Capture(audio, sample_rate, device())
+    except sd.PortAudioError as error:
+        logger.warning("The microphone could not be opened (%s); reading the devices anew", error)
+        if not _refresh(audio, seen):
+            raise
+        return _Capture(audio, sample_rate, device())
+
+
+def _reopen_microphone(
+    audio: SoundDevice, sample_rate: int, device: Callable[[], int | None], lost: "_Capture"
+) -> "_Capture":
+    """Open a capture again after its stream was lost.
+
+    A stream closed for the devices to be read anew (gone) is opened again
+    on them. One that stopped delivering has lost its device: the devices
+    are read anew, and the microphone is opened where it is now. Should that
+    one deliver nothing either, it is given up (MicrophoneError), rather
+    than opened again and again.
+
+    Raises:
+        MicrophoneError: The microphone delivers nothing
+        sd.PortAudioError: It could not be opened again
+    """
+    lost.close()
+    stalled = not lost.gone
+    if stalled:
+        if lost.after_stall and not lost.delivered:
+            raise MicrophoneError("The microphone delivers no sound")
+        logger.warning("The microphone stopped delivering sound; reading the devices anew")
+        _refresh(audio, lost.generation)
+    capture = _open_microphone(audio, sample_rate, device)
+    capture.after_stall = stalled
+    return capture
+
+
+class _Chosen:
+    """A microphone chosen by its index, found again by its name once the
+    devices were read anew, as their indices may change; None for the
+    system's default, or for a chosen one that is gone."""
+
+    def __init__(self, audio: SoundDevice, device: int | None):
+        self.audio = audio
+        self.device = device
+        self._seen = _generation(audio)
+        self.name = None
+        if device is not None:
+            try:
+                self.name = audio.query_devices(device)["name"]
+            except Exception:
+                pass
+
+    def __call__(self) -> int | None:
+        generation = _generation(self.audio)
+        if self.name is not None and generation != self._seen:
+            self._seen = generation
+            try:
+                devices = list(self.audio.query_devices())
+            except Exception:
+                devices = []
+            self.device = next(
+                (
+                    i
+                    for i, d in enumerate(devices)
+                    if d["name"] == self.name and d["max_input_channels"] > 0
+                ),
+                None,
+            )
+        return self.device
+
+
 class SoundCheck:
     """The microphone on its own, before Iris listens, for the walkthrough's
     sound check: its level, whether a voice is in it (the VAD Iris hears
@@ -1377,10 +1441,17 @@ class SoundCheck:
             return "Unknown microphone"
 
     def start(self):
-        """Open the microphone, raising if it cannot be, and listen to it."""
-        self._capture = _Capture(self.audio, SAMPLE_RATE, self.device)
+        """Open the microphone, raising if it cannot be, and listen to it.
+        Should the devices change, it is opened again as Iris's microphone
+        is (see AudioRecorder._reopen)."""
+        self._chosen = _Chosen(self.audio, self.device)
+        self._capture = _open_microphone(self.audio, SAMPLE_RATE, self._chosen)
         self._thread = threading.Thread(target=self._listen, daemon=True)
         self._thread.start()
+
+    def _reopen(self, lost: "_Capture") -> "_Capture":
+        self._capture = _reopen_microphone(self.audio, SAMPLE_RATE, self._chosen, lost)
+        return self._capture
 
     def stop(self):
         """Close the microphone."""
@@ -1389,8 +1460,7 @@ class SoundCheck:
             self._thread.join(timeout=2)
 
     def _listen(self):
-        capture = self._capture
-        frames = _Frames(None, capture)
+        frames = _Frames(None, self._capture, reopen=self._reopen)
         detector = self._detector or SpeechDetector()
         started = last = time.monotonic()
         speech, level, zeros_since = 0.0, 0.0, None
@@ -1400,6 +1470,9 @@ class SoundCheck:
                     frame = frames.get(0.25)
                 except queue.Empty:
                     continue
+                except (MicrophoneError, sd.PortAudioError):
+                    logger.warning("The sound check lost its microphone", exc_info=True)
+                    break
                 rms = float(np.sqrt(np.mean(frame**2)))
                 # The loudest moment since the last report, scaled as the
                 # level meter of listen() scales it
@@ -1422,7 +1495,7 @@ class SoundCheck:
                     )
                     level = 0.0
         finally:
-            capture.close()
+            self._capture.close()
 
 
 # A recording made on its own (a sample of a voice to clone): how often it
@@ -1477,9 +1550,14 @@ class Recording:
             return SAMPLE_RATE
 
     def start(self):
-        """Open the microphone, raising if it cannot be, and record."""
+        """Open the microphone, raising if it cannot be, and record. Should
+        the microphone be lost (the devices change), the recording ends there
+        as at its limit: a sample from two microphones clones worse than a
+        shorter one, which the user can record again."""
         self.sample_rate = self._device_rate()
-        self._capture = _Capture(self.audio, self.sample_rate, self.device)
+        self._capture = _open_microphone(
+            self.audio, self.sample_rate, _Chosen(self.audio, self.device)
+        )
         self._thread = threading.Thread(target=self._record, daemon=True)
         self._thread.start()
 
@@ -1505,6 +1583,10 @@ class Recording:
                     block, _ = capture.take(0.25)
                 except queue.Empty:
                     continue
+                except MicrophoneError:
+                    logger.warning("The recording lost its microphone")
+                    ended = True
+                    break
                 self._blocks.append(block)
                 samples += len(block)
                 rms = float(np.sqrt(np.mean(block**2))) if len(block) else 0.0
@@ -1518,7 +1600,7 @@ class Recording:
             while not ended:
                 try:
                     self._blocks.append(capture.take(0)[0])
-                except queue.Empty:
+                except (queue.Empty, MicrophoneError):
                     break
         finally:
             capture.close()
