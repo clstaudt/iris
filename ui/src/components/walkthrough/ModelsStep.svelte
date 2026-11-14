@@ -27,14 +27,29 @@
     model.total ? Math.min(100, Math.floor((100 * model.done) / model.total)) : 0;
 
   const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+
+  /** Recognition and Kokoro's voices can come from a folder the user has
+   *  instead of the download */
+  const kindOf = (model: SpeechDownload) =>
+    model.id === "stt" ? ("stt" as const) : model.id === "kokoro" ? ("tts" as const) : null;
+  const folderOf = (model: SpeechDownload) => {
+    const kind = kindOf(model);
+    return kind === "stt" ? w.sttPath : kind === "tts" ? w.ttsDir : "";
+  };
 </script>
 
 <Step title="Speech models" {line}>
   <section class="flex flex-col gap-1.5" aria-label="Speech models">
     {#each w.downloads as model (model.id)}
-      <div class="s-option model {model.state}" data-model={model.id} data-state={model.state}>
+      {@const kind = kindOf(model)}
+      {@const folder = folderOf(model)}
+      <div
+        class="s-option model {folder ? 'done' : model.state}"
+        data-model={model.id}
+        data-state={folder ? "folder" : model.state}
+      >
         <span class="state" aria-hidden="true">
-          {#if model.state === "done"}
+          {#if folder || model.state === "done"}
             <Icon name="check" size={13} />
           {:else if model.state === "failed"}
             <Icon name="alert" size={13} />
@@ -46,7 +61,9 @@
           <span class="flex items-baseline justify-between gap-2">
             <span class="name truncate">{model.label}</span>
             <span class="status tabular-nums">
-              {#if model.state === "downloading"}
+              {#if folder}
+                From folder
+              {:else if model.state === "downloading"}
                 {percent(model)} %
               {:else if model.state === "waiting"}
                 Waiting
@@ -55,45 +72,36 @@
               {/if}
             </span>
           </span>
-          {#if model.state === "failed"}
-            <span class="meta error truncate" title={model.error}>{model.error || "Failed"}</span>
-          {:else}
-            <span class="meta truncate">{meta(model)}</span>
-          {/if}
-          {#if model.state === "downloading"}
+          <span class="flex items-baseline justify-between gap-2">
+            {#if folder}
+              <span class="meta truncate" title={folder}>{folderName(folder)}</span>
+            {:else if model.state === "failed"}
+              <span class="meta error truncate" title={model.error}>{model.error || "Failed"}</span>
+            {:else}
+              <span class="meta truncate">{meta(model)}</span>
+            {/if}
+            {#if kind}
+              {#if folder}
+                <button class="link" onclick={() => w.useDownload(kind)}>Download instead</button>
+              {:else}
+                <button class="link" onclick={() => w.chooseFolder(kind)}>Use a folder…</button>
+              {/if}
+            {/if}
+          </span>
+          {#if model.state === "downloading" && !folder}
             <Progress value={model.total ? model.done / model.total : 0} class="mt-0.5" />
           {/if}
         </span>
-        {#if model.state === "failed"}
+        {#if model.state === "failed" && !folder}
           <button class="s-btn" onclick={() => w.download()}>Retry</button>
         {/if}
       </div>
     {/each}
   </section>
 
-  <details class="s-more" open={!!(w.sttPath || w.ttsDir)}>
-    <summary>Use model folders instead</summary>
-    <div class="mt-3 flex flex-col gap-2">
-      {#each [{ kind: "stt" as const, label: "Speech recognition", path: w.sttPath }, { kind: "tts" as const, label: "Kokoro voices", path: w.ttsDir }] as row}
-        <div class="flex items-center gap-2">
-          <span class="w-[8.5rem] shrink-0 text-[12.5px] text-ink-2">{row.label}</span>
-          <span
-            class="min-w-0 flex-1 truncate text-[12px] {row.path ? 'text-ink' : 'text-ink-3'}"
-            title={row.path}
-          >
-            {row.path ? folderName(row.path) : "Download"}
-          </span>
-          {#if row.path}
-            <button class="s-btn" onclick={() => w.useDownload(row.kind)}>Download</button>
-          {/if}
-          <button class="s-btn" onclick={() => w.chooseFolder(row.kind)}>Choose…</button>
-        </div>
-      {/each}
-      {#if w.folderError}
-        <p class="s-status error">{w.folderError}</p>
-      {/if}
-    </div>
-  </details>
+  {#if w.folderError}
+    <p class="s-status error mt-2">{w.folderError}</p>
+  {/if}
 </Step>
 
 <style>
@@ -145,5 +153,18 @@
   }
   .error {
     color: var(--color-danger);
+  }
+  /* Choosing a folder instead: quiet until pointed at */
+  .link {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--color-ink-3);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+  }
+  .link:hover {
+    color: var(--color-ink);
   }
 </style>

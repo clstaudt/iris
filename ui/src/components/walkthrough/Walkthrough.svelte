@@ -112,7 +112,10 @@
         {/if}
       </div>
       {#if between}
-        <button class="quiet" onclick={() => w.skip()}>Skip</button>
+        <!-- Nothing to skip once every speech model is on this computer -->
+        {#if !(w.step === "models" && w.downloads.length && w.downloads.every((m) => m.state === "done"))}
+          <button class="quiet" onclick={() => w.skip()}>Skip</button>
+        {/if}
         <button class="primary" onclick={() => w.next()}>Continue</button>
       {:else}
         <button class="primary" onclick={() => w.finish()} disabled={w.starting}>
