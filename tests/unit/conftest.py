@@ -1,0 +1,35 @@
+"""The unit tests call no model and download none, on any computer.
+
+Starting Iris fetches missing speech models: through iris.downloads (the
+Kokoro voices come from GitHub, beyond Hugging Face's offline switch) and
+through Hugging Face (Whisper, Smart Turn). Here every download fails unless
+a test puts its own in place, and Hugging Face is offline, so a test that
+comes to need a model fails the same way on a fresh computer as in CI,
+instead of passing only where the model happens to be cached. A test of the
+download code itself, with the network replaced by stand-ins, is marked
+`downloads`.
+"""
+
+import huggingface_hub.constants as hf_constants
+import pytest
+
+from iris import downloads
+
+
+def _refused(*args, **kwargs):
+    raise RuntimeError("The unit tests download nothing; put a stand-in in place in the test")
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "downloads: tests the download code itself, with the network replaced by stand-ins"
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_downloads(request, monkeypatch):
+    monkeypatch.setattr(hf_constants, "HF_HUB_OFFLINE", True)
+    if request.node.get_closest_marker("downloads"):
+        return
+    monkeypatch.setattr(downloads, "download", _refused)
+    monkeypatch.setattr(downloads, "download_files", _refused)
