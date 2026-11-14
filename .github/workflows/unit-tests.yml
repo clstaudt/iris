@@ -1,0 +1,43 @@
+name: Unit tests
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The unit tests call no model and download none: offline, with empty
+      # model folders, a test that comes to need one fails instead of
+      # fetching it
+      HF_HUB_OFFLINE: "1"
+      HF_HOME: ${{ github.workspace }}/.empty/huggingface
+      IRIS_MODELS_DIR: ${{ github.workspace }}/.empty/models
+    steps:
+    - uses: actions/checkout@v6
+
+    # PortAudio for sounddevice, which the core imports. Its PulseAudio
+    # backend will not initialize without a sound server, so one runs with a
+    # null output; the unit tests open no audio device
+    - name: Install PortAudio and a sound server
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libportaudio2 pulseaudio
+        pulseaudio --start --exit-idle-time=-1
+        pactl load-module module-null-sink sink_name=silent
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "latest"
+        enable-cache: true
+
+    - name: Install Python dependencies
+      run: uv sync --frozen --all-extras --python 3.13
+
+    - name: Run the unit tests
+      run: |
+        mkdir -p "$HF_HOME" "$IRIS_MODELS_DIR"
+        uv run --frozen pytest tests/unit -q
