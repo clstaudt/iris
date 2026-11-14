@@ -1199,12 +1199,14 @@ try {
     await until("Stub small's server, model and web search", runs(stubUrl, "stub-small", false), 30_000);
     await quiet(1000);
     check(runs(stubUrl, "stub-small", false)(), `Stub small runs ${config().llm_model}`);
-    // Its replies come from that server
+    // Its replies come from that server, in Amnesia mode (see amnesia())
+    await amnesia(true);
     const since = await ask("Hello there.");
     const done = await eventAfter("chat.done", since, () => true, 60_000);
     check(done.data.text.includes("the stub's answer"), `the reply came from elsewhere: ${done.data.text}`);
     check(stubRequests.at(-1)?.model === "stub-small", `the server was asked for ${stubRequests.at(-1)?.model}`);
     await voiceDone();
+    await amnesia(false);
     await useSetup("Stub large");
     await until("Stub large's model", runs(stubUrl, "stub-large", false), 30_000);
   });
@@ -1542,6 +1544,15 @@ try {
       images: parts.filter((p) => p.type === "image_url").map((p) => p.image_url.url),
     };
   };
+  /** Amnesia on or off. The test's own server answers in Amnesia mode, so its
+   *  replies are forgotten once the conversation leaves it: kept, the real
+   *  model, which answers without reasoning first (irisdev/e2e_core.py),
+   *  imitated them instead of answering */
+  async function amnesia(on) {
+    await rpc("memory.set_amnesia", { on });
+    await until(`amnesia ${on ? "on" : "off"}`, () => config().amnesia === on);
+  }
+
   /** Switch the core to a server and model through the Language model stage. */
   async function runOn(server, llm) {
     await openStage("Language model");
@@ -1557,6 +1568,7 @@ try {
     await until(`${llm} on offer`, () => option(llm).count(), 30_000);
     if (config().llm_model !== llm) await option(llm).first().click();
     await until(`${llm} in use`, () => config().llm_model === llm, 30_000);
+    await amnesia(server === stubUrl);
   }
 
   const NOTES = "The lighthouse keeper's cat is called Saffron Quill.";
