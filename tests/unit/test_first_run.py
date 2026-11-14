@@ -64,6 +64,7 @@ class _Bar:
             bar.close()
 
 
+@pytest.mark.downloads
 def test_a_repo_download_knows_its_total_before_the_first_byte(monkeypatch):
     planned = [
         SimpleNamespace(file_size=100, will_download=True),
