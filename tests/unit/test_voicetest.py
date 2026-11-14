@@ -252,7 +252,10 @@ class TestStubModel:
         assert "".join(chunks) == SHORT
         assert len(chunks) > 3
         assert stub.requests[-1].body["messages"][-1]["content"] == "Capital of France?"
-        assert stub.requests[-1].kind == "reply" and stub.requests[-1].finished is not None
+        assert stub.requests[-1].kind == "reply"
+        # The client may have read the last chunk before the server notes
+        # that the reply is finished
+        assert under_test.wait_until(lambda: stub.requests[-1].finished is not None, 2)
 
     def test_a_story_gets_the_long_reply(self):
         assert reply_to([{"role": "user", "content": "Tell me a long story"}]) == LONG

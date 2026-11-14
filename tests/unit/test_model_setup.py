@@ -74,6 +74,7 @@ class FakeResponse:
         return False
 
 
+@pytest.mark.downloads
 def test_files_download_with_progress_and_land_whole(tmp_path, monkeypatch):
     bodies = {"https://x/model": b"m" * 10, "https://x/voices": b"v" * 6}
     monkeypatch.setattr(downloads.requests, "head", lambda url, **kw: FakeResponse(bodies[url]))
