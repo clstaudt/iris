@@ -118,6 +118,7 @@
           icon: "user",
           label: "Persona",
           value: config.persona,
+          meta: config.role_name || undefined,
           branch: true,
           tag: { thread: store.thread?.title || "New thread", open: toConversation },
         },

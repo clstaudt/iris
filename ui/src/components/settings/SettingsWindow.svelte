@@ -4,12 +4,14 @@
   import Icon from "../Icon.svelte";
   import Personas from "./Personas.svelte";
   import Pipeline from "./Pipeline.svelte";
+  import Roles from "./Roles.svelte";
   import SetupSwitcher from "./SetupSwitcher.svelte";
   import StageInspector from "./StageInspector.svelte";
 
   const PAGES: { id: SettingsPage; label: string; icon: string }[] = [
     { id: "pipeline", label: "Pipeline", icon: "flow" },
     { id: "personas", label: "Personas", icon: "users" },
+    { id: "roles", label: "Roles", icon: "target" },
   ];
 
   const page = $derived(PAGES.find((p) => p.id === store.settingsPage) ?? PAGES[0]);
@@ -31,6 +33,8 @@
         {item.label}
         {#if item.id === "personas" && store.personas.length}
           <span class="count">{store.personas.length}</span>
+        {:else if item.id === "roles" && store.roles.length}
+          <span class="count">{store.roles.length}</span>
         {/if}
       </button>
     {/each}
@@ -53,6 +57,8 @@
     <div class="min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4">
       {#if page.id === "pipeline"}
         <Pipeline />
+      {:else if page.id === "roles"}
+        <Roles />
       {:else}
         <Personas />
       {/if}
