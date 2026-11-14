@@ -610,6 +610,7 @@ def test_the_loop_goes_on_when_the_audio_fails_in_it():
     a._was_dormant = False  # awake until now: it falls asleep, with a chime
     a._last_window_emit = 0.0
     a.turn_queue = queue.Queue()
+    a._turn_lock = threading.Lock()
     a.transcriber = object()
     speaker = Speaker()
     a.player = SimpleNamespace(audio=speaker)

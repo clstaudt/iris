@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from iris.assistant import VoiceAssistant
 from iris.audio import AudioPlayer
-from iris.assistant import VoiceAssistant
 from iris.controller import AssistantController, silent_microphone_message
 from iris.events import EventBus
 from iris.llm import ConversationManager
