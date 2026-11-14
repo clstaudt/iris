@@ -183,6 +183,29 @@ def test_once_the_voice_is_ready_the_language_is_spoken():
     assistant.speech_pipeline.queue_speech.assert_called_once_with("Guten Tag.", language="de")
 
 
+def test_a_persona_whose_cloned_voice_is_not_here_is_told_to_choose_another():
+    """The conversation said the voice for English could not be loaded and
+    the cloned voice was gone. It says once which persona's voice it is,
+    and where to choose another; nothing is made ready for it."""
+    assistant = _speaker(ready=False)
+    assistant.tts_generator.voice = "clone:noam-2"
+    assistant.persona = SimpleNamespace(name="Noam")
+    asked = []
+    assistant.on_voice_not_ready = lambda *voice: asked.append(voice)
+
+    assistant._speak("Guten Tag.")
+    assistant._speak("Wie geht's?")
+
+    assistant.speech_pipeline.queue_speech.assert_not_called()
+    assert asked == [] and assistant._reply_unspoken
+    [notice] = [c.args[1] for c in assistant.event_bus.emit.call_args_list if c.args[0] == "notice"]
+    assert notice == {
+        "message": "Noam's voice, Noam 2, cannot be found. "
+        "Choose another voice for Noam in the persona editor.",
+        "kind": "voice_missing",
+    }
+
+
 # ---------------------------------------------------------------------------
 # The jobs that make voices ready
 # ---------------------------------------------------------------------------
@@ -257,6 +280,13 @@ def test_a_cloned_voice_is_downloaded_for_then_made(hub):
     assert titles[-1] == "Ada's voice is ready for German"
     assert (folder / "german.safetensors").is_file()
     assert voice_ready("kyutai", "clone:ada", "de")
+
+
+def test_a_cloned_voice_that_is_not_here_is_not_made_ready(hub):
+    events = Events()
+    jobs = _readier(events)
+    assert jobs.request("kyutai", "clone:noam-2", "de", "Noam 2", ["Noam"]) is None
+    assert jobs.jobs() == [] and events.jobs() == []
 
 
 def test_without_access_a_cloned_voice_fails_and_says_where_to_connect(hub):

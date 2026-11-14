@@ -347,12 +347,19 @@ def test_another_voice_of_the_same_name_gets_a_number():
     assert [v["name"] for v in cloned_voices()] == ["Ada", "Ada 2"]
 
 
-def test_a_forgotten_voice_is_gone_and_its_folder_not_taken_again():
+def test_a_deleted_voice_is_gone_and_its_folder_not_taken_again():
     folder = a_voice("Ada")
     assert forget_voice("clone:ada")
     assert not folder.exists() and cloned_voices() == []
     # A voice loaded from that folder may still be in memory
     assert a_voice("Ada").name == "ada-2"
+
+
+def test_a_new_voice_takes_no_folder_a_persona_names():
+    """A persona that names a voice no longer there would speak with the new
+    one unasked."""
+    named = {"clone:ada"}.__contains__
+    assert make_voice(speech(8, rate=cloning.RATE), "Ada", named).name == "ada-2"
 
 
 def test_only_folders_of_the_voices_folder_are_cloned_voices():
@@ -620,17 +627,9 @@ def test_the_cloning_model_downloads_with_progress(kyutai):
     assert kyutai.fetched == ["english"]
 
 
-def test_a_voice_a_persona_speaks_with_is_not_dropped():
-    a_voice("Ada")
-    a_voice("Bea")
-    service = Cloning(lambda t, d: None, in_use=lambda voice: voice == "clone:ada")
-    assert service.forget("clone:ada") == {"ok": True, "forgotten": False}
-    assert service.forget("clone:bea") == {"ok": True, "forgotten": True}
-    assert service.forget("anna") == {"ok": True, "forgotten": False}
-    assert [v["id"] for v in cloned_voices()] == ["clone:ada"]
-
-
-def test_saving_a_persona_cloned_again_drops_its_old_voice(kyutai):
+def test_saving_a_persona_with_a_voice_cloned_again_keeps_the_one_before(kyutai, caplog):
+    """Iris removed the voice cloned before, and so lost voices the user
+    liked. Every voice stays until it is deleted on the Voices page."""
     a_voice("Ada")
     a_voice("Ada")
     controller = AssistantController(EventBus())
@@ -638,18 +637,56 @@ def test_saving_a_persona_cloned_again_drops_its_old_voice(kyutai):
     first = controller.persona_save({**ada, "voice": "clone:ada"})
     assert personas.find_persona(first["id"]).voice == "clone:ada"
 
-    controller.persona_save({**ada, "id": first["id"], "voice": "clone:ada-2"})
+    with caplog.at_level(logging.INFO, logger="iris.cloning"):
+        controller.persona_save({**ada, "id": first["id"], "voice": "clone:ada-2"})
+        controller.persona_save({**ada, "id": first["id"], "voice": "anna"})
 
-    assert [v["id"] for v in cloned_voices()] == ["clone:ada-2"]
-    # Switching to a voice of the catalogue keeps the clone to switch back to
-    controller.persona_save({**ada, "id": first["id"], "voice": "anna"})
-    assert [v["id"] for v in cloned_voices()] == ["clone:ada-2"]
+    assert [v["id"] for v in cloned_voices()] == ["clone:ada", "clone:ada-2"]
     assert personas.load_all_personas()[first["id"]].voice == "anna"
+    assert not [r for r in caplog.records if "removing" in r.getMessage()]
+
+
+def test_a_voice_cloned_and_not_saved_with_a_persona_stays(kyutai, heard_by_energy):
+    kyutai.files.add(cloning_weights("english"))
+    service = Cloning(lambda t, d: None)
+    for _ in range(2):
+        service.use_file(base64.b64encode(wav(speech(8))).decode())
+        assert service.clone("Ada")["ok"]
+    assert [v["id"] for v in cloned_voices()] == ["clone:ada", "clone:ada-2"]
+
+
+def test_a_cloned_voice_that_is_not_here_is_not_given_to_a_persona():
+    """The editor offered a voice removed meanwhile, and the persona saved
+    with it named a voice that was not there."""
+    controller = AssistantController(EventBus())
+    noam = {"name": "Noam", "engine": "kyutai", "description": "", "speed": 1.0}
+
+    refused = controller.persona_save({**noam, "voice": "clone:noam-2"})
+
+    assert refused["ok"] is False
+    assert refused["error"] == "The voice Noam 2 cannot be found: choose another voice"
+    assert "noam" not in personas.load_all_personas()
+    # Nor in place of the voice a persona speaks with
+    persona_id = controller.persona_save({**noam, "voice": "anna"})["id"]
+    instead = controller.persona_save({**noam, "id": persona_id, "voice": "clone:noam-2"})
+    assert instead["ok"] is False
+    assert personas.load_all_personas()[persona_id].voice == "anna"
+
+
+def test_a_persona_whose_cloned_voice_is_not_here_still_saves_its_other_changes():
+    """Its wake word, say: its voice is for the user to choose again."""
+    noam = {"name": "Noam", "engine": "kyutai", "voice": "clone:noam-2", "description": ""}
+    persona_id = personas.save_persona(noam)
+    personas.reload_personas()
+    controller = AssistantController(EventBus())
+
+    assert controller.persona_save({**noam, "id": persona_id, "speed": 1.2})["ok"]
+    assert controller.set_persona_words(persona_id, wake_word="Hey Noam")["ok"]
+    saved = personas.load_all_personas()[persona_id]
+    assert (saved.voice, saved.speed, saved.wake_word) == ("clone:noam-2", 1.2, "Hey Noam")
 
 
 def test_slow_cloning_requests_do_not_hold_up_the_others():
     slow = ("voice.clone_access", "voice.clone_connect", "voice.clone_fetch", "voice.clone")
     for method in (*slow, "voice.record", "voice.sample"):
         assert method in rpc_server.CONCURRENT
-    # Dropping a voice comes after the persona saved with it
-    assert "voice.forget" not in rpc_server.CONCURRENT

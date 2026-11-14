@@ -18,6 +18,11 @@ fetched first, with progress. Never while Iris speaks: a reply in a
 language the voice is not made for yet is shown, not spoken. Personas name
 the voice "clone:<folder>". It is the same voice in every language.
 
+A cloned voice stays until the user deletes it on the Voices page: one made
+in the persona editor and not saved with the persona, or made again before
+saving, stays in the library too, listed with the others. Nothing else
+removes a voice's folder, and every removal is logged.
+
 Cloning goes through KYUTAI: the Hugging Face login, the access to the gated
 repo, and the model loaded from it. Tests put a stand-in in its place.
 """
@@ -137,18 +142,23 @@ def voice_folder(voice: str) -> Path | None:
     return None
 
 
-def is_cloned(voice: str) -> bool:
-    """Whether a voice is one cloned in the app."""
-    return voice_folder(voice) is not None
-
-
 def voice_name(folder: Path) -> str:
-    """A cloned voice's name, as the editor shows it."""
+    """A cloned voice's name, as the editor shows it; for a folder that
+    keeps none (or is not there), its name as words ("noam-2" is Noam 2)."""
+    fallback = folder.name.replace("-", " ").title()
     try:
         info = yaml.safe_load((folder / INFO_FILE).read_text()) or {}
-        return str(info.get("name") or "").strip() or folder.name.title()
+        return str(info.get("name") or "").strip() or fallback
     except (OSError, yaml.YAMLError, AttributeError):
-        return folder.name.title()
+        return fallback
+
+
+def voice_missing(voice: str) -> bool:
+    """Whether a voice is a cloned one that is not here: its folder, or the
+    sample in it, is not there (removed outside Iris, or by an Iris that
+    dropped voices not saved with a persona). Every other voice is here."""
+    folder = voice_folder(voice)
+    return folder is not None and not (folder / SAMPLE_FILE).is_file()
 
 
 def describe(folder: Path) -> dict:
@@ -197,18 +207,22 @@ def _write_sample(folder: Path, sample: np.ndarray):
     sf.write(folder / SAMPLE_FILE, sample, RATE, subtype="PCM_16")
 
 
-# Folders of voices forgotten while the core runs are not taken again: a
+# Folders of voices deleted while the core runs are not taken again: a
 # voice loaded under that folder may still be kept in memory
 _forgotten: set[str] = set()
 
 
-def make_voice(sample: np.ndarray, name: str) -> Path:
+def make_voice(
+    sample: np.ndarray, name: str, taken: Callable[[str], bool] = lambda voice: False
+) -> Path:
     """A folder for a new voice, named for the persona, holding its sample
-    (at RATE) and its name. Another voice of that name gets a number."""
+    (at RATE) and its name. Another voice of that name gets a number, and
+    so does one whose folder a persona names (taken) though it is not
+    there: the persona would speak with the new voice unasked."""
     base = slug(name)
     shown = name.strip() or "Cloned voice"
     folder, n = voices_dir() / base, 2
-    while folder.exists() or folder.name in _forgotten:
+    while folder.exists() or folder.name in _forgotten or taken(PREFIX + folder.name):
         folder, n = voices_dir() / f"{base}-{n}", n + 1
     folder.mkdir(parents=True)
     if n > 2:
@@ -252,12 +266,19 @@ def _take_over(made: Path, folder: Path):
     shutil.rmtree(made, ignore_errors=True)
 
 
+def _remove(folder: Path, why: str):
+    """Remove a voice's folder, and say so in the log."""
+    logger.info("%s: removing %s", why, folder)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def forget_voice(voice: str) -> bool:
-    """Remove a cloned voice's folder. Returns whether one was removed."""
+    """Remove a cloned voice's folder: the user deleted it on the Voices
+    page, the only place a voice is deleted. Returns whether one was."""
     folder = voice_folder(voice)
     if folder is None or not folder.is_dir():
         return False
-    shutil.rmtree(folder, ignore_errors=True)
+    _remove(folder, f"Deleting the cloned voice {voice} ({voice_name(folder)})")
     _forgotten.add(folder.name)
     return True
 
@@ -646,9 +667,10 @@ def _faded(piece: np.ndarray, seconds: float = 0.01) -> np.ndarray:
 class Cloning:
     """Voice cloning as the persona editor goes through it (the voice.*
     methods): access to the cloning model and a login for it, its download,
-    a sample recorded or chosen, the voice made of it, and a voice dropped
-    again. Pushes clone.progress {done, total} while the model downloads,
-    and clone.level {level, seconds} while a sample is recorded."""
+    a sample recorded or chosen, and the voice made of it, which stays in
+    the library whether or not a persona is saved with it. Pushes
+    clone.progress {done, total} while the model downloads, and
+    clone.level {level, seconds} while a sample is recorded."""
 
     def __init__(
         self,
@@ -664,7 +686,8 @@ class Cloning:
             assistant: The running assistant, if any: its microphone is
                 recorded from, and it does not listen meanwhile
             interrupt: Stops what Iris says, before a recording
-            in_use: Whether a persona speaks with a voice
+            in_use: Whether a persona speaks with a voice: a new voice
+                takes no folder a persona names
             changed: Told a voice made again from a new sample, so what was
                 loaded of it before is dropped
         """
@@ -794,15 +817,15 @@ class Cloning:
                 _write_sample(folder, self._sample)
                 _write_info(folder, name=voice_name(target))
             else:
-                folder = make_voice(self._sample, name)
+                folder = make_voice(self._sample, name, self._in_use)
             try:
                 make_language(folder, "english")
             except CloneAccessError as e:
-                shutil.rmtree(folder, ignore_errors=True)
+                _remove(folder, "The voice could not be made without the cloning model")
                 return {"ok": False, "error": str(e), "access": True}
             except Exception as e:
                 logger.exception("The voice could not be made")
-                shutil.rmtree(folder, ignore_errors=True)
+                _remove(folder, "The voice could not be made")
                 return {"ok": False, "error": f"The voice could not be made: {brief(e)}"}
             if target is not None:
                 _take_over(folder, target)
@@ -817,17 +840,3 @@ class Cloning:
             return {"ok": True, "voice": describe(rename_voice(voice, name))}
         except ValueError as e:
             return {"ok": False, "error": str(e)}
-
-    def forget(self, voice: str) -> dict:
-        """Drop a cloned voice no persona speaks with (one made in the editor
-        and not kept). One a persona speaks with stays."""
-        if not is_cloned(voice) or self._in_use(voice):
-            return {"ok": True, "forgotten": False}
-        return {"ok": True, "forgotten": forget_voice(voice)}
-
-    def replaced(self, previous: str, voice: str):
-        """A persona saved with a new cloned voice in place of the one cloned
-        before (cloned again): the old one goes, unless a persona speaks
-        with it."""
-        if previous != voice and is_cloned(previous) and is_cloned(voice):
-            self.forget(previous)

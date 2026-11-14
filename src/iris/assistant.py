@@ -16,7 +16,7 @@ import numpy as np
 import soundfile as sf
 from faster_whisper.audio import decode_audio
 
-from iris import engines, language
+from iris import cloning, engines, language
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
@@ -865,7 +865,8 @@ class VoiceAssistant:
         only shown: no other voice says it in its place. So is one in a
         language the voice is not ready for yet: what it needs is never
         fetched or made here, unseen, but by the app, with its progress in
-        the conversation, and the voice speaks the language once it is."""
+        the conversation, and the voice speaks the language once it is. A
+        cloned voice that is not here is ready for none."""
         if not self.speak_replies:
             return
         clean_text = self.conversation.clean_markdown(text)
@@ -885,11 +886,15 @@ class VoiceAssistant:
         """A piece of the reply is shown, not spoken: the persona's voice
         speaks its language, but is not ready for it yet. The app is told,
         to make it ready with its progress shown; without one to tell, the
-        user is told once for the voice and language."""
+        user is told once for the voice and language. A cloned voice that is
+        not here cannot be made ready: the user is told to choose another."""
         self._reply_unspoken = True
         if not self._reply_voiced:
             self._report_timing()
         generator = self.tts_generator
+        if cloning.voice_missing(generator.voice):
+            self._voice_missing()
+            return
         if self.on_voice_not_ready is not None:
             self.on_voice_not_ready(generator.engine, generator.voice, language_code)
             return
@@ -906,6 +911,28 @@ class VoiceAssistant:
                     f"replies in {name} are shown until it is.",
                     "kind": "not_ready",
                     "language": language_code,
+                },
+            )
+
+    def _voice_missing(self):
+        """The persona's voice is a cloned one that is not here, which
+        nothing can make ready: the user is told once for the voice which
+        persona speaks with it, and where to give it another."""
+        generator = self.tts_generator
+        told = (generator.engine, generator.voice, "")
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        persona = self.persona.name
+        name = cloning.voice_name(cloning.voice_folder(generator.voice))
+        logger.info("%s's voice %s cannot be found: shown, not spoken", persona, generator.voice)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{persona}'s voice, {name}, cannot be found. "
+                    f"Choose another voice for {persona} in the persona editor.",
+                    "kind": "voice_missing",
                 },
             )
 
