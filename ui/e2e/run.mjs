@@ -59,6 +59,8 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "iris-e2e-"));
 const AUDIO_FAULTS = path.join(home, ".e2e-audio.json");
 // The steps keep setups' homes under that name; the core's is this one
 const coreHome = home;
+/** Iris's memory, in the test's home */
+const MEMORY_DB = path.join(home, "memory.db");
 const realHome = os.homedir();
 const python =
   process.env.E2E_PYTHON ??
@@ -82,7 +84,7 @@ function startCore(log) {
       USERPROFILE: home,
       HF_HOME: process.env.HF_HOME ?? path.join(realHome, ".cache", "huggingface"),
       IRIS_MODELS_DIR: process.env.IRIS_MODELS_DIR ?? path.join(realHome, ".iris", "models"),
-      IRIS_MEMORY_DB: path.join(home, "memory.db"),
+      IRIS_MEMORY_DB: MEMORY_DB,
     },
     { command: python, args: ["-m", "irisdev.e2e_core"] }
   );
@@ -1344,6 +1346,7 @@ try {
   });
 
   await step("message box: Amnesia stops remembering, and starts again", async () => {
+    await toConversation();
     check(config().memory, "the core runs without memory");
     const amnesia = box.locator("button.toggle", { hasText: "Amnesia" });
     await amnesia.click();
@@ -1394,6 +1397,82 @@ try {
     check(!(await page.locator('nav[aria-label="Settings"]').count()), "the settings are still open");
     await page.locator('button[title="Close memory"]').click();
     await page.locator('button[title="Close memory"]').waitFor({ state: "detached", timeout: 5000 });
+  });
+
+  await step("memory: Forget everything asks first, then forgets all that is remembered and the conversation", async () => {
+    // Worth remembering, in a word no model makes up
+    const word = "Quillwort";
+    const stored = (await rpc("e2e.memory")).turns;
+    const since = await ask(`Please remember this: my neighbour's tortoise is called ${word}.`);
+    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
+    // Kept once it has been heard to the end
+    const kept = async (turns) => (await rpc("e2e.memory")).turns === turns;
+    await until("the exchange to be kept", () => kept(stored + 2), 120_000);
+    // Filed into a topic now, as it would be after a quiet spell
+    const { topics } = await rpc("e2e.file_memory");
+    check(topics.length > 0, "nothing was filed");
+    const before = await rpc("e2e.memory");
+    check(before.turns > 0 && before.words > 0, `the core keeps ${before.turns} turns, ${before.words} words`);
+    check(before.prompt.includes(word), "the next prompt does not carry the conversation");
+
+    // The panel shows what is remembered, and offers to forget it all
+    await page.locator('button[title="Memory"]').click();
+    const panel = page.locator("aside", { has: page.locator('button[title="Close memory"]') });
+    const topic = panel.getByText(topics[0]).first();
+    await topic.waitFor({ timeout: 5000 });
+    const forget = panel.locator("button.danger", { hasText: "Forget everything" });
+    await forget.waitFor({ timeout: 5000 });
+    await page.screenshot({ path: path.join(OUT, "memory-panel.png") });
+
+    // Asked first, and Cancel changes nothing
+    const rows = page.locator(".row");
+    const shown = await rows.count();
+    await forget.click();
+    const confirm = panel.locator(".confirm");
+    await confirm.waitFor({ timeout: 5000 });
+    const question = (await confirm.locator("p").innerText()).trim();
+    check(question === "Forget everything Iris remembers? This cannot be undone.", `asked: ${question}`);
+    check(!(await forget.count()), "the button stays beside the question");
+    await page.screenshot({ path: path.join(OUT, "memory-forget-confirm.png") });
+    await confirm.locator("button", { hasText: "Cancel" }).click();
+    await forget.waitFor({ timeout: 5000 });
+    check(!calls.some((c) => c.at >= since && c.method === "memory.forget_all"), "Cancel forgot");
+    const still = await rpc("e2e.memory");
+    check(still.turns === before.turns && still.topics === before.topics, "Cancel changed what is remembered");
+    check((await rows.count()) === shown, "Cancel changed the conversation");
+    check(await topic.isVisible(), "Cancel took the topic away");
+
+    // Confirmed, all of it goes: in the panel, the conversation and the core
+    const confirmed = Date.now();
+    await forget.click();
+    await confirm.locator("button.solid-danger", { hasText: "Forget everything" }).click();
+    await eventAfter("memory.forgotten", confirmed, () => true, 30_000);
+    await panel.getByText("Nothing remembered yet").waitFor({ timeout: 5000 });
+    check(!(await panel.getByText(topics[0]).count()), "the topic is still listed");
+    await until("the panel to offer nothing", async () => !(await forget.count()) && !(await confirm.count()));
+    await until("an empty conversation", async () => (await rows.count()) === 0);
+    await page.getByText("Speak, or start typing.").waitFor({ timeout: 5000 });
+    const after = await rpc("e2e.memory");
+    check(after.turns === 0 && after.topics === 0 && after.words === 0,
+      `the core still keeps ${after.turns} turns, ${after.topics} topics, ${after.words} words`);
+    check(after.context.length === 0, `the next prompt still carries ${after.context.length} messages`);
+    check(!after.prompt.includes(word), "the next prompt still carries the conversation");
+    const file = fs.readFileSync(MEMORY_DB).toString("latin1").toLowerCase();
+    check(!file.includes(word.toLowerCase()), "the memory file still holds the words");
+    check((await rpc("chat.history")).events.length === 0, "a window that reloads would show the conversation again");
+
+    // The next message is answered as ever, and remembered
+    const next = await ask("Reply with exactly: a clean slate.");
+    const reply = await eventAfter("chat.done", next, () => true, 180_000);
+    check(!reply.data.interrupted && reply.data.text.trim(), "the reply did not come");
+    await until("the next exchange to be remembered", () => kept(2), 120_000);
+    const said = await page.locator(".bubble.user").allInnerTexts();
+    check(said.length === 1 && said[0] === "Reply with exactly: a clean slate.", `the conversation shows ${said.join(" | ")}`);
+    // There is something to forget again
+    await page.locator('button[title="Memory"]').click();
+    await forget.waitFor({ timeout: 5000 });
+    await toConversation();
   });
 
   await step("message box: Enter sends, Shift+Enter breaks the line, Escape leaves, typing anywhere lands in it", async () => {

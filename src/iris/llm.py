@@ -290,6 +290,11 @@ class ConversationManager:
         # written to memory; its turns live here and vanish when it ends
         self.amnesia = False
         self.unremembered: list[dict] = []
+        # How many times everything was forgotten, and how many times when
+        # the reply being given began: a reply begun before is not kept
+        self._forgotten = 0
+        self._reply_began = 0
+        self._keeping = threading.Lock()
         # Files shared in this conversation, kept for a few turns and never
         # stored: [(attachment, turns left)], oldest first
         self.shared: list[tuple[Attachment, int]] = []
@@ -569,23 +574,41 @@ class ConversationManager:
         self.amnesia = bool(on)
         self.unremembered = []
 
+    def forget(self):
+        """Start the conversation over, as if nothing had been said: no
+        recent turns, recalled topics or shared files go to the model any
+        more, nor does the language spoken last. A reply begun before is
+        not kept, should it end later. Amnesia mode stays as it is. What is
+        stored in memory is the store's to forget (MemoryStore.forget_all)."""
+        with self._keeping:
+            self._forgotten += 1
+            self.conversation_history = []
+            self.unremembered = []
+            self.pinned = {}
+            self.shared = []
+            self.reply = None
+            self.language = "en"
+
     def _record(self, prompt: str, answer: str, source: Optional[str]):
         """Keep the exchange: in memory when there is one, else in history.
         A turn Iris opened itself keeps what it was asked as a note."""
         # Only what was said: a tool call typed out as text, left in the
         # history, would be imitated in later replies
         answer = strip_markup(answer)
-        role = "system" if source == OPENING else "user"
-        if self.memory is not None and self.amnesia:
-            self.unremembered.append({"role": role, "content": prompt})
-            self.unremembered.append({"role": "assistant", "content": answer})
-            return
-        if self.memory is None:
-            self.conversation_history.append({"role": role, "content": prompt})
-            self.conversation_history.append({"role": "assistant", "content": answer})
-            return
-        self.memory.store.add_turn(role, prompt, None if role == "system" else source)
-        self.memory.store.add_turn("assistant", answer)
+        with self._keeping:
+            if self._reply_began != self._forgotten:
+                return  # everything was forgotten while it was being given
+            role = "system" if source == OPENING else "user"
+            if self.memory is not None and self.amnesia:
+                self.unremembered.append({"role": role, "content": prompt})
+                self.unremembered.append({"role": "assistant", "content": answer})
+                return
+            if self.memory is None:
+                self.conversation_history.append({"role": role, "content": prompt})
+                self.conversation_history.append({"role": "assistant", "content": answer})
+                return
+            self.memory.store.add_turn(role, prompt, None if role == "system" else source)
+            self.memory.store.add_turn("assistant", answer)
         self.memory.note_turn()
 
     def add_note(self, text: str):
@@ -716,6 +739,7 @@ class ConversationManager:
             wrote out as text (see iris.markup)
         """
         self.reply = None
+        self._reply_began = self._forgotten
         self._cancelled.clear()
         client = self._streaming = self._reply_client()
         try:

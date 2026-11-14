@@ -1,6 +1,7 @@
 """Stop acts at once, whatever the model is doing, and a system message is
 only ever the first one."""
 
+import queue
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -181,6 +182,52 @@ def test_stop_ends_a_reply_the_model_has_not_begun():
     assert assistant.speech_pipeline.stopped
     assert not assistant.status_manager.status_thinking
     assistant.event_bus.emit.assert_any_call("chat.done", {"text": "", "interrupted": True})
+
+
+class ForgettableModel(SilentModel):
+    """A model thinking over its reply, in a conversation that can be
+    forgotten."""
+
+    def __init__(self):
+        super().__init__()
+        self.forgotten = threading.Event()
+
+    def forget(self):
+        self.forgotten.set()
+
+
+def test_forgetting_everything_stops_the_reply_first_and_waits_for_the_turn():
+    """As Stop stops it; everything is forgotten only once the turn is over,
+    so nothing of it is kept or shown after."""
+    conversation = ForgettableModel()
+    assistant = _assistant(conversation)
+    assistant.memory = None
+    assistant.turn_queue = queue.Queue()
+    assistant._turn_lock = threading.Lock()
+    assistant.conversation_language = "de"
+
+    def turn():  # as the run loop takes one
+        with assistant._turn_lock:
+            assistant.chat("Tell me a long story")
+
+    thread = threading.Thread(target=turn)
+    thread.start()
+    time.sleep(0.2)  # the model is thinking
+    assistant.turn_queue.put({"text": "And another one", "id": "t2", "attachments": []})
+    started = time.monotonic()
+    assistant.forget_everything()
+
+    assert time.monotonic() - started < 2
+    thread.join(2)
+    assert not thread.is_alive()
+    assert conversation.cancelled.is_set() and conversation.forgotten.is_set()
+    told = [call.args for call in assistant.event_bus.emit.call_args_list]
+    stopped = told.index(("chat.done", {"text": "", "interrupted": True}))
+    assert stopped < told.index(("memory.forgotten", {}))
+    # The message waiting goes too, and the next one is not stopped
+    assert assistant.turn_queue.empty()
+    assert not assistant.interrupt_event.is_set()
+    assert assistant.conversation_language == "en"
 
 
 def test_an_error_from_the_model_is_still_shown():

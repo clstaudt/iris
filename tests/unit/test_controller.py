@@ -3,12 +3,15 @@
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from iris.assistant import VoiceAssistant
 from iris.audio import AudioPlayer
 from iris.assistant import VoiceAssistant
 from iris.controller import AssistantController, silent_microphone_message
 from iris.events import EventBus
-from iris.memory import MemoryStore
+from iris.llm import ConversationManager
+from iris.memory import MemoryKeeper, MemoryStore
 from iris.personas import get_persona
 from iris.tts import SpeechGenerator
 
@@ -282,6 +285,49 @@ def test_the_conversation_before_a_restart_comes_back_marked_as_such():
         {"type": "chat.user", "data": {"text": "Hi", "source": "text", "restored": True}},
         {"type": "chat.done", "data": {"text": "Hello", "interrupted": False, "restored": True}},
     ]
+
+
+def _remembering_assistant(bus, store, turns):
+    """A running assistant, without its models, that remembers in store."""
+    assistant = object.__new__(VoiceAssistant)
+    assistant.event_bus = bus
+    assistant.interrupt_event = threading.Event()
+    assistant.speech_pipeline = FakePipeline()
+    assistant._turn_lock = threading.Lock()
+    assistant.turn_queue = turns
+    assistant.memory = MemoryKeeper(store, lambda messages, schema: {})
+    with patch("iris.llm.ollama") as ollama:
+        ollama.show.return_value.modelinfo = {}
+        assistant.conversation = ConversationManager("fake-llm", memory=assistant.memory)
+    assistant.conversation_language = "en"
+    return assistant
+
+
+def test_forgetting_everything_is_answered_and_told_to_every_window(tmp_path):
+    """memory.forget_all: all that is remembered goes, and the conversation
+    shown goes with it, in the app (memory.forgotten) and for a window that
+    reloads, as do the messages waiting to be answered."""
+    bus = EventBus()
+    told = []
+    bus.subscribe(lambda kind, data: told.append(kind))
+    controller = AssistantController(bus)
+    assert controller.memory_forget_all()["ok"] is False  # nothing runs yet
+
+    store = MemoryStore(tmp_path / "memory.db")
+    controller.assistant = _remembering_assistant(bus, store, controller._turns)
+    store.create_topic("Bank card", "the PIN", "The user's PIN is 4711.")
+    store.add_turn("user", "My PIN is 4711.", "text")
+    store.add_turn("assistant", "Noted.")
+    bus.emit("chat.user", {"text": "My PIN is 4711.", "source": "text", "id": "t1"})
+    bus.emit("chat.done", {"text": "Noted.", "interrupted": False})
+    controller.send_text("And my password is swordfish.")
+
+    assert controller.memory_forget_all() == {"ok": True}
+    assert told[-1] == "memory.forgotten"
+    assert controller.history() == {"events": []}
+    assert controller.memory_topics() == {"topics": [], "turns": 0}
+    assert controller._turns.empty()
+    assert len(controller.assistant.conversation.manage_context()) == 1
 
 
 def test_a_silent_microphone_is_warned_about_once(monkeypatch):

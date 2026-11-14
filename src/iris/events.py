@@ -54,6 +54,9 @@ Event types:
                   "silent": bool}                    level 0.0-1.0, a voice came
                                                      through, only exact zeros
     memory.updated {}                                topics were filed or forgotten
+    memory.forgotten {}                              everything was forgotten: the
+                                                     conversation shown goes too,
+                                                     and the messages waiting
 """
 
 import threading

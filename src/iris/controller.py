@@ -252,6 +252,10 @@ class AssistantController:
             with self._transcript_lock:
                 self._transcript.append({"type": event_type, "data": dict(data)})
                 del self._transcript[:-TRANSCRIPT_LIMIT]
+        elif event_type == "memory.forgotten":
+            # Nor does a window that reloads show the conversation again
+            with self._transcript_lock:
+                self._transcript.clear()
         if event_type == "turn.timing":
             self._timings.append(dict(data))
         if event_type == "flags":
@@ -790,10 +794,11 @@ class AssistantController:
                 )
 
     def memory_topics(self) -> dict:
-        """The topics Iris remembers, most recently discussed first."""
+        """The topics Iris remembers, most recently discussed first, and
+        how many turns it keeps in all, filed under a topic or not yet."""
         memory = getattr(self.assistant, "memory", None)
         if memory is None:
-            return {"topics": []}
+            return {"topics": [], "turns": 0}
         counts = memory.store.turn_counts()
         return {
             "topics": [
@@ -805,7 +810,8 @@ class AssistantController:
                     "turns": counts.get(t.id, 0),
                 }
                 for t in memory.store.topics()
-            ]
+            ],
+            "turns": memory.store.turn_count(),
         }
 
     def memory_topic(self, topic_id: int) -> dict:
@@ -839,6 +845,15 @@ class AssistantController:
             return {"ok": False, "error": "Memory is off"}
         memory.store.forget(int(topic_id))
         self.bus.emit("memory.updated", {})
+        return {"ok": True}
+
+    def memory_forget_all(self) -> dict:
+        """Forget everything: all that is remembered, and the conversation,
+        in the model's context and in the app (see
+        VoiceAssistant.forget_everything)."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        self.assistant.forget_everything()
         return {"ok": True}
 
     def _progress(self, model: str, label: str):
