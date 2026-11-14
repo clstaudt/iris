@@ -9,10 +9,11 @@ a French voice speaking English, a Pocket TTS voice close to Iris's own,
 and voices speaking each language Iris speaks: French, Italian, Spanish,
 Portuguese, Japanese, Chinese, Hindi, German and Dutch. Kokoro is called
 directly with the language to speak, so a French voice can speak English
-with its accent; Spanish, Portuguese and Hindi, which kokoro-onnx does not
-take by name, it speaks from espeak's phonemes, as Iris does. German and
-Dutch are spoken by Pocket TTS, cloning a voice from a prompt (not Pocket's
-default voices, which Iris uses).
+with its accent, and is given each language as Iris gives it (numbers in
+words, espeak's phonemes for the languages kokoro-onnx does not take by
+name). German and Dutch are
+spoken by Pocket TTS, cloning a voice from a prompt (not Pocket's default
+voices, which Iris uses), numbers in words.
 
 Said as pieces, a sentence with pauses ends each piece with a sentence's
 fall in pitch. Spliced, it is synthesized whole and the pauses are cut into
@@ -30,10 +31,10 @@ import numpy as np
 import soundfile as sf
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
-from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 from pocket_tts import TTSModel
 
-from iris.tts import KOKORO_MODEL_FILE, KOKORO_VOICES_FILE, POCKET_LANGUAGES, find_kokoro_models
+from iris.numbers import numbers_in_words
+from iris.tts import KOKORO_MODEL_FILE, KOKORO_VOICES_FILE, POCKET_LANGUAGES, find_kokoro_models, kokoro_speech
 from irisdev.voicetest.acoustics import RATE, in_room, room, to_rate
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,10 @@ class UserVoice:
 
     def _key(self, text: str) -> str:
         spec = f"{self.engine}:{self._spoken_voice()}:{self.language}:{self.speed}:{text}"
+        # Read as Iris reads it (numbers in words), kept apart from what was
+        # synthesized before it did
+        if self.language != "en" and any(c.isdigit() for c in text):
+            spec += ":as-iris-reads-it"
         return hashlib.sha1(spec.encode()).hexdigest()[:16]
 
     def _spoken_voice(self) -> str:
@@ -151,15 +156,13 @@ class UserVoice:
     def _synthesize(self, text: str) -> tuple[np.ndarray, int]:
         if self.engine == "kokoro":
             kokoro, code = self._kokoro_engine(), kokoro_language(self.voice, self.language)
-            if code in KOKORO_ONNX_LANGUAGES:
-                audio, rate = kokoro.create(text, voice=self.voice, speed=self.speed, lang=code)
-            else:
-                # Named only to pass kokoro-onnx's check: the phonemes say it all
-                audio, rate = kokoro.create(text, voice=self.voice, speed=self.speed, lang="en-us",
-                                            phonemes=kokoro.tokenizer.phonemize(text, code))
+            spoken = kokoro_speech(kokoro.tokenizer, text, self.language, code)
+            audio, rate = kokoro.create(voice=self.voice, speed=self.speed, **spoken)
             return np.asarray(audio, dtype=np.float32), int(rate)
         if self.engine == "kyutai":
             model, state, _ = self._pocket_voice()
+            if self.language != "en":
+                text = numbers_in_words(text, self.language)
             return model.generate_audio(state, text).numpy().astype(np.float32), int(model.sample_rate)
         raise ValueError(f"The user cannot speak with the engine {self.engine!r}")
 

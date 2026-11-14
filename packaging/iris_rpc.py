@@ -2,14 +2,17 @@
 
 `iris-rpc --check` imports each engine and reports what fails, a smoke test
 for packaged builds (a missing library would otherwise only show up as a
-quietly disabled feature).
+quietly disabled feature). It also has the numbers said in words once, as
+a missing table shows only then.
 """
 
 import importlib
 import multiprocessing
+import re
 import sys
 import traceback
 
+from iris.numbers import numbers_in_words
 from iris.rpc_server import main
 
 # What the core needs at runtime, by feature
@@ -28,6 +31,12 @@ ENGINES = {
     "camera": "cv2",
     "screen capture": "mss",
     "audio devices": "sounddevice",
+    "numbers in words": "num2words",
+}
+
+# What the voices are given to read, and what it must not hold any more
+READS = {
+    "numbers in words": (lambda: numbers_in_words("am 27. November um 10:30 Uhr", "de"), r"\d"),
 }
 
 
@@ -40,6 +49,16 @@ def check() -> int:
         except Exception:
             failed += 1
             print(f"FAILED  {feature} ({module})")
+            traceback.print_exc(file=sys.stdout)
+    for feature, (read, left) in READS.items():
+        try:
+            said = read()
+            if not said.strip() or re.search(left, said):
+                raise ValueError(f"read as {said!r}")
+            print(f"ok      {feature} reads")
+        except Exception:
+            failed += 1
+            print(f"FAILED  {feature} reads")
             traceback.print_exc(file=sys.stdout)
     return failed
 

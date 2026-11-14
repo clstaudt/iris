@@ -32,7 +32,7 @@ from iris.engines import (
     speech_engine,
     spoken_languages,
 )
-from iris.events import brief
+from iris.numbers import numbers_in_words
 
 warnings.filterwarnings("ignore")
 
@@ -80,6 +80,27 @@ class KeptEspeak:
 
 
 kokoro_tokenizer.phonemizer = KeptEspeak()
+
+def kokoro_speech(tokenizer, text: str, language: str, code: str) -> dict:
+    """What Kokoro is given to say a text: the text, the language kokoro-onnx
+    is to read it in, and phonemes when they are made here.
+
+    kokoro-onnx reads numbers with English rules before espeak does, in any
+    language ("16,50 €" as 1650): French, Italian, Spanish and Portuguese
+    numbers are given in words. Spanish, Portuguese and Hindi, which
+    kokoro-onnx refuses by name, are given as espeak's phonemes, named as
+    English only to pass its check.
+
+    Args:
+        tokenizer: kokoro-onnx's tokenizer, for espeak's phonemes
+        language: Whisper code of the text's language
+        code: Kokoro's code for it (LANGUAGE_VOICE_MAP)
+    """
+    if language in ("fr", "it", "es", "pt"):
+        text = numbers_in_words(text, language)
+    if code in KOKORO_ONNX_LANGUAGES:
+        return {"text": text, "lang": code}
+    return {"text": text, "lang": "en-us", "phonemes": tokenizer.phonemize(text, code)}
 
 # Kokoro model download URLs
 KOKORO_MODEL_URL = (
@@ -280,19 +301,8 @@ class KokoroGenerator(SpeechEngine):
             temp_audio.close()
 
             # Generate audio using kokoro-onnx Python API
-            if kokoro_lang in KOKORO_ONNX_LANGUAGES:
-                audio_data, sample_rate = self.kokoro.create(
-                    text=text, voice=voice, speed=self.speed, lang=kokoro_lang
-                )
-            else:
-                # kokoro-onnx takes only some languages by name. Kokoro
-                # speaks Spanish, Portuguese and Hindi from espeak's
-                # phonemes, as Kokoro's own pipeline does; the language
-                # named is only there to pass kokoro-onnx's check
-                phonemes = self.kokoro.tokenizer.phonemize(text, kokoro_lang)
-                audio_data, sample_rate = self.kokoro.create(
-                    text=text, voice=voice, speed=self.speed, lang="en-us", phonemes=phonemes
-                )
+            spoken = kokoro_speech(self.kokoro.tokenizer, text, language, kokoro_lang)
+            audio_data, sample_rate = self.kokoro.create(voice=voice, speed=self.speed, **spoken)
 
             # Save audio to file
             sf.write(temp_audio.name, audio_data, sample_rate)
@@ -550,6 +560,12 @@ class PocketGenerator(SpeechEngine):
         model = self._model(pocket_lang)
         state = self._voice_state(pocket_lang, voice)
         try:
+            pocket_lang, voice = self.voice_for(language)
+            model = self._model(pocket_lang)
+            state = self._voice_state(pocket_lang, voice)
+            # Only the English model reads digits: "am Gas im November"
+            if pocket_lang != "english":
+                text = numbers_in_words(text, language)
             sentences = pocket_sentences(text)
             if not sentences:
                 return None

@@ -2036,11 +2036,10 @@ LANGUAGE_WEB = {"results": {
     "strasbourg": "Marché de Noël de Strasbourg: opens on 21 November.",
     "madrid|sevilla|seville": "Madrid to Sevilla by train: 45 euros.",
     "東京|tokyo": "東京の天気: 明日は晴れ、18度。",
-    # Numbers in words: Pocket TTS reads no digits in these languages (see NUMBERS)
-    "azulejo": "Museu Nacional do Azulejo: Aberto de terça a domingo, das dez às dezoito horas.",
-    "rijksmuseum": "Rijksmuseum: Morgen open van negen tot vijf uur.",
+    "azulejo": "Museu Nacional do Azulejo: Aberto de terça a domingo, das 10h às 18h.",
+    "rijksmuseum": "Rijksmuseum: Morgen open van 9.00 tot 17.00 uur.",
     "北京|beijing": "北京明天：晴，最高气温十八度。",
-    "roma|rome": "Roma domani: Sole, ventuno gradi.",
+    "roma|rome": "Roma domani: Sole, 21 gradi.",
 }, "delay": 1.0}
 
 
@@ -2137,33 +2136,37 @@ def spoken_while_written(name: str = "spoken_early") -> Check:
     return Check(name, fn)
 
 
-# Pocket TTS's models for other languages than English read no digits: "am
-# 27. November" comes out as "am Gas im November", "à 11h30" as "à APAPAPH".
-# Iris gives them the reply as written, so a Kyutai persona garbles every
-# date, time, price and temperature in German, French, Italian, Spanish,
-# Portuguese and Dutch. Numbers in words are read right.
-NUMBERS = "spoken_once"
-# What is asked in each language, the reply, and its numbers, which the voice
-# is to be heard saying (as Whisper writes them back: in digits)
-SAID_WITH_NUMBERS = [
-    ("en", "When does the Christmas market open?", "The market opens on November 27 at 10 o'clock.", ["27", "10"]),
-    ("de", "Wann öffnet der Weihnachtsmarkt?", "Der Markt öffnet am 27. November um 10 Uhr.", ["27", "10"]),
-    ("pt", "Quando abre o museu?", "O museu abre de terça a domingo, das 10 às 18 horas.", ["10", "18"]),
-    ("fr", "Quand ouvre le marché de Noël ?", "Le marché ouvre le 21 novembre à 11 heures.", ["21", "11"]),
-    ("nl", "Wanneer gaat het museum open?", "Het museum is morgen open van 9 tot 17 uur.", ["9", "17"]),
-    ("it", "Che tempo fa domani a Roma?", "Domani a Roma ci saranno 21 gradi e sole.", ["21"]),
-]
+# Dates, times, ordinals, decimals and money in each language, written as a
+# model writes them: Pocket TTS's models for other languages than English
+# read no digits ("am Gas im November"), and Kokoro's English normalization
+# read "16,50 €" as 1650. Each reply's numbers are to be heard (as Whisper
+# writes them back: in digits).
+SAID_WITH_NUMBERS = {
+    "en": ("When does the Christmas market open?",
+           "The market opens on November 27 at 10:30 a.m., and entry costs $3.50.", ["27", "10", "30", "3", "50"]),
+    "de": ("Wann öffnet der Weihnachtsmarkt?",
+           "Der Markt öffnet am 27. November um 10:30 Uhr, der Eintritt kostet 3,50 €.", ["27", "10", "30", "3"]),
+    "pt": ("Quando abre o museu?",
+           "O museu abre de terça a domingo, das 10h às 18h, e o bilhete custa 15,90 €.", ["10", "18", "15"]),
+    "fr": ("Quand ouvre le marché de Noël ?",
+           "Le marché ouvre le 21 novembre à 11h30, et il fera 8 °C.", ["21", "11", "30", "8"]),
+    "nl": ("Wanneer gaat het museum open?",
+           "Het museum is morgen open van 9.00 tot 17.00 uur, een kaartje kost € 23,50.", ["9", "17", "23"]),
+    "it": ("Che tempo fa domani a Roma?",
+           "Domani a Roma ci saranno 21 gradi, e il biglietto del museo costa 12,50 euro.", ["21", "12"]),
+    "es": ("¿Cuándo sale el tren?",
+           "El tren sale a las 10:15 del 21 de noviembre y cuesta 45,50 €.", ["10", "15", "21", "45"]),
+}
 
 
-def numbers_in_languages() -> Conversation:
-    """Iris (Pocket TTS) says replies with numbers in each language; the
-    voice is to be heard saying the numbers."""
-    turns = [Turn([asked], typed=True, reply_language=language, spoken_once=numbers)
-             for language, asked, _, numbers in SAID_WITH_NUMBERS]
-    rules = [Rule(re.escape(asked), reply=reply) for _, asked, reply, _ in SAID_WITH_NUMBERS]
-    expected = [f"T{n}:{NUMBERS}" for n, (language, *_) in enumerate(SAID_WITH_NUMBERS, 1) if language != "en"]
-    return Conversation("numbers said in other languages", turns, stub_rules=rules, expected_failures=expected,
-                        tags=["hearing", "languages", "numbers"])
+def numbers_in_languages(persona: str, label: str, languages: list[str]) -> Conversation:
+    """A persona says replies with numbers in each language; the voice is to
+    be heard saying the numbers."""
+    turns = [Turn([SAID_WITH_NUMBERS[language][0]], typed=True, reply_language=language,
+                  spoken_numbers=SAID_WITH_NUMBERS[language][2]) for language in languages]
+    rules = [Rule(re.escape(asked), reply=reply) for asked, reply, _ in SAID_WITH_NUMBERS.values()]
+    return Conversation(f"numbers said in other languages ({label})", turns, stub_rules=rules,
+                        persona=persona if persona != "iris" else None, tags=["hearing", "languages", "numbers"])
 
 
 # A short exchange in the language first: the long reply is not the first in it
@@ -2228,7 +2231,11 @@ LANGUAGES = [
         expected_failures=[f"T6:{KANJI}"],
         tags=["hearing", "languages", "mixed"],
     ),
-] + LONG_IN_LANGUAGES + [numbers_in_languages()]
+] + LONG_IN_LANGUAGES + [
+    # Kyutai's Spanish needs Pocket TTS's Spanish model; Kokoro's is with HAL
+    numbers_in_languages("iris", "Kyutai", ["en", "de", "pt", "fr", "nl", "it"]),
+    numbers_in_languages("hal", "Kokoro", ["en", "fr", "es", "it", "pt"]),
+]
 
 HEARING = NOISE + DISTANCE + VOICES_GROUP + LANGUAGES
 

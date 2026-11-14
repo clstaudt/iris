@@ -1477,7 +1477,7 @@ class ScriptedConversations:
         turns = {n: t for n, t in enumerate(conversation.turns, 1) if isinstance(t, Turn)}
         wanted = self.transcribe_replies or any(
             t.reply_language or t.spoken_once or t.spoken_excludes or t.spoken_share is not None
-            for t in turns.values()
+            or t.spoken_numbers for t in turns.values()
         )
         if not wanted or not hasattr(self.assistant, "transcribe"):
             return
@@ -1512,6 +1512,9 @@ class ScriptedConversations:
             if turn.reply_language and result.spoken_language and result.spoken_language != turn.reply_language:
                 result.fail("language", f"the reply was spoken in {result.spoken_language}, "
                                         f"not {turn.reply_language}")
+            missing = [n for n in turn.spoken_numbers if not re.search(rf"(?<!\d){re.escape(n)}(?!\d)", result.spoken)]
+            if missing:
+                result.fail("spoken_numbers", f"the voice was not heard saying {missing}: {result.spoken!r}")
             if turn.spoken_share is not None and result.reply:
                 share = heard_share(result.spoken, result.reply, turn.reply_language or result.language or "en")
                 if share < turn.spoken_share:

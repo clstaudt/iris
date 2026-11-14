@@ -34,6 +34,9 @@ dependencies = [
     "pocket-tts>=3.3.0",
     # The language a text is written in, so the voice speaks it in that language
     "py3langid>=0.4.0",
+    "num2words>=0.5.14",
+    "pykakasi>=2.3.0",
+    "misaki[zh]>=0.9.4",
 ]
 
 [project.scripts]

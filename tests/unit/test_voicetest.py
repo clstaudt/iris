@@ -23,7 +23,7 @@ from iris.memory import MemoryStore
 from iris.plugins import web
 from iris.status import StatusManager
 from iris.tools import Tools
-from iris.tts import POCKET_LANGUAGES, PocketGenerator
+from iris.tts import POCKET_LANGUAGES, PocketGenerator, kokoro_speech
 from iris.turns import SmartTurn
 from irisdev.voicetest import assistant as under_test
 from irisdev.voicetest import scripted, sounds, voices, wording
@@ -322,16 +322,18 @@ class NamedLanguagesOnly:
 @pytest.mark.parametrize("name", [n for n, v in VOICES.items() if v["engine"] == "kokoro"])
 def test_every_kokoro_voice_of_the_user_can_speak(name, monkeypatch, tmp_path):
     """The Spanish user could not say a word: kokoro-onnx refuses Spanish,
-    Portuguese and Hindi by name, so "across languages" could not be held."""
+    Portuguese and Hindi by name, so "across languages" could not be held.
+    Each is given what Iris gives Kokoro (iris.tts.kokoro_speech)."""
     kokoro = NamedLanguagesOnly()
     monkeypatch.setattr(UserVoice, "_kokoro", kokoro)
     voice = UserVoice.named(tmp_path, name)
     assert len(voice.utterance(["Hello there."])) > 0
     [(spoken, lang, phonemes)] = kokoro.asked
     code = kokoro_language(voice.voice, voice.language)
+    given = kokoro_speech(kokoro.tokenizer, "Hello there.", voice.language, code)
     assert spoken == voice.voice
-    assert (lang, phonemes) == ((code, None) if code in KOKORO_ONNX_LANGUAGES else
-                                ("en-us", f"<{code}:Hello there.>"))
+    assert (lang, phonemes) == (given["lang"], given.get("phonemes"))
+    assert lang in KOKORO_ONNX_LANGUAGES
 
 
 class PocketWithoutCloning:
@@ -1301,6 +1303,19 @@ class TestHolding:
         fake.heard_back = "Chinese letter, Chinese letter"
         [garbled] = runner.hold(Conversation("garbled", [Turn(["hello"], at=At.finished(0.2), spoken_share=0.9)]))
         assert garbled.failed == ["spoken_share"]
+
+    def test_the_numbers_the_voice_is_heard_saying_are_found_as_written(self, held):
+        """"10:30" holds 10 and 30; normalized, it would be 1030."""
+        runner, fake, space = held
+        fake.heard_back = "Der Markt öffnet um 10:30 Uhr, Eintritt 3,50 €."
+        [heard] = runner.hold(Conversation("numbers", [Turn(["hello"], at=At.finished(0.2),
+                                                            spoken_numbers=["10", "30", "3", "50"])]))
+        assert heard.passed, heard.failures
+        fake.heard_back = "Der Markt öffnet um Gas um."
+        [garbled] = runner.hold(Conversation("garbled", [Turn(["hello"], at=At.finished(0.2),
+                                                              spoken_numbers=["10", "1"])]))
+        assert garbled.failed == ["spoken_numbers"]
+        assert "['10', '1']" in garbled.failures[0]
 
     def test_a_turn_not_called_for_is_skipped(self, held):
         runner, fake, space = held

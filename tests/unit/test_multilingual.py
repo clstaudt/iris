@@ -20,6 +20,7 @@ from iris.tts import (
     LANGUAGE_VOICE_MAP,
     POCKET_LANGUAGES,
     KokoroGenerator,
+    PocketGenerator,
     SpeechGenerator,
     get_language_info,
     is_language_supported,
@@ -274,6 +275,7 @@ def engines_used():
         model.generate_audio.return_value = torch.zeros(100)
         kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
         phonemize = kokoro.return_value.tokenizer.phonemize
+        phonemize.return_value = "fəʊnimz"
 
         def spoken_with(who: str, language: str, voice: str = "", preview: dict | None = None):
             pocket.reset_mock()
@@ -370,6 +372,7 @@ def test_kokoro_onnx_is_only_given_languages_it_takes_and_phonemes_for_the_rest(
     ):
         kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
         phonemize = kokoro.return_value.tokenizer.phonemize
+        phonemize.return_value = "fəʊnimz"
         generator = KokoroGenerator(voice="af_sarah")
         for language, info in LANGUAGE_VOICE_MAP.items():
             kokoro.reset_mock()
@@ -398,6 +401,17 @@ def test_a_word_espeak_reads_as_english_is_said_without_the_switch(code, text, w
     assert "en" + word not in phonemes
 
 
+def _given_to_kokoro(text: str, language: str, voice: str) -> dict:
+    """What KokoroGenerator gives kokoro-onnx to say a text."""
+    with patch("iris.tts.Kokoro") as kokoro, patch.object(
+        KokoroGenerator, "_locate_models", return_value=("/m.onnx", "/v.bin")
+    ):
+        kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
+        kokoro.return_value.tokenizer = Tokenizer()
+        os.unlink(KokoroGenerator(voice=voice).generate(text, language=language))
+        return kokoro.return_value.create.call_args.kwargs
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="espeak reads no kanji: Kokoro needs them in kana, which needs a kanji reader "
@@ -408,17 +422,37 @@ def test_a_japanese_reply_is_read_not_called_chinese_letters():
     kanji a "Chinese letter", in English: a Japanese reply is gibberish
     ("Chinese letter, Chinese letter, no Chinese letter..."). The text Iris
     gives Kokoro, through real espeak as Kokoro's tokenizer runs it."""
-    with patch("iris.tts.Kokoro") as kokoro, patch.object(
-        KokoroGenerator, "_locate_models", return_value=("/m.onnx", "/v.bin")
-    ):
-        kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
-        os.unlink(KokoroGenerator(voice="jf_alpha").generate("東京の天気は晴れです。", language="ja"))
-        given = kokoro.return_value.create.call_args.kwargs
     try:
+        given = _given_to_kokoro("東京の天気は晴れです。", "ja", "jf_alpha")
         phonemes = Tokenizer().phonemize(given["text"], given["lang"])
     except RuntimeError as error:
         pytest.skip(f"espeak cannot run here: {error}")
     assert "tʃˈaɪniːz" not in phonemes and "dʒˈapəniːz" not in phonemes, phonemes
+
+
+@pytest.mark.parametrize(
+    "language, text, read",
+    [("fr", "Le billet coûte 16,50 €.", "Le billet coûte seize euros cinquante."),
+     ("it", "Ci saranno 21 gradi.", "Ci saranno ventuno gradi.")],
+)  # fmt: skip
+def test_kokoro_is_given_numbers_in_words_where_it_reads_them_as_english(language, text, read):
+    """kokoro-onnx reads numbers with English rules first: "16,50" was 1650."""
+    assert _given_to_kokoro(text, language, "bm_lewis")["text"] == read
+
+
+def test_pocket_tts_is_given_numbers_in_words_except_in_english():
+    """Only Pocket TTS's English model reads digits: "am 27. November" was
+    "am Gas im November"."""
+    with patch("iris.tts.TTSModel") as pocket:
+        model = pocket.load_model.return_value
+        model.sample_rate = 24000
+        model.generate_audio.return_value = torch.zeros(100)
+        generator = PocketGenerator("alba")
+        for language, text in [("de", "Am 27. November um 10 Uhr."), ("en", "On November 27 at 10.")]:
+            model.generate_audio.reset_mock()
+            os.unlink(generator.generate(text, language=language))
+            said = " ".join(c.args[1] for c in model.generate_audio.call_args_list)
+            assert said == ("Am siebenundzwanzigsten November um zehn Uhr." if language == "de" else text)
 
 
 def test_each_pocket_language_has_a_voice_of_its_own():

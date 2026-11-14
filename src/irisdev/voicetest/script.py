@@ -271,6 +271,9 @@ class Turn:
     # The share of the reply's words (characters in Japanese and Chinese)
     # its voice is heard saying, as transcribed, at least
     spoken_share: Optional[float] = None
+    # Numbers the reply's voice is heard saying, as Whisper writes them back
+    # (in digits): "10" and "30" of a time said as "zehn Uhr dreißig"
+    spoken_numbers: list[str] = field(default_factory=list)
     # Words of which an error the turn reports should mention at least one
     # (case ignored): the turn must report such an error, and it does not
     # fail the turn
