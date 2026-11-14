@@ -7,10 +7,14 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      keep:
+        description: "Keep the disk image as an artifact of the run (one day)"
+        type: boolean
+        default: false
 
-# The workflow builds and checks the app; it uploads nothing
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -57,3 +61,30 @@ jobs:
       working-directory: ui
       env:
         CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    # A tag's disk image goes straight to its release (a draft is made if
+    # there is none): release assets do not count against the account's
+    # artifact storage, which a disk image of this size fills
+    - name: Upload the disk image to the release
+      if: startsWith(github.ref, 'refs/tags/')
+      working-directory: ui
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        tag="${GITHUB_REF#refs/tags/}"
+        gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Iris $tag" --generate-notes --draft
+        for f in release/*.dmg; do
+          echo "Uploading: $f"
+          gh release upload "$tag" "$f" --repo "$GITHUB_REPOSITORY" --clobber
+        done
+
+    # Other builds only check that the app builds. A manual run can keep the
+    # disk image for a day; a full storage quota then does not fail the build
+    - uses: actions/upload-artifact@v7
+      if: github.event_name == 'workflow_dispatch' && inputs.keep
+      continue-on-error: true
+      with:
+        name: Iris-${{ github.ref_name }}-macos-arm64
+        path: ui/release/*.dmg
+        retention-days: 1
