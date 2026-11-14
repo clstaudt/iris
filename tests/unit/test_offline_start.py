@@ -135,6 +135,14 @@ def offline(monkeypatch):
     )
     monkeypatch.setattr(tts.TTSModel, "load_model", staticmethod(load_model))
     monkeypatch.setattr(SmartTurn, "load", classmethod(lambda cls, download=True: None))
+
+    def wake_detector(engine="auto"):
+        # The wake word's own small Whisper: it too cannot be fetched offline
+        if not state.online:
+            raise OFFLINE
+        return SimpleNamespace(engine=engine, heard=lambda *args, **kwargs: "")
+
+    monkeypatch.setattr(assistant_module, "WakeWordDetector", wake_detector)
     return state
 
 
