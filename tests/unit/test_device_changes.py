@@ -8,7 +8,8 @@ closed for that, or stops delivering, is opened again, the one chosen found
 by its name. Neither is tried again and again. On macOS a change of the
 system's defaults is followed before it fails. A reply the speaker cannot
 play is told once, the rest of it is not spoken, and Iris goes on; the
-assistant's loop survives whatever fails in it.
+assistant's loop survives whatever fails in it, and the controller starts
+it again should it end all the same.
 
 sounddevice is replaced by a stand-in: no device is opened, nothing sounds.
 """
@@ -27,6 +28,7 @@ import soundfile as sf
 from iris import audio
 from iris.assistant import VoiceAssistant
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, SpeakerError
+from iris.controller import LOOP_RESTARTS, AssistantController
 from iris.echo import STEP
 from iris.events import EventBus
 from iris.tts import SpeechPipeline
@@ -567,3 +569,154 @@ def test_the_loop_goes_on_when_the_audio_fails_in_it():
     assert speaker.tries == 1 and a.recorder.closes_failed == 1
     assert a.recorder.listens == 2
     assert [k for k, _ in a.events].count("sleep") == 1
+
+
+# The controller ----------------------------------------------------------------
+
+
+class Recorded:
+    def __init__(self, bus: EventBus):
+        self.events: list[tuple[str, dict]] = []
+        bus.subscribe(lambda kind, data: self.events.append((kind, dict(data))))
+
+    def of(self, kind: str) -> list[dict]:
+        return [d for k, d in self.events if k == kind]
+
+    def state(self) -> str | None:
+        states = self.of("state")
+        return states[-1]["state"] if states else None
+
+
+class Assistant:
+    """Stands in for VoiceAssistant: its loop fails as many times as told,
+    then listens until Iris is stopped."""
+
+    failures = 0
+
+    def __init__(self, event_bus=None, **kwargs):
+        self.bus = event_bus
+        self.runs = 0
+        self.stop_event = threading.Event()
+        self.suspend_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.hold_event = threading.Event()
+        self.interrupt_event = threading.Event()
+        self.transcriber = object()
+        self.speech_pipeline = SimpleNamespace(
+            is_active=False, stop=lambda: None, pause=lambda: None, resume=lambda: None
+        )
+        self.conversation = SimpleNamespace(set_amnesia=lambda on: None)
+        self.memory = None
+        self.shut = False
+
+    def shut_down(self):
+        self.shut = True
+
+    def config_info(self):
+        return {"paused": self.suspend_event.is_set()}
+
+    def run_loop(self):
+        self.runs += 1
+        if Assistant.failures:
+            Assistant.failures -= 1
+            raise RuntimeError(
+                "Error opening OutputStream: Internal PortAudio error [PaErrorCode -9986]"
+            )
+        self.bus.emit("flags", {"flags": {"listening": True}})
+        self.stop_event.wait(10)
+
+
+@pytest.fixture
+def controller(monkeypatch):
+    monkeypatch.setattr("iris.controller.VoiceAssistant", Assistant)
+    monkeypatch.setattr(AssistantController, "_fetch_models", lambda self, kwargs: None)
+    monkeypatch.setattr(
+        AssistantController, "_pick_vision_model", lambda self, preferred=None: None
+    )
+    monkeypatch.setattr(AssistantController, "_warn_if_ollama_unreachable", lambda self: False)
+    bus = EventBus()
+    made = AssistantController(bus)
+    made.seen = Recorded(bus)
+    yield made
+    Assistant.failures = 0
+    made.stop()
+
+
+def test_a_loop_that_fails_is_started_again(controller):
+    Assistant.failures = 1
+    controller.start({})
+    assert _wait_for(lambda: controller.assistant is not None and controller.assistant.runs == 2)
+    assert _wait_for(lambda: controller.seen.state() == "listening")
+    assert controller.info()["running"]
+    # Started again without a word: it goes on as before
+    assert controller.seen.of("error") == []
+
+    assert controller.pause()["ok"]
+    assert _wait_for(lambda: controller.seen.state() == "paused")
+    assert controller.resume()["ok"]
+    assert _wait_for(lambda: controller.seen.state() == "listening")
+
+
+def _given_up(controller):
+    Assistant.failures = LOOP_RESTARTS + 1
+    controller.start({})
+    assert _wait_for(lambda: controller.seen.of("error"))
+    assert controller.seen.of("error") == [
+        {"message": "Assistant loop failed: Error opening OutputStream: "
+                    "Internal PortAudio error [PaErrorCode -9986]"}
+    ]
+    assert _wait_for(lambda: not controller.info()["running"])
+    assert controller.seen.state() == "idle"
+    assert controller.assistant.runs == LOOP_RESTARTS + 1
+
+
+def test_pause_then_resume_after_the_loop_failed_resumes_listening(controller):
+    """As the user found it: the loop had failed, Pause showed Paused, and
+    Resume did nothing. Pause now starts the loop again, paused, and Resume
+    resumes listening."""
+    _given_up(controller)
+    assert controller.pause()["ok"]
+    assert controller.info()["running"]
+    assert _wait_for(lambda: controller.seen.state() == "paused")
+    assert controller.resume()["ok"]
+    assert _wait_for(lambda: controller.seen.state() == "listening")
+    assert not controller.assistant.suspend_event.is_set()
+    assert controller.assistant.runs == LOOP_RESTARTS + 2
+
+
+def test_resume_starts_a_loop_that_failed_again(controller):
+    _given_up(controller)
+    assert controller.resume()["ok"]
+    assert _wait_for(lambda: controller.seen.state() == "listening")
+    assert controller.info()["running"]
+
+
+def test_the_microphone_starts_a_loop_that_failed_again(controller):
+    _given_up(controller)
+    assert controller.set_mic(True)["ok"]
+    assert _wait_for(lambda: controller.seen.state() == "listening")
+
+
+def test_no_state_is_shown_for_a_loop_that_does_not_run(controller):
+    """Stopped, Iris is idle: Pause and the microphone change nothing the
+    orb shows, and start no loop."""
+    controller.start({})
+    assert _wait_for(lambda: controller.seen.state() == "listening")
+    controller.stop()
+    assert _wait_for(lambda: not controller.info()["running"])
+    controller.pause()
+    controller.set_mic(False)
+    time.sleep(0.3)
+    assert controller.seen.state() == "idle"
+    assert not controller.info()["running"]
+
+
+def test_starting_anew_after_the_loop_failed_shuts_the_assistant_before_down(controller):
+    """Its tools and memory's filing do not linger beside the new one's."""
+    _given_up(controller)
+    before = controller.assistant
+    started = controller.start({})
+    assert started["ok"] and "already_running" not in started
+    assert _wait_for(lambda: controller.assistant is not before)
+    assert _wait_for(lambda: controller.seen.state() == "listening")
+    assert before.stop_event.is_set() and _wait_for(lambda: before.shut)

@@ -1188,7 +1188,9 @@ class VoiceAssistant:
         """Listen and answer until stop_event is set.
 
         Nothing that goes wrong in one round ends the loop: the error is
-        logged and the loop goes on, listening and answering.
+        logged and the loop goes on, listening and answering. Should it end
+        all the same (the controller starts it again), Iris is shut down only
+        once stop_event is set.
         """
         devices_ok, device_msg = self.recorder.check_audio_devices()
         if not devices_ok:
@@ -1219,10 +1221,16 @@ class VoiceAssistant:
                     close()
                 except Exception:
                     logger.exception("Could not close the audio")
-            if self.tools:
-                self.tools.cleanup()
-            if self.memory:
-                self.memory.stop()
+            if self.stop_event.is_set():
+                self.shut_down()
+
+    def shut_down(self):
+        """Release what Iris holds besides the audio: the tools' resources,
+        and memory's filing in the background."""
+        if self.tools:
+            self.tools.cleanup()
+        if self.memory:
+            self.memory.stop()
 
     def _loop_round(self):
         """One round of the loop: a turn taken, a listen, or a moment's wait

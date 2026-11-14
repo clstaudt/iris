@@ -1,8 +1,9 @@
 """The core's own part in starting, failing and stopping: a start that
 fails is reported and leaves Iris idle, ready to be started again; a loop
-that fails is reported; a core the app starts again after one stopped does
-not show the conversation a second time; and the core does not outlive the
-app that started it."""
+that keeps failing is reported (one that fails now and then is started
+again, see test_device_changes); a core the app starts again after one
+stopped does not show the conversation a second time; and the core does not
+outlive the app that started it."""
 
 import os
 import signal
@@ -93,7 +94,7 @@ def test_a_start_that_fails_is_reported_and_iris_can_be_started_again(monkeypatc
     controller.stop()
 
 
-def test_a_loop_that_fails_is_reported(monkeypatch):
+def test_a_loop_that_keeps_failing_is_reported(monkeypatch):
     controller, seen = _controller(monkeypatch)
     Assistant.fails = RuntimeError("the audio thread died")
     try:

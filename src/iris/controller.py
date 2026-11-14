@@ -4,6 +4,7 @@ state stream for external UIs such as the Electron shell."""
 
 import importlib.metadata
 import itertools
+import logging
 import queue
 import sys
 import threading
@@ -52,6 +53,8 @@ from iris.tts import (
     voice_language,
 )
 from iris.turns import SMART_TURN_FILE, SMART_TURN_REPO
+
+logger = logging.getLogger(__name__)
 
 # What a voice says when previewed, in its own language
 PREVIEW_LINES = {
@@ -108,6 +111,13 @@ TRANSCRIPT_LIMIT = 500
 # Turn timings kept for the app
 TIMINGS_KEPT = 20
 
+# The assistant's loop, should it fail, is started again after a moment;
+# failing more than this often within the window, it is left stopped (and
+# told), until Resume or the microphone starts it again
+LOOP_RESTARTS = 3
+LOOP_RESTART_WINDOW = 60.0
+LOOP_RESTART_DELAY = 0.2
+
 
 def silent_microphone_message() -> str:
     """What to say when the microphone delivers nothing but exact zeros.
@@ -153,7 +163,12 @@ class AssistantController:
         self.plugins = load_plugins()
 
         self._loop_thread: threading.Thread | None = None
+        self._poller: threading.Thread | None = None
         self._start_lock = threading.Lock()
+        # Whether the assistant's loop runs, and whether it failed again and
+        # again and was left stopped; both changed under the start lock
+        self._looping = False
+        self._loop_failed = False
         # Held while recognition or the voice that did not load is loaded
         # again, so switching it on twice loads (and downloads) it once
         self._reloading = {"recognition": threading.Lock(), "voice": threading.Lock()}
@@ -269,15 +284,63 @@ class AssistantController:
         with self._start_lock:
             if self._loop_thread and self._loop_thread.is_alive():
                 return {"ok": True, "already_running": True}
-            self._poller_stop.clear()
+            if self._loop_failed and self.assistant is not None:
+                # The assistant left stopped after failing gives way to the new one
+                self.assistant.stop_event.set()
+                threading.Thread(
+                    target=self._shut_down, args=(self.assistant,), daemon=True
+                ).start()
             self._ollama_host = normalize_host((options or {}).get("ollama_host"))
+            self._loop_failed = False
             self._publish_state("starting")
             self._loop_thread = threading.Thread(
                 target=self._run, args=(options or {},), daemon=True
             )
             self._loop_thread.start()
-            threading.Thread(target=self._speaking_poller, daemon=True).start()
+            self._start_poller()
         return {"ok": True}
+
+    @staticmethod
+    def _shut_down(assistant):
+        try:
+            assistant.shut_down()
+        except Exception:
+            logger.exception("The assistant before could not be shut down")
+
+    def _start_poller(self):
+        """Start computing the effective state, ending the poller before."""
+        if self._poller is not None and self._poller.is_alive():
+            self._poller_stop.set()
+            self._poller.join(timeout=1.0)
+        self._poller_stop.clear()
+        self._poller = threading.Thread(target=self._speaking_poller, daemon=True)
+        self._poller.start()
+
+    def _loop_ended(self):
+        """No loop runs: nothing polls the state, which is idle. Called
+        under the start lock, so a command never shows a state of its own
+        (paused, muted) after this."""
+        self._poller_stop.set()
+        if self._poller is not None and self._poller is not threading.current_thread():
+            self._poller.join(timeout=1.0)
+        self._publish_state("idle")
+
+    def _revive(self):
+        """Start the assistant's loop again if it was left stopped after
+        failing again and again, so that Pause, Resume and the microphone
+        act on a live loop."""
+        with self._start_lock:
+            if not self._loop_failed or self._looping or self.assistant is None:
+                return
+            # It is past its last use of the lock: it ends at once
+            if self._loop_thread is not None:
+                self._loop_thread.join(timeout=1.0)
+            self._loop_failed = False
+            self._looping = True
+            logger.info("Starting the assistant's loop again")
+            self._loop_thread = threading.Thread(target=self._supervise, daemon=True)
+            self._loop_thread.start()
+            self._start_poller()
 
     def _pick_vision_model(self, preferred: str = VISION_MODEL) -> str | None:
         """Resolve the model used for image prompts.
@@ -333,7 +396,8 @@ class AssistantController:
                 self._restore_thread()
         except Exception as e:
             self.bus.emit("error", {"message": f"Failed to start assistant: {e}"})
-            self._publish_state("idle")
+            with self._start_lock:
+                self._loop_ended()
             return
 
         # Diagnostics only — must never prevent the assistant from running
@@ -343,13 +407,44 @@ class AssistantController:
         except Exception:
             pass
 
+        with self._start_lock:
+            self._looping = True
+        self._supervise()
+
+    def _supervise(self):
+        """Run the assistant's loop until Iris is stopped.
+
+        The loop survives what goes wrong in it; should it fail all the same,
+        it is started again, so that Pause, Resume and the microphone always
+        steer a live loop. Failing more than LOOP_RESTARTS times within
+        LOOP_RESTART_WINDOW, it is left stopped, the error is told, and Iris
+        is idle until Resume or the microphone starts it again.
+        """
+        failures: deque[float] = deque()
+        gave_up = False
         try:
-            self.assistant.run_loop()
-        except Exception as e:
-            self.bus.emit("error", {"message": f"Assistant loop failed: {e}"})
+            while True:
+                try:
+                    self.assistant.run_loop()
+                    return
+                except Exception as e:
+                    logger.exception("The assistant's loop failed")
+                    if self.assistant.stop_event.is_set():
+                        return
+                    now = time.monotonic()
+                    failures.append(now)
+                    while now - failures[0] > LOOP_RESTART_WINDOW:
+                        failures.popleft()
+                    if len(failures) > LOOP_RESTARTS:
+                        gave_up = True
+                        self.bus.emit("error", {"message": f"Assistant loop failed: {e}"})
+                        return
+                    time.sleep(LOOP_RESTART_DELAY)
         finally:
-            self._poller_stop.set()
-            self._publish_state("idle")
+            with self._start_lock:
+                self._looping = False
+                self._loop_failed = gave_up
+                self._loop_ended()
 
     def stop(self) -> dict:
         """Request shutdown. Takes effect after the current listen/turn ends."""
@@ -367,40 +462,55 @@ class AssistantController:
             self.assistant.speech_pipeline.stop()
         return {"ok": True}
 
+    def _show(self, state: str):
+        """Show a state a command brought about at once, rather than at the
+        poller's next look; only while a loop runs to be in it."""
+        with self._start_lock:
+            if self._looping:
+                self._publish_state(state)
+
     def pause(self) -> dict:
         """Pause the conversation: the mic closes, speech holds mid-sentence,
-        the reply stops streaming and queued turns wait. Models stay loaded."""
+        the reply stops streaming and queued turns wait. Models stay loaded.
+        A loop left stopped after failing is started again, paused."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         self.assistant.suspend_event.set()
         self.assistant.speech_pipeline.pause()
-        self._publish_state("paused")
+        self._revive()
+        self._show("paused")
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
     def resume(self) -> dict:
-        """Continue the conversation where pause() held it."""
+        """Continue the conversation where pause() held it, starting the
+        loop again if it was left stopped after failing."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         self.assistant.suspend_event.clear()
         self.assistant.speech_pipeline.resume()
+        self._revive()
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
     def set_mic(self, on: bool) -> dict:
         """Switch the microphone. Off still answers typed messages. Without
         speech recognition, which did not load at the start, it is loaded
-        first, and the microphone opens once it is there."""
+        first, and the microphone opens once it is there. A loop left
+        stopped after failing is started again."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         if on and self.assistant.transcriber is None:
             threading.Thread(target=self._load_recognition, daemon=True).start()
+            self._revive()
             return {"ok": True}
         if on:
             self.assistant.pause_event.clear()
         else:
             self.assistant.pause_event.set()
-            self._publish_state("muted")
+        self._revive()
+        if not on:
+            self._show("muted")
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
