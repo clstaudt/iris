@@ -318,7 +318,11 @@ def test_a_language_no_voice_speaks_is_not_spoken(engines_used, persona_id):
     assert engines_used(persona_id, "ru") is None
 
 
-@pytest.mark.parametrize("voice", [v["id"] for v in PocketGenerator.voices()])
+# Pocket TTS's own voices: listed when the tests are collected, before their
+# home is in place, the voices would include the ones cloned on this computer
+@pytest.mark.parametrize(
+    "voice", [v["id"] for v in PocketGenerator.voices() if not v["id"].startswith("clone:")]
+)
 @pytest.mark.parametrize("language", list(POCKET_LANGUAGES))
 def test_every_kyutai_voice_speaks_each_language_through_its_model(engines_used, voice, language):
     """Or not at all, a language it does not speak properly."""
