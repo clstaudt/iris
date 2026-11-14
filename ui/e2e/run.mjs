@@ -28,6 +28,7 @@
 //               Iris and choose the model, always run
 //   E2E_HEADED  set to watch the browser
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -465,6 +466,36 @@ async function ask(text) {
 const voiceDone = (timeout = 60_000) =>
   until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), timeout);
 
+// Hugging Face as the core's stand-in has it (irisdev/e2e_core.py): the
+// token it takes, and what the account did on the website
+const CLONE_TOKEN = "hf_e2e_test_token";
+function huggingFace(changes) {
+  const file = path.join(home, ".e2e-huggingface.json");
+  const state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+  fs.writeFileSync(file, JSON.stringify({ ...state, ...changes }));
+}
+
+/** Speech to clone a voice from: one of Pocket TTS's own voices reading a
+ *  few lines, written to a WAV file by the core's Python (nothing plays). */
+function speechSample() {
+  const file = path.join(home, "sample.wav");
+  const script = [
+    "import sys",
+    "import soundfile as sf",
+    "import torch",
+    "from pocket_tts import TTSModel",
+    "model = TTSModel.load_model(language='english')",
+    "state = model.get_state_for_audio_prompt('alba')",
+    "lines = ['Have you ever noticed how different a familiar street looks early in the morning?',",
+    "         'The shops are still closed, and the only sounds are a few birds.',",
+    "         'I like to walk down to the river then, and watch the light move across the water.']",
+    "audio = torch.cat([model.generate_audio(state, line) for line in lines])",
+    "sf.write(sys.argv[1], audio.numpy(), model.sample_rate)",
+  ].join("\n");
+  execFileSync(python, ["-c", script, file], { stdio: "ignore" });
+  return fs.readFileSync(file);
+}
+
 // -------------------------------------------------------------------- steps
 
 console.log(`Iris UI against the core (${python})`);
@@ -882,6 +913,74 @@ try {
     await page.locator("#persona-wake-word").fill(WAKE_WORD);
     await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
     await until("the test's wake word", () => config().wake_word === WAKE_WORD, 10_000);
+  });
+
+  // Iris's voice before she is given a cloned one, to give back at the end
+  let shippedVoice = "anna";
+
+  await step("voice cloning: Hugging Face is connected, a sample is cloned, and Iris speaks in the voice", async () => {
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Iris" }).first().click();
+    await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
+    shippedVoice = (await rpc("persona.get", { id: "iris" })).voice;
+    await page.getByRole("button", { name: "Clone a voice" }).click();
+    // No login yet: the model page opens in the browser, and a token is asked for
+    await page.locator('.clone[data-step="connect"]').waitFor({ timeout: 10_000 });
+    await page.getByRole("button", { name: "Open the model page" }).click();
+    check((await page.evaluate(() => window.__opened)).includes("https://huggingface.co/kyutai/pocket-tts"),
+      "the model page did not go to the browser");
+    const token = page.locator('input[aria-label="Hugging Face access token"]');
+    check((await token.getAttribute("type")) === "password", "the token shows");
+    await token.fill("hf_not_the_one");
+    await page.getByRole("button", { name: "Check", exact: true }).click();
+    await page.getByText("Hugging Face did not accept the token").waitFor({ timeout: 10_000 });
+    await token.fill(CLONE_TOKEN);
+    await page.getByRole("button", { name: "Check", exact: true }).click();
+    // Logged in, the terms not accepted yet
+    await page.getByText("then check again").waitFor({ timeout: 10_000 });
+    const answers = JSON.stringify(calls.filter((c) => c.method.startsWith("voice.")).map((c) => c.result));
+    check(!answers.includes(CLONE_TOKEN), "the token came back from the core");
+    // Accepted on the website: the cloning model downloads, with progress
+    huggingFace({ terms: true });
+    const since = Date.now();
+    await page.getByRole("button", { name: "Check", exact: true }).click();
+    await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    check(events.some((e) => e.at >= since && e.type === "clone.progress" && e.data.done === e.data.total),
+      "the download showed no progress");
+    await page.getByText("Only clone a voice you have permission to use.").waitFor();
+    // A sample from a file: the voice is made, chosen, and says the preview
+    const sample = speechSample();
+    const made = Date.now();
+    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+    await page.getByRole("button", { name: "Clone again" }).waitFor({ timeout: 120_000 });
+    check(await page.locator(".voice.active", { hasText: "Iris" }).count(), "the cloned voice is not chosen");
+    await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
+    await voiceDone();
+    // Saved, Iris speaks in it at once
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("the cloned voice", () => config().tts_voice === "clone:iris", 10_000);
+    check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "Iris was not saved with the cloned voice");
+    const sent = await ask("Reply with one word: yes.");
+    const timing = await eventAfter("turn.timing", sent, () => true, 180_000);
+    check(timing.data.components.voice === "kyutai:clone:iris", `the reply was spoken by ${timing.data.components.voice}`);
+    await voiceDone();
+  });
+
+  await step("voice cloning: a recording of the empty room is refused as too short", async () => {
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Iris" }).first().click();
+    await page.getByRole("button", { name: "Clone again" }).click();
+    await page.getByRole("button", { name: "Record", exact: true }).click();
+    await page.locator('.clone[data-step="recording"]').waitFor({ timeout: 10_000 });
+    const since = Date.now();
+    await eventAfter("clone.level", since, (data) => data.seconds > 1.5, 10_000);
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    await page.getByText("Too short").waitFor({ timeout: 15_000 });
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await quiet(500);
+    const late = events.filter((e) => e.type === "clone.level" && e.at > Date.now() - 300);
+    check(late.length === 0, "the microphone still records");
+    check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "the voice changed");
   });
 
   await step("setups: a new one, renamed, switched and deleted", async () => {
@@ -1762,6 +1861,24 @@ try {
     await openStage("Turn end");
     await option("Smart Turn").click();
     await until("Smart Turn", () => config().turn_detection === "smart_turn");
+    await toConversation();
+  });
+
+  await step("voice cloning: Iris keeps her cloned voice after a restart, and gets her own back", async () => {
+    check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "the cloned voice was lost");
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Iris" }).first().click();
+    await until("Iris's cloned voice", () => page.locator(".voice.active", { hasText: "Iris" }).count());
+    const since = Date.now();
+    await page.locator(".voice.active .play").click();
+    await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
+    await voiceDone();
+    // Back to a voice of the catalogue: the clone stays, to switch back to
+    await page.locator(".voice button.pick", { hasText: exactly(shippedVoice.replace(/^./, (c) => c.toUpperCase())) }).click();
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("her own voice", () => config().tts_voice === shippedVoice, 10_000);
+    const voices = await rpc("persona.voices");
+    check(voices.engines.kyutai.some((v) => v.id === "clone:iris" && v.name === "Iris"), "the cloned voice is gone");
     await toConversation();
   });
 

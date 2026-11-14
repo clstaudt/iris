@@ -977,6 +977,107 @@ class SoundCheck:
             capture.close()
 
 
+# A recording made on its own (a sample of a voice to clone): how often it
+# reports its level, and how long it runs before it stops by itself
+RECORDING_REPORT = 0.05
+RECORDING_LIMIT = 60.0
+
+
+class Recording:
+    """The microphone on its own, recording until stopped, at the device's
+    own rate (a voice to clone is kept above the 16 kHz Iris listens at).
+    Reports about 20 times a second as {"level": 0-1, "seconds": s}, the
+    level scaled as the sound check scales it. It stops by itself after
+    RECORDING_LIMIT, and tells on_end."""
+
+    def __init__(
+        self,
+        on_update: Callable[[dict], None],
+        device: int | None = None,
+        audio: SoundDevice | None = None,
+        on_end: Callable[[], None] | None = None,
+        limit: float = RECORDING_LIMIT,
+    ):
+        """
+        Args:
+            on_update: Told each report
+            device: Input device index (None = system default)
+            audio: The device recorded from; the computer's microphone if None
+            on_end: Told when it stopped by itself
+            limit: Seconds it records at most
+        """
+        self.on_update = on_update
+        self.device = device
+        self.audio = audio or SYSTEM
+        self.on_end = on_end
+        self.limit = limit
+        self.sample_rate = SAMPLE_RATE
+        self._blocks: list[np.ndarray] = []
+        self._stopped = threading.Event()
+        self._capture: _Capture | None = None
+        self._thread: threading.Thread | None = None
+
+    def _device_rate(self) -> int:
+        """The rate the device records at by itself; 16 kHz if it cannot tell."""
+        try:
+            if self.device is not None:
+                info = self.audio.query_devices()[self.device]
+            else:
+                info = self.audio.query_devices(kind="input")
+            return int(info["default_samplerate"]) or SAMPLE_RATE
+        except Exception:
+            return SAMPLE_RATE
+
+    def start(self):
+        """Open the microphone, raising if it cannot be, and record."""
+        self.sample_rate = self._device_rate()
+        self._capture = _Capture(self.audio, self.sample_rate, self.device)
+        self._thread = threading.Thread(target=self._record, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> tuple[np.ndarray, int]:
+        """Close the microphone; returns what was recorded and its rate."""
+        self._stopped.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2)
+        blocks = self._blocks
+        audio = np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.float32)
+        return audio, self.sample_rate
+
+    def _record(self):
+        capture = self._capture
+        last = time.monotonic()
+        level, samples, ended = 0.0, 0, False
+        try:
+            while not self._stopped.is_set():
+                if samples >= self.limit * self.sample_rate:
+                    ended = True
+                    break
+                try:
+                    block, _ = capture.take(0.25)
+                except queue.Empty:
+                    continue
+                self._blocks.append(block)
+                samples += len(block)
+                rms = float(np.sqrt(np.mean(block**2))) if len(block) else 0.0
+                level = max(level, min(1.0, rms / 0.15))
+                now = time.monotonic()
+                if now - last >= RECORDING_REPORT:
+                    last = now
+                    self.on_update({"level": level, "seconds": round(samples / self.sample_rate, 2)})
+                    level = 0.0
+            # Stopped: what the microphone delivered until then is kept too
+            while not ended:
+                try:
+                    self._blocks.append(capture.take(0)[0])
+                except queue.Empty:
+                    break
+        finally:
+            capture.close()
+        if ended and self.on_end:
+            self.on_end()
+
+
 # Seconds of the microphone's audio kept for the next listener
 KEEP_CAPTURED = 30.0
 # A new listen takes up the microphone's audio where the last one stopped if
