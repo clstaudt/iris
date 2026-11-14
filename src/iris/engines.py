@@ -103,6 +103,10 @@ class SpeechEngine:
         on_step is told each step as it starts, on_progress the bytes of a
         download (done, total). Raises when it cannot be had."""
 
+    def voice_changed(self, voice: str):
+        """A voice was made again (a cloned one, from a new sample): what is
+        kept loaded of it is dropped."""
+
     def prepare(self):
         """Load what its first reply needs, when it is the persona's engine.
 

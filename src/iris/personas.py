@@ -1,12 +1,12 @@
 """Persona definitions for the Iris voice assistant."""
 
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
+from iris import names
 from iris.tts import KOKORO_VOICE_NAME
 
 
@@ -138,8 +138,9 @@ class Persona:
 
 
 def slug(name: str) -> str:
-    """A file name for a persona called this."""
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "persona"
+    """A file name for a persona called this ("Der Führer" is der-fuehrer).
+    A persona keeps the file it was saved in under an earlier spelling."""
+    return names.slug(name, "persona")
 
 
 class _PersonaDumper(yaml.SafeDumper):
