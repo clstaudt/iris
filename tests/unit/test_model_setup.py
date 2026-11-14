@@ -140,7 +140,7 @@ def test_first_start_fetches_what_is_missing_with_progress(tmp_path, monkeypatch
     assert fetched == [
         "model.safetensors",
         "tokenizer.json",
-        "alba.safetensors",
+        "anna.safetensors",
         tts.KOKORO_MODEL_FILE,
         tts.KOKORO_VOICES_FILE,
         SMART_TURN_FILE,

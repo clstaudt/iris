@@ -225,7 +225,7 @@ SPOKEN_WITH = {
     "computer": {"en": ("kokoro", "af_sarah", "en-us"), **KOKORO_ABROAD},
     "hal": {"en": ("kokoro", "bm_lewis", "en-gb"), **KOKORO_ABROAD},
     "iris": {
-        "en": ("kyutai", "alba", "english"),
+        "en": ("kyutai", "anna", "english"),
         "fr": ("kyutai", "estelle", "french"),
         "it": ("kyutai", "giovanni", "italian"),
         "de": ("kyutai", "juergen", "german"),

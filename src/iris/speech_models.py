@@ -138,7 +138,7 @@ def kokoro(folder: str | None = None) -> SpeechModel | None:
 def kyutai_voices() -> list[str]:
     """The Pocket TTS voices of the personas, fetched with its model."""
     voices = {p.voice for p in load_all_personas().values() if p.engine == "kyutai"}
-    return sorted(voices) or ["alba"]
+    return sorted(voices) or ["anna"]
 
 
 def kyutai(voices: list[str] | None = None) -> SpeechModel:

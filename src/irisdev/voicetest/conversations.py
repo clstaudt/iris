@@ -2534,7 +2534,7 @@ PERSONAS = [
     Conversation(
         "switching persona mid-conversation",
         [
-            Turn(["What is the capital of France?"], reply_mentions=["Paris"], checks=[voice_is("kyutai:alba")]),
+            Turn(["What is the capital of France?"], reply_mentions=["Paris"], checks=[voice_is("kyutai:anna")]),
             Turn(["And roughly how many people live there?"], actions=[(At.finished(0.0), ("persona", "hal"))],
                  at=At.event("config", 0.6), reply_mentions=["million"],
                  checks=[voice_is("kokoro:bm_lewis"), c.request_holds(["HAL 9000", "You are now HAL"])]),
@@ -2546,7 +2546,7 @@ PERSONAS = [
             Turn(["What day comes after Monday?"], reply_mentions=["Tuesday"],
                  checks=[voice_is("kokoro:af_sarah"), notes_in_order(["You are now HAL", "You are now Computer"])]),
             Turn(["What was the first thing I asked you?"], actions=[(At.finished(0.0), ("persona", "iris"))],
-                 at=At.event("config", 0.6), reply_mentions=["France", "Paris"], checks=[voice_is("kyutai:alba")]),
+                 at=At.event("config", 0.6), reply_mentions=["France", "Paris"], checks=[voice_is("kyutai:anna")]),
         ],
         tags=["conversation", "persona"],
     ),
