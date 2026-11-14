@@ -14,9 +14,11 @@ Event types:
     flags        {"flags": {flag_name: bool, ...}}   raw StatusManager snapshot
     audio.level  {"rms": float}                      mic input level 0.0-1.0
     chat.user    {"text": str, "language": str, "source": "voice"|"text", "id": str}
-                                                     id only for typed turns
+                                                     id only for typed turns;
+                                                     "restored": true for a turn
+                                                     of an earlier launch
     chat.chunk   {"text": str}                       streaming LLM token chunk
-    chat.done    {"text": str, "interrupted": bool}
+    chat.done    {"text": str, "interrupted": bool}  "restored" as chat.user
     chat.continued {}                                the user went on with a spoken
                                                      turn that seemed over: it and
                                                      the reply begun to it give way

@@ -87,6 +87,13 @@ def test_too_many_files_are_refused():
         prepare_all([_upload(f"{i}.txt", "text/plain", b"x") for i in range(11)])
 
 
+def test_a_file_over_25_mb_is_refused():
+    limit = 25 * 1024 * 1024
+    assert prepare(_upload("notes.txt", "text/plain", b"a" * limit)).kind == "document"
+    with pytest.raises(AttachmentError, match="notes.txt is larger than 25 MB"):
+        prepare(_upload("notes.txt", "text/plain", b"a" * (limit + 1)))
+
+
 def test_only_names_are_recorded():
     files = prepare_all([_upload("a.txt", "text/plain", b"secret contents")])
     assert recorded_text("Summarize", files) == "Summarize\n\n(Attached: a.txt)"
@@ -199,3 +206,16 @@ def test_without_a_vision_model_the_images_are_left_out(mock_ollama):
     message = _sent_user_message(mock_ollama)
     assert "images" not in message
     assert "cannot be shown to you" in message["content"]
+
+
+@patch("iris.llm.ollama")
+def test_a_model_that_cannot_see_is_told_so_with_the_pictures_only(mock_ollama):
+    """The pictures stay among the files shared for a few turns; the next
+    messages, which have none, must not have it said again, or the model
+    tells the user once more on every reply that it cannot see them."""
+    cm = _manager(mock_ollama, ["completion"])
+    list(cm.chat_stream("What is this?", attachments=_image()))
+    list(cm.chat_stream("And what time is it?"))
+    message = _sent_user_message(mock_ollama)
+    assert "cannot be shown" not in message["content"]
+    assert "images" not in message

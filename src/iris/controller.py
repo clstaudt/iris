@@ -100,20 +100,6 @@ KOKORO_MB = 335
 # see, if the server has it; else the first one that can see
 VISION_MODEL = "qwen3-vl:8b"
 
-# Told when the microphone gives only exact zeros: a real one always has a
-# noise floor. macOS gives them to an app it does not let hear the microphone
-SILENT_MAC = (
-    "Microphone returns pure silence — macOS is denying audio capture. In dev "
-    "mode the permission belongs to the app that launched the dev server "
-    "(Cursor, VS Code, Terminal or iTerm), not to Electron. Enable it under "
-    "System Settings > Privacy & Security > Microphone, then relaunch that app "
-    "completely."
-)
-SILENT = (
-    "The microphone gives only silence. Check that it is not muted, and that "
-    "Iris may use it."
-)
-
 # Events that make up the visible conversation. Kept here so a UI that
 # reloads (or attaches late) can rebuild its transcript; streaming chunks are
 # left out because chat.done carries the full reply.
@@ -121,6 +107,34 @@ TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "chat.continued", "tool.use", "er
 TRANSCRIPT_LIMIT = 500
 # Turn timings kept for the app
 TIMINGS_KEPT = 20
+
+
+def silent_microphone_message() -> str:
+    """What to say when the microphone delivers nothing but exact zeros.
+
+    On macOS that is the system withholding it from the app, which is asked
+    for it under a name that differs in the app (Iris) and in development
+    (the app that started the dev server). Elsewhere it is a muted or
+    missing microphone.
+    """
+    if sys.platform == "darwin":
+        if getattr(sys, "frozen", False):  # the packaged app's core
+            return (
+                "The microphone returns pure silence: macOS does not let Iris use it. "
+                "Enable it for Iris under System Settings > Privacy & Security > "
+                "Microphone, then reopen Iris."
+            )
+        return (
+            "The microphone returns pure silence: macOS does not let this app use it. "
+            "In development the permission belongs to the app that launched the dev "
+            "server (Cursor, VS Code, Terminal or iTerm), not to Electron. Enable it "
+            "under System Settings > Privacy & Security > Microphone, then relaunch "
+            "that app completely."
+        )
+    return (
+        "The microphone returns pure silence. Check that it is connected and not "
+        "muted, and that Iris may use it."
+    )
 
 
 class AssistantController:
@@ -198,7 +212,7 @@ class AssistantController:
             self._zero_level_since = time.monotonic()
         elif not self._silence_warned and time.monotonic() - self._zero_level_since > 4:
             self._silence_warned = True
-            self.bus.emit("error", {"message": SILENT_MAC if sys.platform == "darwin" else SILENT})
+            self.bus.emit("error", {"message": silent_microphone_message()})
 
     def _flag_state(self) -> str:
         with self._state_lock:
@@ -548,15 +562,24 @@ class AssistantController:
         return {"ok": True}
 
     def _restore_thread(self):
-        """Show the recent part of the continuous conversation after a restart."""
+        """Show the recent part of the continuous conversation after a restart.
+
+        The turns are marked as restored: they come once the models are
+        loaded, after what the app has said meanwhile (a microphone it may
+        not use, say), and go above it.
+        """
         memory = getattr(self.assistant, "memory", None)
         if memory is None:
             return
         for turn in memory.store.recent_turns():
             if turn["role"] == "user":
-                self.bus.emit("chat.user", {"text": turn["text"], "source": turn["source"]})
+                self.bus.emit(
+                    "chat.user", {"text": turn["text"], "source": turn["source"], "restored": True}
+                )
             elif turn["role"] == "assistant":
-                self.bus.emit("chat.done", {"text": turn["text"], "interrupted": False})
+                self.bus.emit(
+                    "chat.done", {"text": turn["text"], "interrupted": False, "restored": True}
+                )
 
     def memory_topics(self) -> dict:
         """The topics Iris remembers, most recently discussed first."""

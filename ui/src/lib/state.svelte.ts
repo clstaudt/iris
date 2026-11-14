@@ -416,6 +416,8 @@ class IrisStore {
   outputLevel = $state(0);
 
   private streamingIndex: number | null = null;
+  /** Turns from before this launch shown at the top so far */
+  private restoredCount = 0;
   /** Typed turns that started before their send() call returned. */
   private startedTurns = new Set<string>();
   private holding = false;
@@ -498,6 +500,17 @@ class IrisStore {
         break;
 
       case "chat.user": {
+        const message: ChatMessage = {
+          role: "user",
+          text: (data.text as string) ?? "",
+          source: (data.source as "voice" | "text") ?? "voice",
+          attachments: data.attachments as AttachmentInfo[] | undefined,
+          streaming: false,
+        };
+        if (data.restored) {
+          this.restore(message);
+          break;
+        }
         const id = data.id as string | undefined;
         if (id) {
           this.startedTurns.add(id);
@@ -506,13 +519,7 @@ class IrisStore {
           this.pending = this.pending.filter((p) => p.id !== id);
         }
         this.streamingIndex = null;
-        this.messages.push({
-          role: "user",
-          text: (data.text as string) ?? "",
-          source: (data.source as "voice" | "text") ?? "voice",
-          attachments: data.attachments as AttachmentInfo[] | undefined,
-          streaming: false,
-        });
+        this.messages.push(message);
         break;
       }
 
@@ -544,6 +551,10 @@ class IrisStore {
       }
 
       case "chat.done": {
+        if (data.restored) {
+          this.restore({ role: "assistant", text: (data.text as string) ?? "", streaming: false });
+          break;
+        }
         if (this.streamingIndex !== null && this.messages[this.streamingIndex]) {
           this.messages[this.streamingIndex].text = (data.text as string) ?? "";
           this.messages[this.streamingIndex].streaming = false;
@@ -596,6 +607,15 @@ class IrisStore {
         });
         break;
     }
+  }
+
+  /** A turn of the conversation before this launch, as memory kept it: it
+   *  goes above everything said since, notices included, which stay where
+   *  they are seen. */
+  private restore(message: ChatMessage) {
+    const at = this.restoredCount++;
+    this.messages.splice(at, 0, message);
+    if (this.streamingIndex !== null && this.streamingIndex >= at) this.streamingIndex++;
   }
 
   // ------------------------------------------------------------------
@@ -845,15 +865,25 @@ class IrisStore {
 
   /** Switch to a setup: its choices are applied one after the other. */
   async useSetup(id: string) {
-    const target = this.setups[id];
+    // As the setup holds them now: each choice applied is remembered in the
+    // setup in use, which this one is from here on
+    const target = $state.snapshot(this.setups[id]);
     if (!target) return;
     this.activeSetup = id;
     this.saveSetups();
     const config = this.config;
+    let onItsServer = true;
     if ((target.ollama_host ?? "") !== (config?.ollama_host ?? "")) {
-      await this.setOllamaHost(target.ollama_host ?? "");
+      // With the setup's model, not the one last used on that server
+      const error = await this.setOllamaHost(target.ollama_host ?? "", target.llm_model);
+      if (error) {
+        // The server in use stays, and so does its model: the setup's model
+        // is one of the other server's
+        onItsServer = false;
+        this.messages.push({ role: "error", text: error, streaming: false });
+      }
     }
-    if (target.llm_model && target.llm_model !== this.config?.llm_model) {
+    if (onItsServer && target.llm_model && target.llm_model !== this.config?.llm_model) {
       await this.setModel(target.llm_model);
     }
     if (target.stt_model_path && target.stt_model_path !== config?.stt_model_path) {
@@ -968,8 +998,9 @@ class IrisStore {
   }
 
   /** Point the core at another Ollama server ("" = default); on success the
-   *  model list is refreshed, since it differs per server. */
-  async setOllamaHost(url: string): Promise<string | null> {
+   *  model list is refreshed, since it differs per server, and a model of
+   *  that server is chosen: this one if it has it. */
+  async setOllamaHost(url: string, model?: string): Promise<string | null> {
     const result = await rpc<{ ok: boolean; error?: string; host?: string }>(
       "llm.set_host",
       { url }
@@ -988,7 +1019,7 @@ class IrisStore {
       "llm.list"
     );
     this.models = llms.models;
-    await this.modelForServer(host);
+    await this.modelForServer(host, model);
     return null;
   }
 
@@ -1000,16 +1031,17 @@ class IrisStore {
     saveSettings({ servers: $state.snapshot(this.servers) });
   }
 
-  /** After switching servers: the model last used on this one, or, when the
-   *  model in use is not on it, the first it has (one that takes tools if
-   *  there is one). */
-  private async modelForServer(host: string) {
+  /** After switching servers: the model asked for if the server has it,
+   *  else the model last used on this one, or, when the model in use is not
+   *  on it, the first it has (one that takes tools if there is one). */
+  private async modelForServer(host: string, wanted?: string) {
     const names = this.models.map((m) => m.name);
     if (names.length === 0) return;
     const remembered = loadSettings().server_models?.[host];
     const current = this.config?.llm_model ?? "";
     let model: string | undefined;
-    if (remembered && names.includes(remembered)) model = remembered;
+    if (wanted && names.includes(wanted)) model = wanted;
+    else if (remembered && names.includes(remembered)) model = remembered;
     else if (!names.includes(current)) {
       model = (this.models.find((m) => m.tools) ?? this.models[0]).name;
     }
@@ -1071,9 +1103,10 @@ class IrisStore {
     onEvent((type, data) => this.handleEvent(type, data));
 
     const micStatus = await window.iris.micStatus();
+    let micNotice: ChatMessage | null = null;
     if (micStatus !== "granted") {
       const packaged = await window.iris.isPackaged();
-      this.messages.push({
+      micNotice = {
         role: "error",
         text: packaged
           ? `Microphone access ${micStatus}. Enable it for Iris under System ` +
@@ -1082,8 +1115,13 @@ class IrisStore {
             `Privacy & Security > Microphone for the app that launched this dev ` +
             `server (Cursor, VS Code, Terminal or iTerm), then relaunch it.`,
         streaming: false,
-      });
+      };
     }
+    // Said below the conversation rebuilt after a reload, where it is seen
+    const sayMicNotice = () => {
+      if (micNotice) this.messages.push(micNotice);
+      micNotice = null;
+    };
 
     try {
       const info = await rpc<AppInfo>("app.info");
@@ -1105,6 +1143,7 @@ class IrisStore {
           console.warn("[store] chat.history unavailable:", err);
         }
       }
+      sayMicNotice();
 
       // First launch: nothing starts (or downloads) until the user has said
       // which server, model and speech models to use
@@ -1123,6 +1162,7 @@ class IrisStore {
       console.error("[store] init failed:", err);
       this.messages.push({ role: "error", text: `Iris could not be reached: ${err}`, streaming: false });
     }
+    sayMicNotice();
   }
 
   /** The core stopped and was started again (the error saying so came

@@ -12,7 +12,7 @@ import pytest
 from iris import controller as controller_module
 from iris import personas
 from iris.assistant import VoiceAssistant
-from iris.controller import SILENT, SILENT_MAC, AssistantController
+from iris.controller import AssistantController, silent_microphone_message
 from iris.events import EventBus
 from iris.personas import Persona
 from iris.tts import SpeechGenerator
@@ -44,9 +44,10 @@ def _controller():
     return AssistantController(bus), events
 
 
-@pytest.mark.parametrize("platform, message", [("darwin", SILENT_MAC), ("linux", SILENT), ("win32", SILENT)])
-def test_a_microphone_that_gives_only_silence_is_reported_once(clock, monkeypatch, platform, message):
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_a_microphone_that_gives_only_silence_is_reported_once(clock, monkeypatch, platform):
     monkeypatch.setattr(sys, "platform", platform)
+    message = silent_microphone_message()
     controller, events = _controller()
     for _ in range(3):
         controller.bus.emit("audio.level", {"rms": 0.0})
