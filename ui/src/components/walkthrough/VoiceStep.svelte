@@ -1,8 +1,20 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { store } from "../../lib/state.svelte";
   import { engineName, voiceName, walkthrough as w } from "../../lib/walkthrough.svelte";
   import Icon from "../Icon.svelte";
+  import VoiceLanguages from "../settings/VoiceLanguages.svelte";
   import Step from "./Step.svelte";
+
+  onMount(() => {
+    store.loadVoices().catch(() => {});
+  });
+
+  /** The chosen persona's voice, with the languages it speaks and is ready for */
+  const chosen = $derived(w.personas.find((p) => p.id === w.persona));
+  const voice = $derived(
+    chosen ? store.voices?.engines[chosen.engine]?.find((v) => v.id === chosen.voice) : undefined
+  );
 </script>
 
 <Step title="Persona" line="Choose who you talk to: each has a personality and a voice of its own.">
@@ -41,6 +53,11 @@
     {/each}
     {#if w.previewError}
       <p class="s-status error">{w.previewError}</p>
+    {/if}
+    {#if chosen && voice}
+      <div class="mt-2 px-1">
+        <VoiceLanguages engine={chosen.engine} {voice} label="Languages of {chosen.name}" />
+      </div>
     {/if}
   </div>
 </Step>
