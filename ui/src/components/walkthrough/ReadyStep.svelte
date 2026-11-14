@@ -31,7 +31,7 @@
       },
       { step: "models" as StepId, label: "Speech models", value: models, warn: w.downloadsFailed },
       { step: "microphone" as StepId, label: "Microphone", value: microphone, warn: false },
-      { step: "voice" as StepId, label: "Voice", value: persona?.name ?? w.persona, warn: false },
+      { step: "voice" as StepId, label: "Persona", value: persona?.name ?? w.persona, warn: false },
       {
         step: "extras" as StepId,
         label: "Wake word",

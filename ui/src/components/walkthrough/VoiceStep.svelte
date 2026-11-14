@@ -5,7 +5,7 @@
   import Step from "./Step.svelte";
 </script>
 
-<Step title="Voice" line="Choose who you talk to. Each has a voice of its own.">
+<Step title="Persona" line="Choose who you talk to: each has a personality and a voice of its own.">
   <div class="flex flex-col gap-1.5" role="radiogroup" aria-label="Persona">
     {#each w.personas as persona (persona.id)}
       {@const ready = w.voiceReady(persona.engine)}
