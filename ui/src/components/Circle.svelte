@@ -1,15 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { BLOOM_STYLE, drawIris } from "../lib/iris";
+  import { registerOrb } from "../lib/orb.svelte";
   import { STATE_COLORS, store, type AssistantState } from "../lib/state.svelte";
 
   interface Props {
     /** Canvas edge in CSS pixels; the ring and its glow scale with it. */
     size?: number;
+    /** A color the orb turns to whatever the state, such as for an error */
+    tint?: string | null;
   }
 
-  let { size = 280 }: Props = $props();
-
+  let { size = 280, tint = null }: Props = $props();
 
   let canvas: HTMLCanvasElement;
 
@@ -83,7 +85,7 @@
     let merge = 0; // 0 the flower, 1 the ring
 
     let last = performance.now();
-    let raf: number;
+    let raf = 0;
 
     const colStr = (alpha: number) =>
       `rgba(${col[0] | 0}, ${col[1] | 0}, ${col[2] | 0}, ${alpha})`;
@@ -154,7 +156,8 @@
       const now = performance.now();
       const dt = Math.min((now - last) / 1000, 0.1);
       last = now;
-      const time = t / 1000;
+      // Wall-clock time, so the breathing is in step in every window
+      const time = (performance.timeOrigin + t) / 1000;
 
       const state: AssistantState = store.state;
 
@@ -168,7 +171,9 @@
       }
       const awake = hexToRgb(STATE_COLORS[state] ?? STATE_COLORS.idle);
       const asleep = hexToRgb(STATE_COLORS.dormant);
-      const target = awake.map((c, i) => c + (asleep[i] - c) * drowsy);
+      const target = tint
+        ? hexToRgb(tint)
+        : awake.map((c, i) => c + (asleep[i] - c) * drowsy);
       for (let i = 0; i < 3; i++) col[i] += (target[i] - col[i]) * 0.05;
 
       // One exposure per trigger: the shutter fires when vision starts and
@@ -272,9 +277,49 @@
       draw(t);
       raf = requestAnimationFrame(frame);
     }
-    raf = requestAnimationFrame(frame);
 
-    return () => cancelAnimationFrame(raf);
+    // Only the window on screen draws; at a switch the orb's motion passes
+    // to the other window, which carries on from it
+    const unregister = registerOrb({
+      motion: () => ({
+        col: [col[0], col[1], col[2]],
+        level,
+        eased,
+        shutter,
+        wasLooking,
+        spinner,
+        spin,
+        blooming,
+        unfold,
+        merge,
+      }),
+      adopt: (motion) => {
+        col = [motion.col[0], motion.col[1], motion.col[2]];
+        level = motion.level;
+        eased = motion.eased;
+        shutter = motion.shutter;
+        wasLooking = motion.wasLooking;
+        spinner = motion.spinner;
+        spin = motion.spin;
+        blooming = motion.blooming;
+        unfold = motion.unfold;
+        merge = motion.merge;
+      },
+      rest: () => {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      },
+      wake: () => {
+        if (raf) return;
+        last = performance.now();
+        raf = requestAnimationFrame(frame);
+      },
+    });
+
+    return () => {
+      cancelAnimationFrame(raf);
+      unregister();
+    };
   });
 </script>
 

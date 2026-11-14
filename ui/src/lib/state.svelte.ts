@@ -388,7 +388,8 @@ class IrisStore {
   /** Named setups by id; the active one follows every change made */
   setups = $state<Record<string, Setup>>(loadSettings().setups ?? {});
   activeSetup = $state(loadSettings().active_setup ?? "");
-  /** Presence: the window shows only the orb, for voice and vision */
+  /** Presence: only the orb shows, in a round window of its own, for voice
+   *  and vision */
   presence = $state(window.iris?.presence ?? false);
   /** The persona open in the persona editor; "" for a new one */
   editingPersona = $state(loadSettings().persona ?? "iris");
@@ -747,13 +748,10 @@ class IrisStore {
     return error;
   }
 
-  /** Shrink the window to the orb alone, or bring the conversation back. */
+  /** Show Iris as the orb alone, or bring the conversation back. Presence is
+   *  a window of its own; this one waits hidden, as it was left. */
   async setPresence(on: boolean) {
     if (on === this.presence || (on && this.needsSetup)) return;
-    if (on) {
-      this.panel = null;
-      this.settingsPage = null;
-    }
     this.presence = on;
     await window.iris.setPresence(on);
   }

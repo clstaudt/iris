@@ -139,6 +139,13 @@ await page.addInitScript(
       chooseFolder: async () => null,
       presence: false,
       setPresence: async () => {},
+      onOrb: () => () => {},
+      sendOrbInputs: () => {},
+      onOrbInputs: () => () => {},
+      presenceCommand: () => {},
+      onPresenceCommand: () => () => {},
+      presenceHover: () => {},
+      presenceDrag: async () => false,
       platform: "test",
     };
   },

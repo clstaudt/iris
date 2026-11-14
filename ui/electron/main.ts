@@ -19,17 +19,26 @@ import { PythonBridge } from "./python-bridge";
 declare const __dirname: string;
 
 let mainWindow: BrowserWindow | null = null;
+let presenceWindow: BrowserWindow | null = null;
+let quitting = false;
 
 // The iris icon, rendered by `npm run icon` (scripts/icon) into ui/build
 const ICON_PATH = path.join(__dirname, "../build/icon.png");
 let pythonBridge: PythonBridge | null = null;
 
-// The full window, and presence: a small window with only the orb, always
-// on top, for talking to Iris by voice while doing something else
+// The full window, and presence: Iris as only its orb, a round window of
+// its own above other windows, for talking to Iris by voice while doing
+// something else
 const FULL_SIZE = { width: 1280, height: 800 };
 const FULL_MIN = { width: 720, height: 480 };
-const PRESENCE_SIZE = { width: 220, height: 220 };
+// The orb's canvas: its ring and the glow that fades out before the edge
+const PRESENCE_SIZE = { width: 112, height: 112 };
 const PRESENCE_MARGIN = 24;
+// A press on the orb that moves less than this is a click, not a drag (px)
+const DRAG_THRESHOLD = 4;
+// How long a window may take to hand the orb over (ms); the switch goes on
+// without it after that
+const HANDOVER_TIMEOUT = 500;
 
 /** The window's mode and where it was, remembered between launches. */
 interface WindowState {
@@ -106,39 +115,166 @@ function fullBounds(): Rectangle {
   };
 }
 
-/** The window's behavior in each mode: presence floats above other windows
- *  at a fixed size, without window buttons. */
-function styleWindow(win: BrowserWindow, presence: boolean) {
-  win.setAlwaysOnTop(presence, "floating");
-  win.setResizable(!presence);
-  win.setMaximizable(!presence);
-  win.setFullScreenable(!presence);
-  if (process.platform === "darwin") win.setWindowButtonVisibility(!presence);
+/** The presence window's outline as rows of pixels, for Linux, where the
+ *  window is cut to the circle: clicks outside it go to the windows below,
+ *  and the circle still shows without a compositor for transparency. */
+function circleShape(size: number): Rectangle[] {
+  const r = size / 2;
+  const rows: Rectangle[] = [];
+  for (let y = 0; y < size; y++) {
+    const dy = y + 0.5 - r;
+    const x = Math.round(r - Math.sqrt(Math.max(0, r * r - dy * dy)));
+    rows.push({ x, y, width: size - 2 * x, height: 1 });
+  }
+  return rows;
 }
 
-function setPresence(on: boolean) {
-  const win = mainWindow;
-  if (!win || on === !!windowState.presence) return;
-  if (on) {
-    // Out of full screen first; presence follows once the window is back
-    if (win.isFullScreen()) {
-      win.once("leave-full-screen", () => setPresence(true));
-      win.setFullScreen(false);
-      return;
-    }
-    windowState.full = win.getNormalBounds();
-    if (win.isMaximized()) win.unmaximize();
-    windowState.presence = true;
-    win.setMinimumSize(PRESENCE_SIZE.width, PRESENCE_SIZE.height);
-    styleWindow(win, true);
-    win.setBounds(presenceBounds(), true);
+function loadPage(win: BrowserWindow, view?: "presence") {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const url = new URL(process.env.VITE_DEV_SERVER_URL);
+    if (view) url.searchParams.set("window", view);
+    win.loadURL(url.toString());
   } else {
-    const [x, y] = win.getPosition();
-    windowState.presenceAt = { x, y };
+    const query: Record<string, string> = view ? { window: view } : {};
+    win.loadFile(path.join(__dirname, "../dist/index.html"), { query });
+  }
+}
+
+/** Presence: a transparent, frameless window with only the round orb,
+ *  floating above other windows. It is made once and kept, hidden while the
+ *  full window shows, so a switch never waits for a page to load. */
+function createPresenceWindow(): BrowserWindow {
+  const win = new BrowserWindow({
+    title: "iris",
+    ...presenceBounds(),
+    show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: false,
+    roundedCorners: false,
+    thickFrame: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    // The first click on the orb counts, even while another app is active
+    acceptFirstMouse: true,
+    icon: ICON_PATH,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      // It draws the orb while still hidden or fully transparent at a switch
+      backgroundThrottling: false,
+    },
+  });
+  win.setAlwaysOnTop(true, "floating");
+  // Only the orb takes the pointer. Linux cuts the window to the circle;
+  // elsewhere the page tells whether the pointer is over the orb, and until
+  // it is, clicks go through to the windows below.
+  if (process.platform === "linux") win.setShape(circleShape(PRESENCE_SIZE.width));
+  else win.setIgnoreMouseEvents(true, { forward: true });
+  // Closing presence closes Iris's window, as closing the full window does
+  win.on("close", (event) => {
+    if (quitting || !mainWindow) return;
+    event.preventDefault();
+    mainWindow.close();
+  });
+  loadPage(win, "presence");
+  return win;
+}
+
+function loaded(win: BrowserWindow): Promise<void> {
+  if (!win.webContents.isLoading()) return Promise.resolve();
+  return new Promise((resolve) => win.webContents.once("did-finish-load", () => resolve()));
+}
+
+/** Send a window's page a message and wait for its reply, or for the
+ *  timeout (null). */
+function ask<T>(win: BrowserWindow, channel: string, payload?: unknown): Promise<T | null> {
+  return new Promise((resolve) => {
+    const reply = `${channel}-reply`;
+    const finish = (value: T | null) => {
+      clearTimeout(timer);
+      ipcMain.removeListener(reply, listener);
+      resolve(value);
+    };
+    const listener = (event: Electron.IpcMainEvent, value: T) => {
+      if (event.sender === win.webContents) finish(value ?? null);
+    };
+    const timer = setTimeout(() => finish(null), HANDOVER_TIMEOUT);
+    ipcMain.on(reply, listener);
+    win.webContents.send(channel, payload);
+  });
+}
+
+/**
+ * Put one window on screen in place of the other, without a moment where the
+ * orb is missing or stale: the window going away hands over the orb's
+ * motion, the window coming in draws with it and reports back, and only then
+ * does it show and the other hide.
+ */
+async function handOver(from: BrowserWindow, to: BrowserWindow) {
+  await Promise.all([loaded(from), loaded(to)]);
+  const handoff = await ask(from, "orb-release");
+  if (process.platform === "darwin") {
+    // Shown fully transparent first, so the first frame anyone sees is one
+    // drawn with the handed-over motion
+    to.setOpacity(0);
+    to.show();
+    await ask(to, "orb-adopt", handoff);
+    to.setOpacity(1);
+  } else {
+    // Drawn while still hidden (the page is not throttled), then shown
+    await ask(to, "orb-adopt", handoff);
+    to.show();
+  }
+  from.hide();
+  from.webContents.send("orb-rest");
+}
+
+let switching: Promise<void> = Promise.resolve();
+
+/** Switch between the full window and presence, one switch at a time. */
+function setPresence(on: boolean): Promise<void> {
+  switching = switching
+    .then(() => switchPresence(on))
+    .catch((err) => console.error("[main] could not switch presence:", err));
+  return switching;
+}
+
+async function switchPresence(on: boolean) {
+  const full = mainWindow;
+  const orb = presenceWindow;
+  if (!full || !orb) return;
+  // Which one is on screen; neither while Iris is still opening
+  const shown = orb.isVisible() ? true : full.isVisible() ? false : null;
+  if (on === shown) return;
+  if (on) {
+    // Out of full screen first, or the hidden window would leave an empty Space
+    if (full.isFullScreen()) {
+      await new Promise<void>((resolve) => {
+        full.once("leave-full-screen", () => resolve());
+        full.setFullScreen(false);
+      });
+    }
+    if (shown === false) windowState.full = full.getNormalBounds();
+    windowState.presence = true;
+    // Hidden, the full window's page still runs the conversation
+    full.webContents.setBackgroundThrottling(false);
+    orb.setBounds(presenceBounds());
+    await handOver(full, orb);
+  } else {
+    if (shown) {
+      const [x, y] = orb.getPosition();
+      windowState.presenceAt = { x, y };
+    }
     windowState.presence = false;
-    styleWindow(win, false);
-    win.setBounds(fullBounds(), true);
-    win.setMinimumSize(FULL_MIN.width, FULL_MIN.height);
+    await handOver(orb, full);
+    full.webContents.setBackgroundThrottling(true);
+    if (process.platform !== "linux") orb.setIgnoreMouseEvents(true, { forward: true });
   }
   saveWindowState();
 }
@@ -146,12 +282,11 @@ function setPresence(on: boolean) {
 function createWindow() {
   windowState = loadWindowState();
   const presence = !!windowState.presence;
-  const min = presence ? PRESENCE_SIZE : FULL_MIN;
   mainWindow = new BrowserWindow({
     title: "iris",
-    ...(presence ? presenceBounds() : fullBounds()),
-    minWidth: min.width,
-    minHeight: min.height,
+    ...fullBounds(),
+    minWidth: FULL_MIN.width,
+    minHeight: FULL_MIN.height,
     show: false,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 16 },
@@ -161,25 +296,23 @@ function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      // Hidden while presence is up, the page still runs the conversation
+      backgroundThrottling: !presence,
     },
   });
-  if (presence) styleWindow(mainWindow, true);
+  presenceWindow = createPresenceWindow();
 
+  // Opened as presence, the orb shows and the full window waits hidden
   mainWindow.once("ready-to-show", () => {
-    mainWindow?.show();
+    if (windowState.presence) setPresence(true);
+    else mainWindow?.show();
   });
 
-  // Remember where the window is, in either mode
-  mainWindow.on("moved", () => {
-    if (!mainWindow || !windowState.presence) return;
-    const [x, y] = mainWindow.getPosition();
-    windowState.presenceAt = { x, y };
-    saveWindowState();
-  });
+  // Remember where the windows are
   mainWindow.on("close", () => {
     if (!mainWindow) return;
-    if (windowState.presence) {
-      const [x, y] = mainWindow.getPosition();
+    if (presenceWindow?.isVisible()) {
+      const [x, y] = presenceWindow.getPosition();
       windowState.presenceAt = { x, y };
     } else {
       windowState.full = mainWindow.getNormalBounds();
@@ -196,15 +329,13 @@ function createWindow() {
     if (url !== mainWindow?.webContents.getURL()) event.preventDefault();
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
-  } else {
-    mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
-  }
+  loadPage(mainWindow);
+  if (process.env.VITE_DEV_SERVER_URL) mainWindow.webContents.openDevTools({ mode: "detach" });
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+    presenceWindow?.destroy();
+    presenceWindow = null;
   });
 
   // Route Python events to the renderer
@@ -311,6 +442,48 @@ app.whenReady().then(async () => {
     event.returnValue = !!windowState.presence;
   });
   ipcMain.handle("set-presence", (_event, on: boolean) => setPresence(!!on));
+  // What the orb in presence shows comes from the conversation window
+  ipcMain.on("orb-inputs", (event, inputs) => {
+    if (event.sender !== mainWindow?.webContents) return;
+    presenceWindow?.webContents.send("orb-inputs", inputs);
+  });
+  ipcMain.on("presence-command", (event, command: string) => {
+    if (event.sender !== presenceWindow?.webContents) return;
+    mainWindow?.webContents.send("presence-command", command);
+  });
+  ipcMain.on("presence-hover", (event, over: boolean) => {
+    const win = presenceWindow;
+    if (!win || event.sender !== win.webContents || process.platform === "linux") return;
+    win.setIgnoreMouseEvents(!over, { forward: true });
+  });
+  // Dragging the orb: the window follows the pointer as the system reports
+  // it, so it never lags behind its own movement
+  let drag: { cursor: Electron.Point; x: number; y: number; moved: boolean } | null = null;
+  ipcMain.handle("presence-drag", (event, phase: "start" | "move" | "end") => {
+    const win = presenceWindow;
+    if (!win || event.sender !== win.webContents) return false;
+    const cursor = screen.getCursorScreenPoint();
+    if (phase === "start") {
+      const [x, y] = win.getPosition();
+      drag = { cursor, x, y, moved: false };
+      return false;
+    }
+    if (!drag) return false;
+    const dx = cursor.x - drag.cursor.x;
+    const dy = cursor.y - drag.cursor.y;
+    if (!drag.moved && Math.hypot(dx, dy) >= DRAG_THRESHOLD) drag.moved = true;
+    if (drag.moved) win.setPosition(drag.x + dx, drag.y + dy);
+    const moved = drag.moved;
+    if (phase === "end") {
+      drag = null;
+      if (moved) {
+        const [x, y] = win.getPosition();
+        windowState.presenceAt = { x, y };
+        saveWindowState();
+      }
+    }
+    return moved;
+  });
   ipcMain.handle("is-packaged", () => app.isPackaged);
   ipcMain.handle("choose-folder", async (_event, title: string) => {
     const options = { title, properties: ["openDirectory" as const] };
@@ -332,5 +505,6 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
+  quitting = true;
   pythonBridge?.kill();
 });
