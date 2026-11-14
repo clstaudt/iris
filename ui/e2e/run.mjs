@@ -1404,7 +1404,7 @@ try {
     const word = "Quillwort";
     const stored = (await rpc("e2e.memory")).turns;
     const since = await ask(`Please remember this: my neighbour's tortoise is called ${word}.`);
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
     // Kept once it has been heard to the end
     const kept = async (turns) => (await rpc("e2e.memory")).turns === turns;
@@ -1464,7 +1464,7 @@ try {
 
     // The next message is answered as ever, and remembered
     const next = await ask("Reply with exactly: a clean slate.");
-    const reply = await eventAfter("chat.done", next, () => true, 180_000);
+    const reply = await replyEvent("chat.done", next);
     check(!reply.data.interrupted && reply.data.text.trim(), "the reply did not come");
     await until("the next exchange to be remembered", () => kept(2), 120_000);
     const said = await page.locator(".bubble.user").allInnerTexts();
@@ -1830,7 +1830,7 @@ try {
     try {
       await toConversation();
       since = await ask("Reply with exactly: the speaker is quiet.");
-      const done = await eventAfter("chat.done", since, () => true, 180_000);
+      const done = await replyEvent("chat.done", since);
       check(done.data.text.trim(), "the reply did not come");
       const told = await eventAfter(
         "error",
@@ -1846,7 +1846,7 @@ try {
       );
       // The next reply is not spoken either, and not told again
       const again = await ask("Reply with exactly: still quiet.");
-      await eventAfter("chat.done", again, () => true, 180_000);
+      await replyEvent("chat.done", again);
       await voiceDone();
     } finally {
       fs.rmSync(AUDIO_FAULTS, { force: true });
@@ -1869,7 +1869,7 @@ try {
     await eventAfter("audio.output", played, (data) => data.rms > 0, 60_000);
     await voiceDone();
     const spoken = await ask("Reply with exactly: I can be heard again.");
-    await eventAfter("chat.done", spoken, () => true, 180_000);
+    await replyEvent("chat.done", spoken);
     await eventAfter("audio.output", spoken, (data) => data.rms > 0.001, 60_000);
     await voiceDone();
   });
@@ -2422,7 +2422,7 @@ try {
     check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
     const question = "Reply only in Italian, in one short sentence: what is the capital of Italy?";
     const since = await ask(question);
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     const job = await eventAfter("voice.job", since, (data) => data.voice === "anna" && data.language === "it", 30_000);
     check(job.data.origin === "conversation", `the download was started by ${job.data.origin}`);
     // The reply is shown at once, and the download in the conversation and
@@ -2440,7 +2440,7 @@ try {
     await page.getByText("Anna's voice is ready for Italian").waitFor({ timeout: 5000 });
     // The next reply in Italian is spoken, and reaches the speaker
     const next = await ask(question);
-    const timing = await eventAfter("turn.timing", next, () => true, 180_000);
+    const timing = await replyEvent("turn.timing", next);
     check(timing.data.components.voice === "kyutai:anna", `spoken by ${timing.data.components.voice}`);
     await heard(next);
   });
