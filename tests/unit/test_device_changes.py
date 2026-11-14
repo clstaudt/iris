@@ -27,7 +27,14 @@ import soundfile as sf
 
 from iris import audio
 from iris.assistant import VoiceAssistant
-from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, SpeakerError
+from iris.audio import (
+    AudioPlayer,
+    AudioRecorder,
+    Recording,
+    SoundCheck,
+    SoundDevice,
+    SpeakerError,
+)
 from iris.controller import LOOP_RESTARTS, AssistantController
 from iris.echo import STEP
 from iris.events import EventBus
@@ -389,6 +396,54 @@ def test_on_macos_a_new_default_microphone_is_followed_while_listening(computer,
         assert computer.initialized == 2
     finally:
         recorder.close_microphone()
+
+
+# The walkthrough's sound check, and a voice sample recorded to clone --------------
+
+
+def test_the_sound_check_goes_on_with_the_microphone_where_it_is_now(computer, monkeypatch):
+    monkeypatch.setattr(audio, "STALLED", 0.3)
+    updates = []
+    check = SoundCheck(updates.append, audio=SoundDevice(), detector=lambda frame: 0.0)
+    check.start()
+    try:
+        assert _wait_for(lambda: updates and np.isclose(updates[-1]["level"], 0.1 / 0.15))
+        computer.unplug(AIRPODS, default_input=MICROPHONE, default_output=SPEAKERS)
+        assert _wait_for(lambda: np.isclose(updates[-1]["level"], 1.0))  # 0.3 / 0.15, capped
+        assert [s.name for s in computer.streams] == [AIRPODS, MICROPHONE]
+    finally:
+        check.stop()
+    assert computer.streams[-1].closed
+
+
+def test_a_sample_whose_microphone_goes_away_ends_with_what_was_recorded(computer, monkeypatch):
+    """Not one sample of two microphones: it ends, as at its limit."""
+    monkeypatch.setattr(audio, "STALLED", 0.3)
+    ended = threading.Event()
+    updates = []
+    recording = Recording(updates.append, audio=SoundDevice(), on_end=ended.set)
+    recording.start()
+    assert _wait_for(lambda: updates and updates[-1]["seconds"] >= 0.3)
+    computer.unplug(AIRPODS, default_input=MICROPHONE, default_output=SPEAKERS)
+    assert ended.wait(5)
+    sample, rate = recording.stop()
+    assert rate == SAMPLE_RATE and len(sample) >= 0.3 * SAMPLE_RATE
+    assert np.isclose(sample, LEVELS[AIRPODS]).all()
+    assert [s.name for s in computer.streams] == [AIRPODS] and computer.streams[0].closed
+
+
+def test_a_sample_is_recorded_where_the_microphone_is_now(computer):
+    """PortAudio still knows the AirPods as the default, which are gone."""
+    computer.unplug(AIRPODS, default_input=MICROPHONE, default_output=SPEAKERS)
+    updates = []
+    recording = Recording(updates.append, audio=SoundDevice())
+    recording.start()
+    try:
+        assert _wait_for(lambda: updates)
+    finally:
+        sample, _ = recording.stop()
+    assert np.isclose(sample, LEVELS[MICROPHONE]).all()
+    assert computer.initialized == 1
 
 
 # Telling the user ---------------------------------------------------------------
