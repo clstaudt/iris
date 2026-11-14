@@ -47,6 +47,7 @@ for package in (
     "pocket_tts",  # the configs of its models
     "py3langid",  # its model, which tells the language a reply is written in
     "num2words",  # numbers in words, for voices that read no digits
+    "pykakasi",  # its dictionaries, which read kanji in kana for Kokoro
 ):
     package_datas, package_binaries, package_imports = collect_all(package)
     datas += package_datas

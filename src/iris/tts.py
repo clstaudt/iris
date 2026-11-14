@@ -23,6 +23,7 @@ from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
 from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
+from pykakasi import kakasi
 
 from iris.audio import get_filter
 from iris.engines import (
@@ -81,15 +82,37 @@ class KeptEspeak:
 
 kokoro_tokenizer.phonemizer = KeptEspeak()
 
+
+class Readers:
+    """Read Japanese for Kokoro. The reader is made the first time it is
+    needed (a fraction of a second), and used by one thread at a time."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._kana = None
+
+    def kana(self, text: str) -> str:
+        """Japanese as espeak can read it: its numbers in kanji, and every
+        kanji in hiragana. espeak reads no kanji: it says "Chinese letter",
+        in English, for each."""
+        with self._lock:
+            if self._kana is None:
+                self._kana = kakasi()
+            return "".join(item["hira"] for item in self._kana.convert(numbers_in_words(text, "ja")))
+
+
+READERS = Readers()
+
+
 def kokoro_speech(tokenizer, text: str, language: str, code: str) -> dict:
     """What Kokoro is given to say a text: the text, the language kokoro-onnx
     is to read it in, and phonemes when they are made here.
 
     kokoro-onnx reads numbers with English rules before espeak does, in any
     language ("16,50 €" as 1650): French, Italian, Spanish and Portuguese
-    numbers are given in words. Spanish, Portuguese and Hindi, which
-    kokoro-onnx refuses by name, are given as espeak's phonemes, named as
-    English only to pass its check.
+    numbers are given in words. Japanese is given in kana: espeak reads no
+    kanji. Spanish, Portuguese and Hindi, which kokoro-onnx refuses by name,
+    are given as espeak's phonemes, named as English only to pass its check.
 
     Args:
         tokenizer: kokoro-onnx's tokenizer, for espeak's phonemes
@@ -98,6 +121,8 @@ def kokoro_speech(tokenizer, text: str, language: str, code: str) -> dict:
     """
     if language in ("fr", "it", "es", "pt"):
         text = numbers_in_words(text, language)
+    if language == "ja":
+        return {"text": READERS.kana(text), "lang": code}
     if code in KOKORO_ONNX_LANGUAGES:
         return {"text": text, "lang": code}
     return {"text": text, "lang": "en-us", "phonemes": tokenizer.phonemize(text, code)}

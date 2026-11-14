@@ -10,8 +10,8 @@ and voices speaking each language Iris speaks: French, Italian, Spanish,
 Portuguese, Japanese, Chinese, Hindi, German and Dutch. Kokoro is called
 directly with the language to speak, so a French voice can speak English
 with its accent, and is given each language as Iris gives it (numbers in
-words, espeak's phonemes for the languages kokoro-onnx does not take by
-name). German and Dutch are
+words, Japanese in kana, espeak's phonemes for the languages kokoro-onnx
+does not take by name). German and Dutch are
 spoken by Pocket TTS, cloning a voice from a prompt (not Pocket's default
 voices, which Iris uses), numbers in words.
 
@@ -130,9 +130,9 @@ class UserVoice:
 
     def _key(self, text: str) -> str:
         spec = f"{self.engine}:{self._spoken_voice()}:{self.language}:{self.speed}:{text}"
-        # Read as Iris reads it (numbers in words), kept apart from what was
-        # synthesized before it did
-        if self.language != "en" and any(c.isdigit() for c in text):
+        # Read as Iris reads it (kana, numbers in words), kept apart from
+        # what was synthesized before it did
+        if self.language == "ja" or self.language != "en" and any(c.isdigit() for c in text):
             spec += ":as-iris-reads-it"
         return hashlib.sha1(spec.encode()).hexdigest()[:16]
 

@@ -412,21 +412,17 @@ def _given_to_kokoro(text: str, language: str, voice: str) -> dict:
         return kokoro.return_value.create.call_args.kwargs
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="espeak reads no kanji: Kokoro needs them in kana, which needs a kanji reader "
-    "(a new dependency, such as pykakasi)",
-)
 def test_a_japanese_reply_is_read_not_called_chinese_letters():
     """Kokoro speaks Japanese from espeak's phonemes, and espeak calls every
-    kanji a "Chinese letter", in English: a Japanese reply is gibberish
-    ("Chinese letter, Chinese letter, no Chinese letter..."). The text Iris
-    gives Kokoro, through real espeak as Kokoro's tokenizer runs it."""
+    kanji a "Chinese letter", in English: a Japanese reply was gibberish
+    ("Chinese letter, Chinese letter, no Chinese letter..."). Given in kana,
+    numbers too, it is read. Real espeak, through Kokoro's tokenizer."""
     try:
-        given = _given_to_kokoro("東京の天気は晴れです。", "ja", "jf_alpha")
+        given = _given_to_kokoro("東京の天気は晴れ、18度です。", "ja", "jf_alpha")
         phonemes = Tokenizer().phonemize(given["text"], given["lang"])
     except RuntimeError as error:
         pytest.skip(f"espeak cannot run here: {error}")
+    assert given["text"] == "とうきょうのてんきははれ、じゅうはちどです。"
     assert "tʃˈaɪniːz" not in phonemes and "dʒˈapəniːz" not in phonemes, phonemes
 
 

@@ -2,8 +2,8 @@
 
 `iris-rpc --check` imports each engine and reports what fails, a smoke test
 for packaged builds (a missing library would otherwise only show up as a
-quietly disabled feature). It also has the numbers said in words once, as
-a missing table shows only then.
+quietly disabled feature). It also has the voices' readers read a line, as
+a missing table or dictionary shows only once they read.
 """
 
 import importlib
@@ -14,6 +14,7 @@ import traceback
 
 from iris.numbers import numbers_in_words
 from iris.rpc_server import main
+from iris.tts import READERS
 
 # What the core needs at runtime, by feature
 ENGINES = {
@@ -32,11 +33,13 @@ ENGINES = {
     "screen capture": "mss",
     "audio devices": "sounddevice",
     "numbers in words": "num2words",
+    "Japanese in kana": "pykakasi",
 }
 
 # What the voices are given to read, and what it must not hold any more
 READS = {
     "numbers in words": (lambda: numbers_in_words("am 27. November um 10:30 Uhr", "de"), r"\d"),
+    "Japanese in kana": (lambda: READERS.kana("東京の天気は晴れ、18度"), r"[\d\u4e00-\u9fff]"),
 }
 
 

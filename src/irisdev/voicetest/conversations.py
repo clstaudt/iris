@@ -2092,15 +2092,20 @@ def english_with_names(noisy: bool) -> Conversation:
 
 
 # Of the reply's words (characters in Japanese and Chinese), the voice is heard
-# saying this share at least. Kokoro reads Japanese through espeak, which
-# cannot read kanji: it says "Chinese letter", in English, for each. A
-# Japanese reply is heard saying little of what it says ("KANJI"), and the
-# user's Japanese voice is not understood, so Japanese turns are typed.
+# saying this share at least. Kokoro reads Japanese in kana through espeak,
+# whose Japanese is plain: about half of it is heard (with its kanji, read as
+# "Chinese letter", none was). The user's Japanese voice is understood too
+# poorly for a turn to be heard as said, so Japanese turns are typed.
 SPOKEN_SHARE = 0.5
-KANJI = "spoken_share"
-# Kokoro speaks Mandarin from espeak's phonemes too, with tones and sounds
+JAPANESE_SHARE = 0.3
+# Kokoro speaks Mandarin from espeak's phonemes, with tones and sounds
 # espeak gets wrong: a Chinese reply is heard saying a third of what it says
 MANDARIN = "spoken_share"
+
+
+def spoken_share(language: str) -> float:
+    return JAPANESE_SHARE if language == "ja" else SPOKEN_SHARE
+
 
 # A long reply in one paragraph, in languages that put no space after a
 # sentence: the voice starts at its first sentence, not once it is all there
@@ -2215,9 +2220,9 @@ LANGUAGES = [
             Turn(["Grazie mille!"], voice="it", reply_language="it"),
             Turn(["Busca cuánto cuesta un billete de tren de Madrid a Sevilla."], voice="es",
                  search_mentions=["madrid", "sevilla|seville"], reply_language="es"),
-            # Typed: the user's Kokoro voice cannot read kanji either (see KANJI)
+            # Typed: the user's Japanese voice is understood too poorly (see JAPANESE_SHARE)
             Turn(["明日の東京の天気を調べてください。"], typed=True, search_mentions=["東京|tokyo"],
-                 reply_language="ja", checks=[asks_for("Japanese")], spoken_share=SPOKEN_SHARE),
+                 reply_language="ja", checks=[asks_for("Japanese")], spoken_share=JAPANESE_SHARE),
             Turn(["Pesquisa quando abre o Museu do Azulejo em Lisboa."], voice="pt", search_mentions=["azulejo"],
                  reply_language="pt", checks=[asks_for("Portuguese")]),
             Turn(["Zoek op wanneer het Rijksmuseum morgen opengaat."], voice="nl", search_mentions=["rijksmuseum"],
@@ -2228,7 +2233,6 @@ LANGUAGES = [
                  checks=[asks_for_english()]),
         ],
         tools={"web": True}, web=LANGUAGE_WEB, stub_rules=LANGUAGE_RULES,
-        expected_failures=[f"T6:{KANJI}"],
         tags=["hearing", "languages", "mixed"],
     ),
 ] + LONG_IN_LANGUAGES + [
@@ -2319,13 +2323,12 @@ TYPED_AND_SPOKEN = [
             Turn(["What is the capital of Canada?"], typed=True, reply_language="en",
                  checks=[asks_for_english()], spoken_share=SPOKEN_SHARE),
             Turn(["明日の東京の天気を教えてください。"], typed=True, reply_language="ja",
-                 checks=[asks_for("Japanese")], spoken_share=SPOKEN_SHARE),
+                 checks=[asks_for("Japanese")], spoken_share=JAPANESE_SHARE),
             Turn(["Qual é a capital do Brasil?"], typed=True, reply_language="pt",
                  checks=[asks_for("Portuguese")], spoken_share=SPOKEN_SHARE),
             Turn(["Thanks. How many legs does a spider have?"], reply_language="en", checks=[asks_for_english()]),
         ],
         stub_rules=LANGUAGE_RULES,
-        expected_failures=[f"T5:{KANJI}"],
         tags=["conversation", "typed", "languages"],
     ),
 ]
@@ -2549,7 +2552,7 @@ PERSONAS = [
 ]
 
 # What the user says in each language, and how: in a voice of that language,
-# or typed (Japanese, see KANJI); and what a search is to be for
+# or typed (Japanese, see JAPANESE_SHARE); and what a search is to be for
 SAID_IN = {
     "en": dict(parts=["What is the capital of Australia?"]),
     "fr": dict(parts=["Quelle est la capitale de l'Australie ?"], voice="fr"),
@@ -2572,10 +2575,11 @@ def persona_across_languages(persona: str, label: str, languages: list[str]) -> 
     turns = []
     for language in languages:
         note = asks_for(NAME_OF[language]) if language != "en" else asks_for_nothing()
-        turns.append(Turn(**SAID_IN[language], reply_language=language, checks=[note], spoken_share=SPOKEN_SHARE))
+        turns.append(Turn(**SAID_IN[language], reply_language=language, checks=[note],
+                          spoken_share=spoken_share(language)))
     turns.append(Turn(["Thank you. Back to English: what day comes after Monday?"], reply_language="en",
                       checks=[asks_for_english()], spoken_share=SPOKEN_SHARE))
-    known = {"ja": KANJI, "zh": MANDARIN}
+    known = {"zh": MANDARIN}
     expected = [f"T{n}:{known[language]}" for n, language in enumerate(languages, 1) if language in known]
     return Conversation(
         f"a {label} persona across languages ({persona})", turns, persona=persona if persona != "iris" else None,
