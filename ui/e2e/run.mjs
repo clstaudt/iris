@@ -2001,8 +2001,9 @@ try {
   const sidebar = page.locator('aside[aria-label="Threads"]');
   const threadItem = (id) => sidebar.locator(`[data-thread="${id}"]`);
   const threadLabel = () => page.locator(".thread-label").innerText();
-  const tiles = page.locator('[role="radiogroup"][aria-label="Persona"] .tile');
-  const tile = (name) => tiles.filter({ has: page.locator(".name", { hasText: exactly(name) }) });
+  const personaTiles = page.locator('[role="radiogroup"][aria-label="Persona"] .tile');
+  const personaTile = (name) =>
+    personaTiles.filter({ has: page.locator(".name", { hasText: exactly(name) }) });
   const threads = () => rpc("threads.list");
   const shoot = (name) => page.screenshot({ path: path.join(OUT, `threads-${name}.png`) });
   /** The open thread once the reply is kept: a new thread is stored with it */
@@ -2033,8 +2034,8 @@ try {
   async function newThreadWith(name) {
     await showThreads(true);
     await sidebar.locator("button.new").click();
-    await until("the personas", () => tiles.count(), 10_000);
-    await tile(name).locator("button.pick").click();
+    await until("the personas", () => personaTiles.count(), 10_000);
+    await personaTile(name).locator("button.pick").click();
     await until(`${name} for the new thread`, () => config().persona === name, 60_000);
   }
 
@@ -2059,7 +2060,7 @@ try {
       `the thread is titled by Iris's greeting: ${first.title}`);
     check((await threadLabel()) === "Iris", `the thread is labelled ${await threadLabel()}`);
     check(!(await sidebar.count()), "the threads show from the start");
-    check(!(await tiles.count()), "the new thread's personas show");
+    check(!(await personaTiles.count()), "the new thread's personas show");
     await shoot("default");
   });
 
@@ -2078,20 +2079,20 @@ try {
 
   await step("threads: a new thread starts from its empty screen, with a persona chosen and heard", async () => {
     await sidebar.locator("button.new").click();
-    await until("the personas", async () => (await tiles.count()) >= 3, 10_000);
-    check(await tile("Iris").evaluate((el) => el.classList.contains("active")), "Iris is not chosen at first");
+    await until("the personas", async () => (await personaTiles.count()) >= 3, 10_000);
+    check(await personaTile("Iris").evaluate((el) => el.classList.contains("active")), "Iris is not chosen at first");
     check(!(await page.locator(".thread-label").count()), "the label shows over the personas");
     check((await threads()).open === null, "the new thread is stored before anything is said");
     await shoot("new");
     // A persona's voice plays from its tile
-    await tile("HAL").hover();
+    await personaTile("HAL").hover();
     const since = Date.now();
-    await tile("HAL").locator("button.play").click();
+    await personaTile("HAL").locator("button.play").click();
     await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
     await voiceDone();
-    await tile("HAL").locator("button.pick").click();
+    await personaTile("HAL").locator("button.pick").click();
     await until("HAL for the new thread", () => config().persona === "HAL", 60_000);
-    check(await tile("HAL").evaluate((el) => el.classList.contains("active")), "HAL is not marked");
+    check(await personaTile("HAL").evaluate((el) => el.classList.contains("active")), "HAL is not marked");
     check(config().wake_word === "HAL", `HAL is woken by ${config().wake_word}`);
     // The first message starts the thread
     const typed = await ask("Reply with one word: hello.");
@@ -2105,7 +2106,7 @@ try {
       "the thread is not titled by its first words");
     await until("HAL's label", async () => (await threadLabel()) === "HAL");
     await threadItem(halThread).waitFor({ timeout: 5000 });
-    check(!(await tiles.count()), "the personas still show");
+    check(!(await personaTiles.count()), "the personas still show");
     await shoot("second");
   });
 
@@ -2216,15 +2217,17 @@ try {
     const computer = (await stored(firstThread)).open;
     await page.locator('button[title="Memory"]').click();
     const memoryPanel = page.locator('aside[aria-label="Memory"]');
-    await memoryPanel.locator("button.s-btn", { hasText: "Forget this thread" }).click();
+    await memoryPanel.locator(".foot button", { hasText: "Forget this thread" }).click();
+    const question = (await memoryPanel.locator(".confirm p").innerText()).trim();
+    check(question === "Forget this thread and everything Iris remembers of it?", `asked: ${question}`);
     await shoot("forget");
-    await memoryPanel.locator(".confirm button", { hasText: "Forget this thread" }).click();
+    await memoryPanel.locator(".confirm button.solid-danger", { hasText: "Forget this thread" }).click();
     await until("the thread to be gone", async () => !(await threads()).threads.some((t) => t.id === computer), 10_000);
     // What is left is a new thread with the same persona, and nothing of it
     check((await threads()).open === null, "a stored thread is open");
     check(config().persona === "Computer", `the persona is ${config().persona}`);
     await until("an empty conversation", async () => !(await page.locator(".bubble.user, .bubble.assistant").count()), 5000);
-    check(!(await memoryPanel.locator("button.s-btn", { hasText: "Forget this thread" }).count()), "a new thread offers to be forgotten");
+    check(!(await memoryPanel.locator("button", { hasText: "Forget this thread" }).count()), "a new thread offers to be forgotten");
     await page.locator('button[title="Close memory"]').click();
     // Back to where the other steps talk
     await openThread(firstThread);
@@ -2294,6 +2297,7 @@ try {
     check(config().sleep_word === "", `HAL sleeps by ${config().sleep_word}`);
     const said = await ask("Reply with one word: yes.");
     await eventAfter("chat.done", said, () => true, 180_000);
+    await until("HAL's thread to be stored", async () => (await rpc("threads.list")).open !== null, 15_000);
     // Remembered before amnesia: what was typed
     await openStage("Memory");
     await setSwitch("Remember conversations", false, () => config().amnesia === true);
