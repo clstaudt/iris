@@ -58,7 +58,15 @@ class StandInCloner:
 
 
 class StandInKyutai(cloning.Kyutai):
-    """Kyutai's gated repo, and an account the test controls."""
+    """Kyutai's gated repo, and an account the test controls.
+
+    The open models are this computer's, but for the languages the test
+    hides (in the same file, "hidden": ["italian"]): those are not
+    downloaded until a download Iris shows fetches them, slowly, so the test
+    sees its progress while a reply waits on it."""
+
+    # How long a hidden language's model takes to download, in seconds
+    slow_download = 12.0
 
     def __init__(self, state: Path = STATE):
         self.state = state
@@ -75,6 +83,13 @@ class StandInKyutai(cloning.Kyutai):
     def token(self):
         return self._read().get("token")
 
+    def _hidden(self, file) -> bool:
+        """A file of a language the test hides, not downloaded yet."""
+        hidden = self._read().get("hidden", [])
+        return any(f"languages/{lang}/" in file.filename for lang in hidden) and (
+            file.filename not in self._read().get("fetched_open", [])
+        )
+
     def whoami(self):
         if self.token() != TOKEN:
             raise _refused(401, "Invalid user token.")
@@ -90,15 +105,32 @@ class StandInKyutai(cloning.Kyutai):
         self._write(token=token)
 
     def cached(self, file):
+        if file.repo != cloning.CLONING_REPO:
+            return not self._hidden(file) and super().cached(file)
         return file.filename in self._read().get("fetched", [])
 
-    def fetch(self, file, on_progress):
-        self.check_access()
+    def fetch(self, files, on_progress):
+        gated = [file for file in files if file.repo == cloning.CLONING_REPO]
+        hidden = [file for file in files if file not in gated and self._hidden(file)]
+        others = [file for file in files if file not in gated and file not in hidden]
+        if gated:
+            self.check_access()
         total = 219_000_000
-        for step in range(1, 11):
-            time.sleep(0.1)
-            on_progress(total * step // 10, total)
-        self._write(fetched=[*self._read().get("fetched", []), file.filename])
+        steps = 40 if hidden else 10
+        pause = self.slow_download / steps if hidden else 0.1
+        if gated or hidden:
+            for step in range(1, steps + 1):
+                time.sleep(pause)
+                on_progress(total * step // steps, total)
+        state = self._read()
+        self._write(
+            fetched=[*state.get("fetched", []), *(file.filename for file in gated)],
+            fetched_open=[*state.get("fetched_open", []), *(file.filename for file in hidden)],
+        )
+        # What this computer does not have of the hidden ones comes for real
+        others += [file for file in hidden if not super().cached(file)]
+        if others:
+            super().fetch(others, on_progress)
 
     def load_model(self, pocket_lang):
         model = TTSModel.load_model(language=pocket_lang)
