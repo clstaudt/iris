@@ -327,6 +327,12 @@ def find_persona(persona_id: str) -> Optional[Persona]:
     return PERSONAS.get(persona_id)
 
 
+def voice_in_use(voice: str) -> bool:
+    """Whether a persona speaks with this voice, as its files say now (a
+    cloned voice is kept while one does)."""
+    return any(persona.voice == voice for persona in load_all_personas().values())
+
+
 def shipped(persona_id: str) -> bool:
     """Whether Iris ships a persona of this id (which the user may have edited)."""
     return (BUILTIN_DIR / f"{persona_id}.yaml").exists()

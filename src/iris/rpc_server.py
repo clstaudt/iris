@@ -74,8 +74,24 @@ IMMEDIATE = frozenset(
 # answered on a thread of its own, so it holds up neither the requests in
 # order nor the controls. Checking the servers takes seconds when one is away,
 # and the app checks them again and again while their list is shown; the
-# walkthrough also looks for servers and asks one for its models
-CONCURRENT = frozenset({"llm.check_hosts", "llm.find_servers", "llm.probe"})
+# walkthrough also looks for servers and asks one for its models. So are
+# voice cloning's: asking Hugging Face, downloading its model, reading a
+# sample, making a voice, and the recording (stopped while the rest waits).
+# Dropping a cloned voice is not: it comes in order, after a persona saved
+# with it
+CONCURRENT = frozenset(
+    {
+        "llm.check_hosts",
+        "llm.find_servers",
+        "llm.probe",
+        "voice.clone_access",
+        "voice.clone_connect",
+        "voice.clone_fetch",
+        "voice.record",
+        "voice.sample",
+        "voice.clone",
+    }
+)
 
 
 def serve(read_line, methods: dict, write_frame, immediate=IMMEDIATE, concurrent=CONCURRENT):
@@ -278,6 +294,18 @@ def main():
         "persona.save": lambda params: controller.persona_save(params),
         "persona.delete": lambda params: controller.persona_delete(params.get("id", "")),
         "persona.preview": lambda params: controller.persona_preview(params),
+        # Cloning a voice for a persona (iris.cloning)
+        "voice.clone_access": lambda params: controller.cloning.access(),
+        "voice.clone_connect": lambda params: controller.cloning.connect(params.get("token", "")),
+        "voice.clone_fetch": lambda params: controller.cloning.fetch(),
+        "voice.record": lambda params: controller.cloning.record(
+            bool(params.get("on")), params.get("device"), bool(params.get("keep", True))
+        ),
+        "voice.sample": lambda params: controller.cloning.use_file(
+            params.get("data", ""), params.get("name", "")
+        ),
+        "voice.clone": lambda params: controller.cloning.clone(params.get("name", "")),
+        "voice.forget": lambda params: controller.cloning.forget(params.get("voice", "")),
         "debug.emit": debug_emit,
         "debug.inject_audio": lambda params: controller.inject_audio(params.get("path", "")),
     }
