@@ -1,9 +1,11 @@
 """Tests for the playback level envelope used by the output level meter."""
 
 import threading
+import time
 
 import numpy as np
 
+from iris import audio as audio_module
 from iris.audio import AudioPlayer
 
 
@@ -126,3 +128,42 @@ def test_playback_waits_until_the_stream_has_really_finished(monkeypatch):
 
     AudioPlayer()._play_resumable(audio, sample_rate, None)
     assert time_module.monotonic() - started[0] >= 1.0
+
+
+def test_a_clip_held_early_does_not_start_over(monkeypatch):
+    """A hold soon after a clip began goes back at most half of what was
+    heard: resuming from its start repeated the first words at every hold."""
+    sample_rate = 16000
+    audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)
+    played = []
+
+    class FakeStream:
+        latency = 0.0
+        active = True
+
+    stream = FakeStream()
+
+    def fake_play(segment, rate, **kwargs):
+        played.append(segment.copy())
+        stream.active = True
+
+    def fake_stop():
+        stream.active = False
+
+    monkeypatch.setattr(audio_module.sd, "play", fake_play)
+    monkeypatch.setattr(audio_module.sd, "stop", fake_stop)
+    monkeypatch.setattr(audio_module.sd, "get_stream", lambda: stream)
+
+    player = AudioPlayer()
+    worker = threading.Thread(target=player._play_resumable, args=(audio, sample_rate, None))
+    worker.start()
+    time.sleep(0.3)  # held 0.3 s in, less than the rewind
+    player.pause()
+    time.sleep(0.2)
+    player.resume()
+    time.sleep(0.2)
+    stream.active = False
+    worker.join(timeout=2)
+
+    resumed_at = (len(audio) - len(played[1])) / sample_rate
+    assert 0.1 < resumed_at < 0.3

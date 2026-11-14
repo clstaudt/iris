@@ -43,6 +43,9 @@ SPEECH_PAUSE = 0.2
 # minute by mistake, and catches nearly every user who speaks.
 HOLD_THRESHOLD = 0.7
 HOLD_TRIGGER = 0.13
+# Speech that holds the voice again after a hold heard only its echo; after
+# a second such hold the voice is not held again until it has ended
+HOLD_TRIGGER_AFTER_ECHO = 1.0
 # Held, the voice is listened to this long in the quiet. Once the device has
 # played out what it had (about 0.15 s) and the room is still, speech in at
 # least this share of the time is the user's; anything less was the echo.

@@ -1,5 +1,6 @@
 """Audio recording, playback, and filters for voice assistant."""
 
+import logging
 import queue
 import tempfile
 import threading
@@ -22,6 +23,7 @@ from iris.turns import (
     FRAME,
     HOLD,
     HOLD_AGAIN,
+    HOLD_TRIGGER_AFTER_ECHO,
     HOLD_BACKOFF,
     HOLD_CERTAIN,
     HOLD_CERTAIN_GOES_ON,
@@ -36,6 +38,10 @@ from iris.turns import (
     SpeechDetector,
     TurnTracker,
 )
+
+# Each hold of the voice, what it was judged to be, and where the voice went
+# on: the app writes it to a file of its own (iris.rpc_server)
+voice_log = logging.getLogger("iris.voice")
 
 warnings.filterwarnings("ignore")
 
@@ -489,6 +495,7 @@ class AudioRecorder:
         level = self._level_meter(on_level)
         frame_seconds = FRAME / self.sample_rate
         trigger = round(HOLD_TRIGGER / frame_seconds)
+        echo_trigger = round(HOLD_TRIGGER_AFTER_ECHO / frame_seconds)
         certain_frames = round(HOLD_CERTAIN_TIME / frame_seconds)
         backoff = round(HOLD_BACKOFF / frame_seconds)
         again = round(HOLD_AGAIN / frame_seconds)
@@ -510,6 +517,12 @@ class AudioRecorder:
         calm, waiting, echoed = 0, False, -again
         # Frames in a row the voice was not speaking, and frames taken
         quiet, taken = 0, 0
+        # Frames of speech that hold the voice. Each hold stops and restarts
+        # the voice, so holds for echo stutter: after one, it takes longer
+        # speech to hold the voice; after a second, it is not held again
+        # until it has ended
+        hold_after = trigger
+        never = 1 << 30
         try:
             with self._microphone(echo, go_on=True) as frames:
                 while True:
@@ -534,6 +547,8 @@ class AudioRecorder:
                     calm = max(0, calm - 1)
                     if echo is not None:
                         quiet = 0 if speaking() else quiet + 1
+                        if quiet >= done_frames:
+                            hold_after = trigger
                     over_voice = echo is not None and quiet < done_frames
                     if held:
                         held -= 1
@@ -554,19 +569,31 @@ class AudioRecorder:
                                 if not getattr(echo, "cancelling", True) or taken - echoed < again:
                                     calm = backoff
                                 echoed = taken
+                                hold_after = echo_trigger if hold_after == trigger else never
+                                voice_log.info(
+                                    "echo: released after %.2f s of speech while held; %s",
+                                    heard * frame_seconds,
+                                    "no more holds until the voice ends" if hold_after == never
+                                    else f"holds now need {hold_after * frame_seconds:.2f} s",
+                                )
                             tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
                             continue
+                        voice_log.info(
+                            "user: %.2f s of speech while held%s", heard * frame_seconds,
+                            " (the voice had ended)" if not paused else "",
+                        )
                         spoke = False  # the user's: taken up below
                     elif echo is not None and (not spoke or waiting) and (sure >= trigger or tracker.started):
                         if over_voice:
                             if not echo.settled:
                                 tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
                                 waiting = False
-                            elif calm:
+                            elif calm or sure < hold_after:
                                 # Kept, to be judged once the voice may be
                                 # held again or has ended; over while the
                                 # voice speaks on, it cannot be told from
-                                # its echo
+                                # its echo. After a hold for echo, it holds
+                                # the voice only once it has gone on longer
                                 if ended:
                                     tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
                                     waiting = False
@@ -574,6 +601,12 @@ class AudioRecorder:
                                 waiting = True
                             else:
                                 hold()
+                                voice_log.info(
+                                    "held: %.2f s sure to be speech, canceller %s, suppression %s",
+                                    sure * frame_seconds,
+                                    "cancelling" if getattr(echo, "cancelling", True) else "leaking",
+                                    getattr(echo, "suppression", None),
+                                )
                                 held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, True, 0, False
                             continue
                         if waiting:
@@ -1047,9 +1080,16 @@ class AudioPlayer:
 
             if not cut_by_pause:
                 return
-            # What was heard is the wall time minus the output latency
-            heard = max(0.0, elapsed - latency - RESUME_REWIND)
-            position += int(heard * sample_rate)
+            # What was heard is the wall time minus the output latency. It
+            # goes on a little before that, for the words the cut may have
+            # clipped, but never further back than half of what was heard: a
+            # hold early in a clip must not start it over
+            heard = max(0.0, elapsed - latency)
+            position += int((heard - min(RESUME_REWIND, heard / 2)) * sample_rate)
+            voice_log.info(
+                "resumes at %.2f s of %.2f s (heard %.2f s of this segment)",
+                position / sample_rate, len(audio) / sample_rate, heard,
+            )
             self._place = (len(audio), sample_rate, position, None)
 
     def play(
