@@ -34,12 +34,14 @@ ENGINES = {
     "audio devices": "sounddevice",
     "numbers in words": "num2words",
     "Japanese in kana": "pykakasi",
+    "Mandarin pronunciation": "misaki.zh",
 }
 
 # What the voices are given to read, and what it must not hold any more
 READS = {
     "numbers in words": (lambda: numbers_in_words("am 27. November um 10:30 Uhr", "de"), r"\d"),
     "Japanese in kana": (lambda: READERS.kana("東京の天気は晴れ、18度"), r"[\d\u4e00-\u9fff]"),
+    "Mandarin pronunciation": (lambda: READERS.mandarin("北京明天23度", english=str), r"[\d\u4e00-\u9fff]"),
 }
 
 

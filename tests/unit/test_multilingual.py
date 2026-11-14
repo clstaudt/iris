@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 from kokoro_onnx.config import SUPPORTED_LANGUAGES
+from kokoro_onnx.config import VOCAB as KOKORO_VOCAB
 from kokoro_onnx.tokenizer import Tokenizer
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 
@@ -17,6 +18,7 @@ from iris.events import EventBus
 from iris.language import language_of
 from iris.personas import BUILTIN_DIR, Persona
 from iris.tts import (
+    KOKORO_V1_SYMBOLS,
     LANGUAGE_VOICE_MAP,
     POCKET_LANGUAGES,
     KokoroGenerator,
@@ -288,6 +290,9 @@ def engines_used():
             os.unlink(generator.generate("Text.", language=language, **(preview or {})))
             if kokoro.return_value.create.called:
                 spoken = kokoro.return_value.create.call_args.kwargs
+                if "phonemes" in spoken and language == "zh":
+                    # Kokoro's own Mandarin phonemes, misaki's
+                    return "kokoro", spoken["voice"], "cmn"
                 if "phonemes" in spoken:
                     # Spoken from the phonemes espeak made in the language's code
                     assert spoken["phonemes"] is phonemize.return_value
@@ -382,6 +387,9 @@ def test_kokoro_onnx_is_only_given_languages_it_takes_and_phonemes_for_the_rest(
             if info["code"] not in SUPPORTED_LANGUAGES:
                 phonemize.assert_called_once_with("Text.", info["code"])
                 assert spoken["phonemes"] is phonemize.return_value
+            if language == "zh":
+                # Kokoro's own Mandarin phonemes, the English word in it by espeak
+                assert spoken["phonemes"] and spoken["lang"] == "en-us"
 
 
 @pytest.mark.parametrize(
@@ -424,6 +432,25 @@ def test_a_japanese_reply_is_read_not_called_chinese_letters():
         pytest.skip(f"espeak cannot run here: {error}")
     assert given["text"] == "とうきょうのてんきははれ、じゅうはちどです。"
     assert "tʃˈaɪniːz" not in phonemes and "dʒˈapəniːz" not in phonemes, phonemes
+
+
+def test_mandarin_is_given_as_kokoros_own_phonemes():
+    """espeak's Mandarin was a third intelligible. misaki's phonemes are
+    what Kokoro was trained on: every symbol of them is on the token id
+    Kokoro v1.0 has for it, numbers are read in Chinese, and an English word
+    is read by espeak's English."""
+    try:
+        given = _given_to_kokoro("北京的门票是23.5元，我喜欢Queen的歌。", "zh", "zf_xiaoxiao")
+    except RuntimeError as error:
+        pytest.skip(f"espeak cannot run here: {error}")
+    phonemes = given["phonemes"]
+    assert given["lang"] == "en-us" and "↗" in phonemes and "kwˈiːn" in phonemes
+    assert all(symbol in KOKORO_VOCAB for symbol in phonemes), phonemes
+    assert not any(c.isdigit() for c in phonemes)
+    # ʨ and ʦ, which misaki writes, on Kokoro v1.0's ids 21 and 20
+    tokens = Tokenizer().tokenize(phonemes)
+    assert KOKORO_VOCAB["ʨ".translate(KOKORO_V1_SYMBOLS)] == 21 and 21 in tokens
+    assert KOKORO_VOCAB["ʦ".translate(KOKORO_V1_SYMBOLS)] == 20
 
 
 @pytest.mark.parametrize(

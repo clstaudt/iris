@@ -18,6 +18,8 @@ import torch
 from kokoro_onnx import Kokoro
 from kokoro_onnx import tokenizer as kokoro_tokenizer
 from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
+from kokoro_onnx.config import VOCAB as KOKORO_VOCAB
+from misaki import zh as misaki_zh
 from phonemizer.backend import EspeakBackend
 from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
@@ -82,14 +84,28 @@ class KeptEspeak:
 
 kokoro_tokenizer.phonemizer = KeptEspeak()
 
+# Kokoro v1.0 was trained on misaki's Mandarin, which writes some sounds as
+# symbols of their own. kokoro-onnx's table lacks them, but Kokoro keeps them
+# on token ids the table gives to capital letters, which espeak never writes:
+# each is passed as the symbol the table has on its id.
+KOKORO_V1_IDS = {"̃": 17, "ʣ": 18, "ʥ": 19, "ʦ": 20, "ʨ": 21, "ᵝ": 22, "ꭧ": 23}
+_ON_ID = {token: symbol for symbol, token in KOKORO_VOCAB.items()}
+KOKORO_V1_SYMBOLS = str.maketrans(
+    {s: _ON_ID[t] for s, t in KOKORO_V1_IDS.items() if s not in KOKORO_VOCAB and t in _ON_ID}
+)
+# Words in Latin letters inside Mandarin, said by espeak's English
+LATIN_WORDS = re.compile(r"[A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*)*")
+
 
 class Readers:
-    """Read Japanese for Kokoro. The reader is made the first time it is
-    needed (a fraction of a second), and used by one thread at a time."""
+    """Read Japanese and Mandarin for Kokoro. Each reader is made the first
+    time it is needed (a fraction of a second), and used by one thread at a
+    time."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._kana = None
+        self._mandarin = None
 
     def kana(self, text: str) -> str:
         """Japanese as espeak can read it: its numbers in kanji, and every
@@ -99,6 +115,19 @@ class Readers:
             if self._kana is None:
                 self._kana = kakasi()
             return "".join(item["hira"] for item in self._kana.convert(numbers_in_words(text, "ja")))
+
+    def mandarin(self, text: str, english) -> str:
+        """Kokoro's own phonemes for Mandarin (misaki's, numbers read in
+        Chinese), and english(words) for words in Latin letters."""
+        with self._lock:
+            if self._mandarin is None:
+                self._mandarin = misaki_zh.ZHG2P()
+            parts, last = [], 0
+            for match in LATIN_WORDS.finditer(text):
+                parts += [self._mandarin(text[last : match.start()])[0], english(match[0])]
+                last = match.end()
+            parts.append(self._mandarin(text[last:])[0])
+        return " ".join(p.strip() for p in parts if p.strip()).translate(KOKORO_V1_SYMBOLS)
 
 
 READERS = Readers()
@@ -110,9 +139,10 @@ def kokoro_speech(tokenizer, text: str, language: str, code: str) -> dict:
 
     kokoro-onnx reads numbers with English rules before espeak does, in any
     language ("16,50 €" as 1650): French, Italian, Spanish and Portuguese
-    numbers are given in words. Japanese is given in kana: espeak reads no
-    kanji. Spanish, Portuguese and Hindi, which kokoro-onnx refuses by name,
-    are given as espeak's phonemes, named as English only to pass its check.
+    numbers are given in words. Japanese is given in kana, and Mandarin as
+    misaki's phonemes, Kokoro's own: espeak reads neither well. Spanish,
+    Portuguese and Hindi, which kokoro-onnx refuses by name, are given as
+    espeak's phonemes, named as English only to pass its check.
 
     Args:
         tokenizer: kokoro-onnx's tokenizer, for espeak's phonemes
@@ -123,6 +153,9 @@ def kokoro_speech(tokenizer, text: str, language: str, code: str) -> dict:
         text = numbers_in_words(text, language)
     if language == "ja":
         return {"text": READERS.kana(text), "lang": code}
+    if language == "zh":
+        english = lambda words: tokenizer.phonemize(words, "en-us")  # noqa: E731
+        return {"text": text, "lang": "en-us", "phonemes": READERS.mandarin(text, english)}
     if code in KOKORO_ONNX_LANGUAGES:
         return {"text": text, "lang": code}
     return {"text": text, "lang": "en-us", "phonemes": tokenizer.phonemize(text, code)}

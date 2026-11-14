@@ -2098,14 +2098,10 @@ def english_with_names(noisy: bool) -> Conversation:
 # poorly for a turn to be heard as said, so Japanese turns are typed.
 SPOKEN_SHARE = 0.5
 JAPANESE_SHARE = 0.3
-# Kokoro speaks Mandarin from espeak's phonemes, with tones and sounds
-# espeak gets wrong: a Chinese reply is heard saying a third of what it says
-MANDARIN = "spoken_share"
 
 
 def spoken_share(language: str) -> float:
     return JAPANESE_SHARE if language == "ja" else SPOKEN_SHARE
-
 
 # A long reply in one paragraph, in languages that put no space after a
 # sentence: the voice starts at its first sentence, not once it is all there
@@ -2579,11 +2575,9 @@ def persona_across_languages(persona: str, label: str, languages: list[str]) -> 
                           spoken_share=spoken_share(language)))
     turns.append(Turn(["Thank you. Back to English: what day comes after Monday?"], reply_language="en",
                       checks=[asks_for_english()], spoken_share=SPOKEN_SHARE))
-    known = {"zh": MANDARIN}
-    expected = [f"T{n}:{known[language]}" for n, language in enumerate(languages, 1) if language in known]
     return Conversation(
         f"a {label} persona across languages ({persona})", turns, persona=persona if persona != "iris" else None,
-        tools={"web": True}, web=LANGUAGE_WEB, stub_rules=LANGUAGE_RULES, expected_failures=expected,
+        tools={"web": True}, web=LANGUAGE_WEB, stub_rules=LANGUAGE_RULES,
         tags=["conversation", "persona", "languages", persona],
     )
 
