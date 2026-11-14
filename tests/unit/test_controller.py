@@ -289,12 +289,23 @@ class PersonaAssistant(FakeAssistant):
 def test_a_voice_that_cannot_speak_the_language_goes_back_to_english():
     controller = AssistantController(EventBus())
     controller.assistant = PersonaAssistant()
-    controller.assistant.conversation_language = "de"
+    # Spoken by a plugin's engine, say: neither Kokoro nor Kyutai speaks it
+    controller.assistant.conversation_language = "ru"
 
-    controller.set_persona("hal")  # Kokoro has no German
+    controller.set_persona("hal")
 
     assert controller.assistant.tts_generator.engine == "kokoro"
     assert controller.assistant.conversation_language == "en"
+
+
+def test_a_kokoro_persona_keeps_german_through_kyutai():
+    controller = AssistantController(EventBus())
+    controller.assistant = PersonaAssistant()
+    controller.assistant.conversation_language = "de"
+
+    controller.set_persona("hal")
+
+    assert controller.assistant.conversation_language == "de"
 
 
 def test_switching_to_a_voice_that_speaks_the_language_keeps_it():

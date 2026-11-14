@@ -721,7 +721,7 @@ class ConversationManager:
         _lang_names = {
             "en": "English", "fr": "French", "it": "Italian",
             "ja": "Japanese", "zh": "Chinese (Mandarin)", "de": "German",
-            "es": "Spanish", "pt": "Portuguese", "nl": "Dutch",
+            "es": "Spanish", "pt": "Portuguese", "nl": "Dutch", "hi": "Hindi",
         }
 
         # Recalled topics and shared files fade from context after a few turns

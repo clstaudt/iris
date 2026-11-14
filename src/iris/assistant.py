@@ -14,7 +14,7 @@ import numpy as np
 import soundfile as sf
 from faster_whisper.audio import decode_audio
 
-from iris import engines
+from iris import engines, language
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
@@ -245,6 +245,8 @@ class VoiceAssistant:
 
         # Track current conversation language for continuity
         self.conversation_language = "en"
+        # The language the reply being spoken is in, piece by piece
+        self._reply_language = "en"
 
         # The persona speaks with its own engine and voice
         self.persona = persona if persona else get_persona("iris")
@@ -284,6 +286,8 @@ class VoiceAssistant:
         )
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
         self.speech_pipeline.on_reply_audio = self._reply_heard
+        # Told what language each piece of a reply is in, before the first
+        language.prepare()
 
         if self.event_bus:
             self.speech_pipeline.on_output_level = lambda level: self.event_bus.emit(
@@ -624,7 +628,20 @@ class VoiceAssistant:
             return
         clean_text = self.conversation.clean_markdown(text)
         if clean_text.strip():
-            self.speech_pipeline.queue_speech(clean_text)
+            self.speech_pipeline.queue_speech(
+                clean_text, language=self._speech_language(clean_text)
+            )
+
+    def _speech_language(self, text: str) -> str:
+        """The language a piece of the reply is spoken in: the one it is
+        written in. The model may answer in another language than the
+        user's (asked in English whether it speaks Italian, it answers in
+        Italian), and spoken in the user's, the reply has a foreign accent.
+        A piece too short to tell is spoken like the one before it."""
+        self._reply_language = language.language_of(
+            text, self._reply_language, self.tts_generator.languages()
+        )
+        return self._reply_language
 
     def _take_turn(self) -> dict | None:
         """Return the next turn submitted by an external UI, if any."""
@@ -656,6 +673,10 @@ class VoiceAssistant:
     def _answer_typed(self, turn: dict):
         text = turn["text"]
         attachments = turn.get("attachments") or []
+        # The conversation goes on in the language typed, as if spoken
+        self.conversation_language = language.language_of(
+            text, self.conversation_language, self.tts_generator.languages()
+        )
         self._timing = TurnTiming("text", components=self._timing_components())
         if self.event_bus:
             event = {
@@ -735,10 +756,14 @@ class VoiceAssistant:
             self.awake_until = 0.0
             return
 
-        # Determine response language: use detected if the persona's voice
-        # can speak it, otherwise keep the current conversation language.
-        if self.tts_generator.speaks(detected_language):
-            self.conversation_language = detected_language
+        # Determine response language: the one the user spoke, if the
+        # persona's voice can speak it, otherwise keep the current
+        # conversation language. Whisper guesses it from the sound, and a
+        # few words in an accent can fool it ("Parliamo italiano." heard as
+        # Portuguese); the words heard tell it better when they are clear.
+        spoken = language.language_of(text, detected_language, self.tts_generator.languages())
+        if self.tts_generator.speaks(spoken):
+            self.conversation_language = spoken
         response_language = self.conversation_language
 
         self._announced = True
@@ -821,8 +846,10 @@ class VoiceAssistant:
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = True
 
-            # Set the speech pipeline language for this turn
+            # Set the speech pipeline language for this turn; each piece of
+            # the reply is spoken in the language it is written in
             self.speech_pipeline.current_language = response_language
+            self._reply_language = response_language
             self.speech_pipeline.begin_reply()
             if self._timing is not None:
                 self._timing.reply_started()

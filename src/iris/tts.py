@@ -16,6 +16,7 @@ import soundfile as sf
 import torch
 from kokoro_onnx import Kokoro
 from kokoro_onnx import tokenizer as kokoro_tokenizer
+from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 from phonemizer.backend import EspeakBackend
 from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
@@ -28,6 +29,7 @@ from iris.engines import (
     register_speech_engine,
     speaking_engine,
     speech_engine,
+    spoken_languages,
 )
 
 warnings.filterwarnings("ignore")
@@ -42,6 +44,10 @@ class KeptEspeak:
     about 1.5 s on an M3: three times what the voice model needs for a
     sentence. This phonemizes the same way, with one espeak per language,
     loaded once and kept.
+
+    Where espeak reads a word as English ("football" in French), it marks
+    the switch, "(en)fˈʊtbɔːl(fr)". Kokoro would say the marks ("en
+    football fr"), so they are dropped, as Kokoro's own pipeline drops them.
     """
 
     def __init__(self):
@@ -56,7 +62,10 @@ class KeptEspeak:
             backend = self._backends.get(key)
             if backend is None:
                 backend = EspeakBackend(
-                    language, preserve_punctuation=preserve_punctuation, with_stress=with_stress
+                    language,
+                    preserve_punctuation=preserve_punctuation,
+                    with_stress=with_stress,
+                    language_switch="remove-flags",
                 )
                 self._backends[key] = backend
             lines = [line.strip(os.linesep) for line in str2list(text)]
@@ -78,15 +87,21 @@ KOKORO_VOICES_URL = (
     "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin"
 )
 
-# Mapping from Whisper language codes to Kokoro TTS language/voice settings.
-# Kokoro supports: en-us, en-gb, fr-fr, it, ja, cmn
+# Mapping from Whisper language codes to Kokoro TTS language/voice settings:
+# the espeak language Kokoro's phonemes come from, and its voices for it.
 # A Kokoro voice name starts with its language ("af_bella": American English,
-# "bm_lewis": British English, "ff_siwis": French...). A persona keeps its own
-# voice for languages that voice speaks, and borrows the default otherwise.
+# "bm_lewis": British English, "ef_dora": Spanish...). Every Kokoro voice
+# speaks English well, so a persona keeps its own voice in English; another
+# language is spoken by the persona's voice when it was made for it, by that
+# language's default voice otherwise. Kokoro has no German or Dutch voices:
+# those are left to Pocket TTS.
 LANGUAGE_VOICE_MAP = {
     "en": {"code": "en-us", "default_voice": "af_bella", "voice_prefixes": "ab"},
     "fr": {"code": "fr-fr", "default_voice": "ff_siwis", "voice_prefixes": "f"},
     "it": {"code": "it", "default_voice": "if_sara", "voice_prefixes": "i"},
+    "es": {"code": "es", "default_voice": "ef_dora", "voice_prefixes": "e"},
+    "pt": {"code": "pt-br", "default_voice": "pf_dora", "voice_prefixes": "p"},
+    "hi": {"code": "hi", "default_voice": "hf_alpha", "voice_prefixes": "h"},
     "ja": {"code": "ja", "default_voice": "jf_alpha", "voice_prefixes": "j"},
     "zh": {"code": "cmn", "default_voice": "zf_xiaoni", "voice_prefixes": "z"},
 }
@@ -140,6 +155,9 @@ class KokoroGenerator(SpeechEngine):
     name = "Kokoro"
     languages = frozenset(LANGUAGE_VOICE_MAP)
     takes_speed = True
+    # German and Dutch, which Kokoro has no voices for, are left to Pocket
+    # TTS, whose voices for them are native: Kokoro would read them as English
+    borrows = ("kyutai",)
 
     def __init__(
         self,
@@ -220,14 +238,16 @@ class KokoroGenerator(SpeechEngine):
         """Pick (Kokoro language code, voice) for a reply in this language.
 
         The persona's voice is used whenever it speaks the language, so
-        personas sound different from each other; for a language it cannot
-        speak, that language's default voice takes over.
+        personas sound different from each other: in English always (a
+        Spanish or Japanese voice speaks English as clearly as an American
+        one), in another language when it was made for it. Otherwise that
+        language's default voice takes over.
         """
         lang_info = get_language_info(language)
         if lang_info is None:
             # Unsupported language – fall back to English with the own voice
             kokoro_lang, voice = "en-us", self.voice
-        elif self.voice[:1] in lang_info["voice_prefixes"]:
+        elif language == "en" or self.voice[:1] in lang_info["voice_prefixes"]:
             kokoro_lang, voice = lang_info["code"], self.voice
         else:
             kokoro_lang, voice = lang_info["code"], lang_info["default_voice"]
@@ -258,9 +278,19 @@ class KokoroGenerator(SpeechEngine):
             temp_audio.close()
 
             # Generate audio using kokoro-onnx Python API
-            audio_data, sample_rate = self.kokoro.create(
-                text=text, voice=voice, speed=self.speed, lang=kokoro_lang
-            )
+            if kokoro_lang in KOKORO_ONNX_LANGUAGES:
+                audio_data, sample_rate = self.kokoro.create(
+                    text=text, voice=voice, speed=self.speed, lang=kokoro_lang
+                )
+            else:
+                # kokoro-onnx takes only some languages by name. Kokoro
+                # speaks Spanish, Portuguese and Hindi from espeak's
+                # phonemes, as Kokoro's own pipeline does; the language
+                # named is only there to pass kokoro-onnx's check
+                phonemes = self.kokoro.tokenizer.phonemize(text, kokoro_lang)
+                audio_data, sample_rate = self.kokoro.create(
+                    text=text, voice=voice, speed=self.speed, lang="en-us", phonemes=phonemes
+                )
 
             # Save audio to file
             sf.write(temp_audio.name, audio_data, sample_rate)
@@ -295,8 +325,8 @@ def heard_part(text: str, fraction: float) -> str:
     return text[:end].rstrip()
 
 
-# Whisper language codes Pocket TTS speaks, and the model for each. Japanese
-# and Chinese are left to Kokoro.
+# Whisper language codes Pocket TTS speaks, and the model for each. Hindi,
+# Japanese and Chinese are left to Kokoro.
 POCKET_LANGUAGES = {
     "en": "english",
     "fr": "french",
@@ -339,7 +369,8 @@ LANGUAGE_NAMES = {
 def engine_speaks(engine: str, language: str) -> bool:
     """Whether a persona on this engine can speak its replies in a language,
     with its own voice or one it borrows (Kyutai personas leave the
-    languages Pocket TTS lacks to Kokoro)."""
+    languages Pocket TTS lacks to Kokoro, and Kokoro personas those Kokoro
+    lacks to Pocket TTS)."""
     return speaking_engine(engine, language) is not None
 
 
@@ -393,14 +424,15 @@ def pocket_sentences(text: str) -> list[str]:
 class PocketGenerator(SpeechEngine):
     """Generates speech audio with Kyutai's Pocket TTS, on the CPU.
 
-    Pocket TTS has one model per language: English loads right away, the
-    others the first time a reply is in that language.
+    Pocket TTS has one model per language: English loads when the persona
+    speaks with Pocket TTS, the others the first time a reply is in that
+    language.
     """
 
     id = "kyutai"
     name = "Kyutai"
     languages = frozenset(POCKET_LANGUAGES)
-    # Japanese and Chinese are left to Kokoro
+    # Hindi, Japanese and Chinese are left to Kokoro
     borrows = ("kokoro",)
 
     def __init__(self, voice: str = "alba", models_dir: str | Path | None = None):
@@ -412,6 +444,11 @@ class PocketGenerator(SpeechEngine):
         self.voice = voice
         self._models: dict[str, TTSModel] = {}
         self._voice_states: dict[tuple[str, str], object] = {}
+
+    def prepare(self):
+        """English, which a conversation starts in, loads at once. Borrowed
+        by a Kokoro persona for German, say, Pocket TTS loads the German
+        model only."""
         self._model("english")
 
     def _model(self, pocket_lang: str) -> TTSModel:
@@ -509,8 +546,8 @@ class SpeechGenerator:
     The engines are those registered in iris.engines: Kyutai's Pocket TTS
     and Kokoro, and any a plugin adds. Each loads the first time it is
     needed. A reply in a language the persona's engine lacks is spoken by an
-    engine it borrows from (Kyutai personas by Kokoro, for Japanese and
-    Chinese).
+    engine it borrows from: Kyutai personas by Kokoro for Hindi, Japanese
+    and Chinese, Kokoro personas by Pocket TTS for German and Dutch.
     """
 
     def __init__(
@@ -540,10 +577,14 @@ class SpeechGenerator:
         """Whether replies in this language can be spoken in it."""
         return engine_speaks(self.engine, language)
 
+    def languages(self) -> frozenset[str]:
+        """The languages replies can be spoken in, as Whisper codes."""
+        return spoken_languages(self.engine)
+
     def prepare(self):
         """Load the current engine now, so its first reply is not delayed."""
         with self._lock:
-            self._engine(self.engine)
+            self._engine(self.engine).prepare()
 
     def _engine(self, engine: str) -> SpeechEngine:
         if engine not in self._engines:

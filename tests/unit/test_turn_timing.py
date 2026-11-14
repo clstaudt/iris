@@ -180,7 +180,7 @@ class SpeechNow:
     def begin_reply(self):
         pass
 
-    def queue_speech(self, text):
+    def queue_speech(self, text, language=None):
         self.assistant._reply_heard()
 
     def wait_for_speech(self):
@@ -223,6 +223,9 @@ class Voice:
 
     def speaks(self, language):
         return True
+
+    def languages(self):
+        return frozenset({"en", "de", "fr"})
 
 
 def _assistant(speak=True):

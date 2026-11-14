@@ -274,6 +274,9 @@ def test_an_answer_begun_after_the_voice_fell_quiet_is_the_users(tmp_path):
         def speaks(self, language):
             return True
 
+        def languages(self):
+            return frozenset({"en", "de", "fr"})
+
     assistant.speech_pipeline = Spoken()
     assistant.transcriber = Transcriber()
     assistant.tts_generator = Voice()

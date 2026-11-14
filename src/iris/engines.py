@@ -67,6 +67,13 @@ class SpeechEngine:
         """Its voice for a language, used when another engine borrows it."""
         return None
 
+    def prepare(self):
+        """Load what its first reply needs, when it is the persona's engine.
+
+        An engine only borrowed for a language loads what that language
+        needs when it is first spoken, and nothing else.
+        """
+
     def generate(self, text: str, language: str = "en") -> Optional[str]:
         """Speak text in the current voice into a WAV file.
 
@@ -145,6 +152,20 @@ def speaking_engine(engine_id: str, language: str) -> Optional[tuple[str, Option
             if voice:
                 return other_id, voice
     return None
+
+
+def spoken_languages(engine_id: str) -> frozenset[str]:
+    """The languages a persona on this engine speaks, with its own voice or
+    one it borrows."""
+    engine = _speech.get(engine_id)
+    if engine is None:
+        return frozenset()
+    candidates = set(engine.languages)
+    for other_id in engine.borrows:
+        other = _speech.get(other_id)
+        if other is not None:
+            candidates |= other.languages
+    return frozenset(lang for lang in candidates if speaking_engine(engine_id, lang))
 
 
 def register_recognition_engine(engine: RecognitionEngine):
