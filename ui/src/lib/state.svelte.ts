@@ -614,6 +614,11 @@ class IrisStore {
           streaming: false,
         });
         break;
+
+      // Told in passing, such as the speaker or microphone Iris switched to
+      case "notice":
+        this.messages.push({ role: "system", text: (data.message as string) ?? "", streaming: false });
+        break;
     }
   }
 

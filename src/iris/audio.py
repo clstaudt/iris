@@ -1,11 +1,15 @@
 """Audio recording, playback, and filters for voice assistant."""
 
+import ctypes
 import logging
 import queue
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import warnings
+import weakref
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Generator, Iterator
@@ -42,6 +46,7 @@ from iris.turns import (
 # Each hold of the voice, what it was judged to be, and where the voice went
 # on: the app writes it to a file of its own (iris.rpc_server)
 voice_log = logging.getLogger("iris.voice")
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore")
 
@@ -191,13 +196,101 @@ OWN_FILTER = object()
 # ============================================================================
 
 
-class SoundDevice:
-    """The computer's microphone and speaker, through sounddevice.
+class SpeakerError(Exception):
+    """The speaker could not be opened, even with the devices read anew."""
 
-    All of Iris's audio goes through a device: the microphone as an input
-    stream, the speaker as one output stream that plays a clip at a time. A
-    test gives Iris a device of its own instead, such as a virtual room, and
-    two assistants in one process can each have one.
+
+class MicrophoneError(Exception):
+    """The microphone stopped delivering sound and could not be opened again."""
+
+
+class _PropertyAddress(ctypes.Structure):
+    """CoreAudio's AudioObjectPropertyAddress."""
+
+    _fields_ = [
+        ("selector", ctypes.c_uint32),
+        ("scope", ctypes.c_uint32),
+        ("element", ctypes.c_uint32),
+    ]
+
+
+def _four_cc(code: str) -> int:
+    return int.from_bytes(code.encode("ascii"), "big")
+
+
+# On macOS, CoreAudio tells which devices are the system's defaults
+_core_audio = None
+if sys.platform == "darwin":
+    try:
+        _core_audio = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        _core_audio.AudioObjectGetPropertyData.argtypes = [
+            ctypes.c_uint32,
+            ctypes.POINTER(_PropertyAddress),
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p,
+        ]
+        _core_audio.AudioObjectGetPropertyData.restype = ctypes.c_int32
+    except (OSError, AttributeError):
+        _core_audio = None
+
+# kAudioObjectSystemObject, and the properties of its default input and
+# output devices (in the global scope, of the main element)
+_SYSTEM_OBJECT = 1
+_DEFAULT_DEVICES = (_four_cc("dIn "), _four_cc("dOut"))
+_SCOPE_GLOBAL = _four_cc("glob")
+
+
+def system_defaults() -> tuple[int, ...] | None:
+    """The system's default input and output devices, as CoreAudio numbers
+    them; None where that cannot be told.
+
+    Only macOS needs it: PortAudio's CoreAudio part keeps the defaults it
+    found when it was initialized, so it goes on opening a device the user
+    switched away from (AirPods connecting), or one that is gone (AirPods
+    disconnecting). The default device PortAudio opens elsewhere, the sound
+    server's on Linux and the sound mapper on Windows, follows the system's
+    choice by itself.
+    """
+    if _core_audio is None:
+        return None
+    found = []
+    for selector in _DEFAULT_DEVICES:
+        address = _PropertyAddress(selector, _SCOPE_GLOBAL, 0)
+        device = ctypes.c_uint32(0)
+        size = ctypes.c_uint32(ctypes.sizeof(device))
+        status = _core_audio.AudioObjectGetPropertyData(
+            _SYSTEM_OBJECT, ctypes.byref(address), 0, None, ctypes.byref(size), ctypes.byref(device)
+        )
+        if status != 0:
+            return None
+        found.append(device.value)
+    return tuple(found)
+
+
+def _stop_playback():
+    """End what sounddevice.play() plays, at once rather than once its
+    buffers have played (its device may be gone)."""
+    try:
+        sd.get_stream().abort()
+    except Exception:
+        pass
+    sd.stop()
+
+
+class _PortAudio:
+    """PortAudio, which the computer's audio goes through: one per process.
+
+    PortAudio reads the list of devices, and which are the defaults, once:
+    when it is initialized. A device that comes or goes later (AirPods
+    connecting or disconnecting) changes the devices underneath it, and a
+    stream opened on the default it knows then fails ("Internal PortAudio
+    error", "Invalid device") or plays on a device the user left. Only
+    initializing it again reads the devices anew, and that closes every
+    stream, so it is done here, in one place, under the lock that every use
+    of PortAudio takes: the player, the microphone and previews each run on
+    a thread of their own.
     """
 
     def __init__(self):
@@ -205,25 +298,202 @@ class SoundDevice:
         # and PortAudio crashes the process when two threads close it at
         # once. Stop reaches it from several threads (the app's command, the
         # reply's thread, the playback thread), so every use goes through
-        # this lock.
-        self._output = threading.RLock()
+        # this lock, and the devices are read anew under it.
+        self.lock = threading.RLock()
+        # How many times the devices were read anew: a stream opened before
+        # the last time is gone
+        self.generation = 0
+        # The microphone's streams that are open, closed when the devices are
+        # read anew
+        self.streams: weakref.WeakSet = weakref.WeakSet()
+        # Called once the devices were read anew
+        self.watchers: list[Callable[[], None]] = []
+        # The system's defaults when the devices were read last
+        self.defaults = system_defaults()
+
+    def refresh(self, seen: int | None = None) -> bool:
+        """Read the devices anew, unless that was done since generation seen
+        (for the same change, by another thread).
+
+        What plays stops, and the microphone's streams are closed: their
+        captures open them again, on the devices as they are now.
+
+        Returns:
+            Whether the devices were read since seen; False if PortAudio
+            could not be initialized again
+        """
+        with self.lock:
+            if seen is not None and seen != self.generation:
+                return True
+            _stop_playback()
+            for stream in list(self.streams):
+                stream.drop()
+            try:
+                sd._terminate()
+            except Exception:
+                logger.warning("PortAudio did not terminate cleanly", exc_info=True)
+            try:
+                sd._initialize()
+            except Exception:
+                logger.exception("PortAudio could not be initialized again")
+                return False
+            self.generation += 1
+            self.defaults = system_defaults()
+            logger.info(
+                "Read the audio devices anew; the defaults are %s and %s",
+                _default_name("input"),
+                _default_name("output"),
+            )
+            for watcher in list(self.watchers):
+                try:
+                    watcher()
+                except Exception:
+                    logger.exception("A watcher of the audio devices failed")
+            return True
+
+    def follow_system(self) -> bool:
+        """Read the devices anew if the system's defaults changed since they
+        were last read; only macOS tells (see system_defaults). Returns
+        whether they were read anew."""
+        defaults = system_defaults()
+        with self.lock:
+            if defaults is None or defaults == self.defaults:
+                return False
+            # Tried once for each change, whether it works or not
+            self.defaults = defaults
+            logger.info("The system's default audio devices changed")
+            return self.refresh()
+
+
+def _default_name(kind: str) -> str | None:
+    try:
+        return sd.query_devices(kind=kind)["name"]
+    except Exception:
+        return None
+
+
+_PORTAUDIO = _PortAudio()
+
+
+class _InputStream:
+    """A stream from one of the computer's microphones, started and closed
+    under PortAudio's lock. Reading the devices anew closes it for good
+    (gone): its capture opens another."""
+
+    def __init__(self, stream):
+        # Opened (not yet started): it is closed when the devices are read
+        # anew, started or not
+        self._stream = stream
+        self._open = True
+        self.gone = False
+        _PORTAUDIO.streams.add(self)
+
+    def __enter__(self):
+        with _PORTAUDIO.lock:
+            if self.gone:
+                raise sd.PortAudioError("The devices were read anew before the stream started")
+            try:
+                self._stream.__enter__()
+            except Exception:
+                # It would not start: closed, not left open in PortAudio
+                self.__exit__()
+                raise
+        return self
+
+    def __exit__(self, *exc):
+        with _PORTAUDIO.lock:
+            _PORTAUDIO.streams.discard(self)
+            self._close()
+        return False
+
+    def drop(self):
+        """Close it for the devices to be read anew."""
+        _PORTAUDIO.streams.discard(self)
+        self._close()
+        self.gone = True
+
+    def _close(self):
+        if not self._open:
+            return
+        self._open = False
+        try:
+            self._stream.__exit__(None, None, None)
+        except Exception:
+            logger.warning("The microphone's stream did not close cleanly", exc_info=True)
+
+
+class SoundDevice:
+    """The computer's microphone and speaker, through sounddevice.
+
+    All of Iris's audio goes through a device: the microphone as an input
+    stream, the speaker as one output stream that plays a clip at a time. A
+    test gives Iris a device of its own instead, such as a virtual room, and
+    two assistants in one process can each have one.
+
+    The devices may change while Iris runs. A clip the speaker cannot play
+    has the devices read anew and is played once more, on the default as it
+    is now; a microphone that cannot be opened, or stops delivering, is
+    opened again the same way (see AudioRecorder). On macOS a change of the
+    system's default devices is followed before each clip, and every second
+    while Iris listens (see system_defaults), so it speaks and listens where
+    the user chose without first failing.
+    """
+
+    @property
+    def generation(self) -> int:
+        """How many times the devices were read anew."""
+        return _PORTAUDIO.generation
+
+    def refresh(self, seen: int | None = None) -> bool:
+        """Read the devices anew (see _PortAudio.refresh)."""
+        return _PORTAUDIO.refresh(seen)
+
+    def follow_system(self) -> bool:
+        """Read the devices anew if the system's defaults changed."""
+        return _PORTAUDIO.follow_system()
+
+    def watch(self, watcher: Callable[[], None]):
+        """Call watcher, on the thread that does it, each time the devices
+        were read anew."""
+        with _PORTAUDIO.lock:
+            _PORTAUDIO.watchers.append(watcher)
+
+    def unwatch(self, watcher: Callable[[], None]):
+        with _PORTAUDIO.lock:
+            if watcher in _PORTAUDIO.watchers:
+                _PORTAUDIO.watchers.remove(watcher)
 
     def input_stream(self, **options):
         """An input stream, as sounddevice.InputStream takes its options."""
-        return sd.InputStream(**options)
+        with _PORTAUDIO.lock:
+            return _InputStream(sd.InputStream(**options))
 
     def query_devices(self, *args, **kwargs):
         """The audio devices, as sounddevice.query_devices lists them."""
-        return sd.query_devices(*args, **kwargs)
+        with _PORTAUDIO.lock:
+            return sd.query_devices(*args, **kwargs)
 
     def play(self, audio: np.ndarray, sample_rate: int, **options) -> float:
         """Start playing a clip, ending the one before.
 
+        A speaker that cannot be opened may be one PortAudio knows from
+        before a device change: the devices are read anew and the clip is
+        tried once more. The PortAudioError of that second try is raised.
+
         Returns:
             The output's latency in seconds (0 if it cannot be told)
         """
-        with self._output:
-            sd.play(audio, sample_rate, **options)
+        with _PORTAUDIO.lock:
+            _PORTAUDIO.follow_system()
+            seen = _PORTAUDIO.generation
+            try:
+                sd.play(audio, sample_rate, **options)
+            except sd.PortAudioError as error:
+                logger.warning("The speaker could not be opened (%s); reading the devices anew",
+                               error)
+                if not _PORTAUDIO.refresh(seen):
+                    raise
+                sd.play(audio, sample_rate, **options)
             try:
                 return float(sd.get_stream().latency)
             except Exception:
@@ -231,12 +501,12 @@ class SoundDevice:
 
     def stop(self):
         """Stop what plays."""
-        with self._output:
+        with _PORTAUDIO.lock:
             sd.stop()
 
     def playing(self) -> bool:
         """Whether the clip played last still has audio to play."""
-        with self._output:
+        with _PORTAUDIO.lock:
             try:
                 return bool(sd.get_stream().active)
             except Exception:
@@ -245,6 +515,23 @@ class SoundDevice:
 
 # The computer's own audio, which Iris uses unless given another device
 SYSTEM = SoundDevice()
+
+
+# A device of a test's own (a virtual room) is never read anew: these stand in
+# for the SoundDevice methods it lacks
+def _generation(audio) -> int:
+    return getattr(audio, "generation", 0)
+
+
+def _refresh(audio, seen: int) -> bool:
+    refresh = getattr(audio, "refresh", None)
+    return bool(refresh is not None and refresh(seen))
+
+
+def _follow_system(audio):
+    follow = getattr(audio, "follow_system", None)
+    if follow is not None:
+        follow()
 
 
 class AudioRecorder:
@@ -272,7 +559,8 @@ class AudioRecorder:
             silence_duration: Silence that ends a turn whatever Smart Turn
                 says, and all that does without it
             chunk_duration: Duration of chunks for streaming transcription
-            device: Input device index (None = system default)
+            device: Input device index (None = system default); the
+                microphone is found again by its name when the devices change
             turn_end: Smart Turn, which hears when a turn is finished
             echo: Takes the voice out of what listen_on() hears while it speaks
             audio: The device recorded from; the computer's microphone if None
@@ -281,7 +569,6 @@ class AudioRecorder:
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
         self.chunk_duration = chunk_duration
-        self.device = device
         self.turn_end = turn_end
         self.echo = echo
         self.audio = audio or SYSTEM
@@ -295,6 +582,9 @@ class AudioRecorder:
         self._capture: _Capture | None = None
         self._capture_lock = threading.Lock()
         self._heard_until: float | None = None
+        # When the system's default devices were last looked at
+        self._followed = 0.0
+        self.set_device(device)
 
     def check_audio_devices(self) -> tuple[bool, str]:
         """
@@ -327,7 +617,8 @@ class AudioRecorder:
     def input_device_name() -> str:
         """Return the name of the default audio input device."""
         try:
-            return sd.query_devices(kind="input")["name"]
+            with _PORTAUDIO.lock:
+                return sd.query_devices(kind="input")["name"]
         except Exception:
             return "Unknown microphone"
 
@@ -335,9 +626,11 @@ class AudioRecorder:
     def list_input_devices() -> list[dict]:
         """List available audio input devices as {index, name} dicts."""
         try:
+            with _PORTAUDIO.lock:
+                devices = sd.query_devices()
             return [
                 {"index": i, "name": d["name"]}
-                for i, d in enumerate(sd.query_devices())
+                for i, d in enumerate(devices)
                 if d["max_input_channels"] > 0
             ]
         except Exception:
@@ -346,9 +639,46 @@ class AudioRecorder:
     def set_device(self, index: int | None):
         """Select the input device by index (None = system default).
 
-        Takes effect on the next listen() call."""
+        Takes effect on the next listen() call. The device is kept by its
+        name too: when the devices are read anew their indices may change,
+        and the microphone is found again by its name, or while it is gone,
+        the system's default is listened to."""
         self.device = index
+        # The microphone chosen; None for the system's default
+        self.device_name = self._name_of(index) if index is not None else None
+        self._resolved_at = _generation(self.audio)
         self.close_microphone()
+
+    def _name_of(self, index: int) -> str | None:
+        try:
+            return self.audio.query_devices(index)["name"]
+        except Exception:
+            return None
+
+    def _device_index(self) -> int | None:
+        """The index of the microphone chosen in the devices as they were
+        last read (None: the system's default)."""
+        if self.device_name is None:
+            return self.device
+        generation = _generation(self.audio)
+        if generation != self._resolved_at:
+            self._resolved_at = generation
+            try:
+                devices = list(self.audio.query_devices())
+            except Exception:
+                devices = []
+            self.device = next(
+                (
+                    i
+                    for i, d in enumerate(devices)
+                    if d["name"] == self.device_name and d["max_input_channels"] > 0
+                ),
+                None,
+            )
+            if self.device is None:
+                logger.warning("The microphone %s is gone; listening to the default",
+                               self.device_name)
+        return self.device
 
     def close_microphone(self):
         """Close the microphone (the mic switched off, the user typing, the
@@ -362,8 +692,9 @@ class AudioRecorder:
     def current_device_name(self) -> str:
         """Return the name of the currently selected input device."""
         try:
-            if self.device is not None:
-                return self.audio.query_devices()[self.device]["name"]
+            device = self._device_index()
+            if device is not None:
+                return self.audio.query_devices()[device]["name"]
             return self.audio.query_devices(kind="input")["name"]
         except Exception:
             return "Unknown microphone"
@@ -411,8 +742,15 @@ class AudioRecorder:
                         break
         except Exception as e:
             error_str = str(e).lower()
-            # Check if this is a device error (no microphone available)
-            if "device" in error_str or "input" in error_str or "invalid" in error_str:
+            # Check if this is a device error (no microphone available): one
+            # that could not be opened even with the devices read anew, or
+            # that stopped delivering and could not be opened again
+            if (
+                isinstance(e, (MicrophoneError, sd.PortAudioError))
+                or "device" in error_str
+                or "input" in error_str
+                or "invalid" in error_str
+            ):
                 if not self._device_error:
                     # Only print the error once
                     self._device_error = True
@@ -650,11 +988,19 @@ class AudioRecorder:
         where the last listener stopped, so a turn the user goes on with
         loses nothing said in between; otherwise listening starts now, unless
         the last listener stopped only a moment ago.
+
+        While it is listened to, the system's default devices are followed
+        should they change (macOS), which closes the stream for the
+        microphone to be opened again where the user chose. A stream that is
+        gone, or stops delivering, is opened again (see _reopen).
         """
         with self._capture_lock:
+            if self._capture is not None and self._capture.gone:
+                self._capture.close()
+                self._capture = None
             if self._capture is None:
                 # Just opened: everything it has captured is new
-                self._capture = _Capture(self.audio, self.sample_rate, self.device)
+                self._capture = self._open_capture()
                 self._heard_until = None
             else:
                 now = time.monotonic()
@@ -667,7 +1013,66 @@ class AudioRecorder:
         def heard_until(moment: float):
             self._heard_until = moment
 
-        yield _Frames(echo, capture, on_block=heard_until)
+        yield _Frames(echo, capture, on_block=heard_until, reopen=self._reopen, follow=self._follow)
+
+    def _follow(self):
+        """Follow the system's default devices, at most once every
+        FOLLOW_EVERY seconds (see SoundDevice.follow_system)."""
+        now = time.monotonic()
+        if now - self._followed >= FOLLOW_EVERY:
+            self._followed = now
+            _follow_system(self.audio)
+
+    def _open_capture(self) -> "_Capture":
+        """Open the microphone chosen, or the system's default.
+
+        PortAudio may know the devices from before one came or went: when it
+        cannot open the microphone, the devices are read anew and it is
+        tried once more. The PortAudioError of that second try is raised.
+        """
+        seen = _generation(self.audio)
+        try:
+            return _Capture(self.audio, self.sample_rate, self._device_index())
+        except sd.PortAudioError as error:
+            logger.warning("The microphone could not be opened (%s); reading the devices anew",
+                           error)
+            if not _refresh(self.audio, seen):
+                raise
+            return _Capture(self.audio, self.sample_rate, self._device_index())
+
+    def _reopen(self, lost: "_Capture") -> "_Capture":
+        """Open the microphone again after its stream was lost.
+
+        A stream closed for the devices to be read anew (gone) is opened
+        again on them. One that stopped delivering has lost its device: the
+        devices are read anew, and the microphone is opened where it is now
+        (the one chosen, found by its name, else the new default). Should
+        that one deliver nothing either, the microphone is given up
+        (MicrophoneError), rather than opened again and again.
+
+        Raises:
+            queue.Empty: The microphone was closed meanwhile
+            MicrophoneError: The microphone delivers nothing
+            sd.PortAudioError: It could not be opened again
+        """
+        with self._capture_lock:
+            if self._capture is not lost:
+                if self._capture is None:
+                    raise queue.Empty
+                return self._capture  # opened again by another listener
+            lost.close()
+            self._capture = None
+            self._heard_until = None
+            stalled = not lost.gone
+            if stalled:
+                if lost.after_stall and not lost.delivered:
+                    raise MicrophoneError("The microphone delivers no sound")
+                logger.warning("The microphone stopped delivering sound; reading the devices anew")
+                _refresh(self.audio, lost.generation)
+            capture = self._open_capture()
+            capture.after_stall = stalled
+            self._capture = capture
+            return capture
 
     @staticmethod
     def _level_meter(on_level: Callable[[float], None] | None) -> Callable[[np.ndarray], None]:
@@ -802,6 +1207,13 @@ class _Capture:
         self._blocks: deque[tuple[np.ndarray, float]] = deque()
         self._ready = threading.Condition()
         self._closed = False
+        # The devices' generation it was opened in, whether it has delivered
+        # audio, when it last did (or was opened), and whether it was opened
+        # because the one before it stopped delivering
+        self.generation = _generation(audio)
+        self.delivered = False
+        self._last_block = time.monotonic()
+        self.after_stall = False
         self._stream = audio.input_stream(
             samplerate=sample_rate,
             channels=1,
@@ -823,20 +1235,35 @@ class _Capture:
             lag = frame_count / self.sample_rate
         captured = time.monotonic() - lag
         with self._ready:
+            self._last_block = time.monotonic()
+            self.delivered = True
             self._blocks.append((indata[:, 0].copy(), captured))
             while self._blocks and self._blocks[0][1] < captured - KEEP_CAPTURED:
                 self._blocks.popleft()
             self._ready.notify()
 
+    @property
+    def gone(self) -> bool:
+        """Its stream was closed for the devices to be read anew."""
+        return getattr(self._stream, "gone", False)
+
     def take(self, timeout: float) -> tuple[np.ndarray, float]:
         """The next block and when it was captured; raises queue.Empty if
-        none came within timeout, or the microphone was closed."""
+        none came within timeout, or the microphone was closed, and
+        MicrophoneError if its stream is gone or has stopped delivering."""
         with self._ready:
             if not self._blocks and not self._closed:
                 self._ready.wait(timeout)
-            if not self._blocks:
-                raise queue.Empty
-            return self._blocks.popleft()
+            if self._blocks:
+                return self._blocks.popleft()
+            if not self._closed and (self.gone or self._stalled()):
+                raise MicrophoneError("The microphone stopped delivering sound")
+            raise queue.Empty
+
+    def _stalled(self) -> bool:
+        # A Bluetooth microphone takes a moment to start
+        allowed = STALLED if self.delivered else STARTING
+        return time.monotonic() - self._last_block > allowed
 
     def skip_before(self, moment: float):
         """Drop what was captured before this moment."""
@@ -845,21 +1272,34 @@ class _Capture:
                 self._blocks.popleft()
 
     def close(self):
+        """Close it; a stream whose device is gone may fail to close, which
+        is no reason to fail."""
         with self._ready:
+            if self._closed:
+                return
             self._closed = True
             self._blocks.clear()
             self._ready.notify_all()
-        self._stream.__exit__(None, None, None)
+        try:
+            self._stream.__exit__(None, None, None)
+        except Exception:
+            logger.warning("The microphone did not close cleanly", exc_info=True)
 
 
 class _Frames:
     """The microphone's audio in 32 ms frames, as the VAD takes it: cleaned
     of the voice, given an echo canceller, outside the audio callback."""
 
-    def __init__(self, echo: EchoCanceller | None, capture: _Capture, on_block=None):
+    def __init__(
+        self, echo: EchoCanceller | None, capture: _Capture, on_block=None, reopen=None, follow=None
+    ):
         self._echo = echo
         self._capture = capture
         self._on_block = on_block
+        # Opens the microphone again when its stream is lost, and follows the
+        # system's default devices
+        self._reopen = reopen
+        self._follow = follow
         self._pending = np.zeros(0, dtype=np.float32)
         # When the first frame was captured (time.monotonic()); the frames
         # follow one another from there
@@ -868,8 +1308,16 @@ class _Frames:
 
     def get(self, timeout: float) -> np.ndarray:
         """The next frame; raises queue.Empty if none came within timeout."""
+        if self._follow is not None:
+            self._follow()
         while len(self._pending) < FRAME:
-            block, captured = self._capture.take(timeout)
+            try:
+                block, captured = self._capture.take(timeout)
+            except MicrophoneError:
+                if self._reopen is None:
+                    raise
+                self._capture = self._reopen(self._capture)
+                continue
             if not self._started:
                 self.first, self._started = captured, True
             if self._on_block:
@@ -1080,6 +1528,12 @@ class Recording:
 
 # Seconds of the microphone's audio kept for the next listener
 KEEP_CAPTURED = 30.0
+# A microphone that delivers nothing for this long has lost its device (it
+# delivers a block every 30 ms), or one just opened, nothing for this long
+STALLED = 2.0
+STARTING = 5.0
+# Seconds between two looks at the system's default devices while listening
+FOLLOW_EVERY = 1.0
 # A new listen takes up the microphone's audio where the last one stopped if
 # that was at most this long ago (a turn following the answer at once);
 # after longer, what came in between is not for it (it may be Iris's voice)
@@ -1211,7 +1665,12 @@ class AudioPlayer:
         """Play a buffer, honoring pause() and stop() while it plays.
 
         sounddevice cannot pause a stream, so a pause stops it, estimates how
-        far playback got, and the remainder is played on resume.
+        far playback got, and the remainder is played on resume. The devices
+        read anew while it plays (one came or went) cut it the same way: the
+        remainder is played at once, on the device as it is now.
+
+        Raises:
+            SpeakerError: The speaker could not be opened
         """
         self._stopped.clear()
         self._place = (len(audio), sample_rate, 0, None)
@@ -1236,7 +1695,13 @@ class AudioPlayer:
             # Play with maximum buffer size and latency for ultra-smooth playback
             # Extra large buffer (32768 samples = ~740ms) prevents any underruns
             started = time.monotonic()
-            latency = self.audio.play(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
+            try:
+                latency = self.audio.play(
+                    segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high"
+                )
+            except sd.PortAudioError as error:
+                raise SpeakerError(str(error)) from error
+            generation = _generation(self.audio)
             self._place = (len(audio), sample_rate, position, started + latency)
             if self.echo is not None:
                 self.echo.played(started + latency, segment, sample_rate)
@@ -1265,7 +1730,8 @@ class AudioPlayer:
                     break
                 time.sleep(0.02)
             elapsed = time.monotonic() - started
-            cut_by_pause = self._paused.is_set() and not stopped()
+            moved = _generation(self.audio) != generation
+            cut_by_pause = (self._paused.is_set() or moved) and not stopped()
             if cut_by_pause or stopped():
                 self.audio.stop()
                 self._cut()
@@ -1346,8 +1812,8 @@ class AudioPlayer:
 
             self._play_resumable(np.ascontiguousarray(audio), sample_rate, on_level, cancelled)
 
+        except SpeakerError:
+            raise
         except Exception as e:
             print(f"Error playing audio: {e}")
-            import traceback
-
             traceback.print_exc()
