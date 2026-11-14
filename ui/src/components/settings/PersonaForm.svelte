@@ -8,8 +8,9 @@
   } from "../../lib/state.svelte";
   import Icon from "../Icon.svelte";
 
-  // A persona is who Iris is: a name, a personality and a voice. Models,
-  // tools and turn-taking belong to the pipeline.
+  // A persona is who Iris is: a name, a personality, the words that wake it
+  // and send it to sleep, and a voice. Models, tools, turn-taking and
+  // whether the wake word is on belong to the pipeline.
 
   // The engines the core has, by name; the shipped ones until it has said
   const ENGINES: { id: SpeechEngine; label: string }[] = [
@@ -24,6 +25,8 @@
     speed: 1.0,
     audio_filter: "",
     description: "",
+    wake_word: "",
+    sleep_word: "",
   };
 
   let draft = $state<PersonaSettings | null>(null);
@@ -34,8 +37,17 @@
 
   /** What saving would write, to tell whether anything changed. */
   function editable(p: PersonaSettings) {
-    const { name, engine, voice, speed, audio_filter, description } = p;
-    return JSON.stringify({ name, engine, voice, speed, audio_filter, description });
+    const { name, engine, voice, speed, audio_filter, description, wake_word, sleep_word } = p;
+    return JSON.stringify({
+      name,
+      engine,
+      voice,
+      speed,
+      audio_filter,
+      description,
+      wake_word: wake_word?.trim() || name.trim(),
+      sleep_word: sleep_word?.trim() ?? "",
+    });
   }
 
   onMount(async () => {
@@ -45,6 +57,8 @@
       store.editingPersona = store.persona;
       return;
     }
+    loaded.wake_word ||= loaded.name;
+    loaded.sleep_word ??= "";
     draft = loaded;
     saved = editable(loaded);
   });
@@ -82,6 +96,14 @@
       preferred && list.some((v) => v.id === preferred) ? preferred : (list[0]?.id ?? "");
   }
 
+  /** A wake word that is the name (the default) follows it. */
+  function rename(name: string) {
+    if (!draft) return;
+    const wake = draft.wake_word?.trim() ?? "";
+    if (!wake || wake.toLowerCase() === draft.name.trim().toLowerCase()) draft.wake_word = name;
+    draft.name = name;
+  }
+
   const filterLabel = (name: string) => name.charAt(0).toUpperCase() + name.slice(1);
 
   async function preview(voice: string) {
@@ -116,7 +138,11 @@
       return;
     }
     const loaded = await store.loadPersona(draft.id!);
-    if (loaded) draft = loaded;
+    if (loaded) {
+      loaded.wake_word ||= loaded.name;
+      loaded.sleep_word ??= "";
+      draft = loaded;
+    }
   }
 
   async function remove() {
@@ -134,7 +160,8 @@
   <div class="flex min-w-0 flex-col gap-6">
     <div class="flex items-center gap-3">
       <input
-        bind:value={draft.name}
+        value={draft.name}
+        oninput={(e) => rename((e.target as HTMLInputElement).value)}
         placeholder="Name"
         spellcheck="false"
         aria-label="Name"
@@ -163,6 +190,27 @@
         class="s-field"
       ></textarea>
     </section>
+
+    <div class="grid grid-cols-2 gap-6">
+      <section class="flex flex-col gap-2">
+        <label class="s-section" for="persona-wake-word">Wake word</label>
+        <input
+          id="persona-wake-word"
+          bind:value={draft.wake_word}
+          spellcheck="false"
+          class="s-field"
+        />
+      </section>
+      <section class="flex flex-col gap-2">
+        <label class="s-section" for="persona-sleep-word">Sleep word</label>
+        <input
+          id="persona-sleep-word"
+          bind:value={draft.sleep_word}
+          spellcheck="false"
+          class="s-field"
+        />
+      </section>
+    </div>
 
     <section class="flex flex-col gap-3">
       <h3 class="s-section">Voice</h3>

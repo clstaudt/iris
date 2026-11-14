@@ -110,8 +110,8 @@ class PluginContext:
     #: Iris goes to sleep as its sleep word puts it. None where there is no
     #: conversation to end
     sleep: Optional[Callable[[], None]] = None
-    #: Whether Iris can go to sleep now: only with a wake word set, which
-    #: wakes it again
+    #: Whether the model may put Iris to sleep now: only while the wake
+    #: word is on
     can_sleep: Callable[[], bool] = lambda: False
 
 

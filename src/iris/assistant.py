@@ -1,6 +1,7 @@
 """Voice assistant coordinator that orchestrates all components."""
 
 import logging
+import math
 import os
 import queue
 import re
@@ -44,10 +45,12 @@ warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
 
 # With a wake word set: how long the assistant keeps listening after a turn
-# (or after the user last spoke) before it goes back to sleep
+# (or after the user last spoke) before it goes back to sleep. A window of
+# 0 is none: it then sleeps only when told, by the sleep word or the
+# Going to sleep tool.
 DEFAULT_WAKE_WINDOW = 30.0
-# Said while awake, this puts the assistant straight back to sleep
-DEFAULT_SLEEP_WORD = "That's all"
+# The shortest window, which still leaves time to say a follow-up
+SHORTEST_WAKE_WINDOW = 5.0
 # While dormant an utterance ends after this much silence, so the wake word
 # is recognized promptly instead of after the conversational pause
 DORMANT_SILENCE = 0.8
@@ -92,6 +95,13 @@ def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
 def _wake_chime() -> np.ndarray:
     """Two soft rising tones that say "I'm listening" across the room."""
     return _chime_tones((660.0, 990.0))
+
+
+def _window(seconds) -> float:
+    """An awake window as Iris keeps it: 0 (or none) for none, otherwise
+    at least the shortest one."""
+    seconds = float(seconds or 0)
+    return max(SHORTEST_WAKE_WINDOW, seconds) if seconds > 0 else 0.0
 
 
 def _sleep_chime() -> np.ndarray:
@@ -168,6 +178,9 @@ class VoiceAssistant:
 
     # Where the current turn's time goes, reported once the reply is heard
     _timing: Optional[TurnTiming] = None
+    # Asleep by the sleep word while the wake word is off: until called by
+    # the persona's wake word, then listening to everything again
+    _asleep_until_called = False
     # The reply being given ends the conversation: the model called the
     # sleep tool, and Iris goes to sleep once the reply has been heard
     _ending = False
@@ -195,7 +208,7 @@ class VoiceAssistant:
         memory: bool = True,
         wake_word: Optional[str] = None,
         wake_window: float = DEFAULT_WAKE_WINDOW,
-        sleep_word: Optional[str] = DEFAULT_SLEEP_WORD,
+        sleep_word: Optional[str] = None,
         tts_models_dir: Optional[str] = None,
         barge_in: bool = True,
         turn_detection: str = "smart_turn",
@@ -232,8 +245,11 @@ class VoiceAssistant:
                 (~/.iris/memory.db, or IRIS_MEMORY_DB), remembered by topic
             wake_word: If set, listen only for this word until addressed, and
                 fall dormant again after wake_window seconds without a turn
-            wake_window: Seconds the assistant stays awake after a turn
-            sleep_word: Said while awake, puts the assistant back to sleep
+                (the persona's, which the controller passes when it is on)
+            wake_window: Seconds the assistant stays awake after a turn; 0
+                to fall asleep only when told to
+            sleep_word: Said while awake, puts the assistant back to sleep;
+                None for none (the persona's, which is optional)
             tts_models_dir: Folder holding the Kokoro voice model; None looks
                 in the usual places
             barge_in: Let the user interrupt the voice by speaking (needs
@@ -271,7 +287,7 @@ class VoiceAssistant:
         self.wake_word: Optional[str] = None
         self.wake_detector: Optional[WakeWordDetector] = None
         self.awake_until = 0.0
-        self.wake_window = float(wake_window)
+        self.wake_window = _window(wake_window)
         self.sleep_word = (sleep_word or "").strip() or None
         self._was_dormant = True  # to notice the moment it falls asleep
         self._last_window_emit = 0.0
@@ -439,8 +455,9 @@ class VoiceAssistant:
 
     def _plugin_context(self) -> PluginContext:
         """What the plugins get to make their tools: long-term memory, and
-        going to sleep, which is offered only while a wake word is set to
-        wake Iris again (as the sleep word only works with one)."""
+        going to sleep, which is offered only while the wake word is on: the
+        model ends a conversation only where waiting for the wake word is
+        what the user chose."""
         return PluginContext(
             memory=self.memory.store if self.memory else None,
             sleep=self._end_conversation,
@@ -474,6 +491,8 @@ class VoiceAssistant:
             "wake_word": self.wake_word or "",
             "wake_window": self.wake_window,
             "sleep_word": self.sleep_word or "",
+            # The persona's wake word, shown while the wake word is off
+            "persona_wake_word": self.persona.wake_word,
             "mic_on": not self.pause_event.is_set(),
             "paused": self.suspend_event.is_set(),
             "tools": self.tools.states(),
@@ -557,26 +576,52 @@ class VoiceAssistant:
         The tiny detector model is loaded the first time it is needed.
         """
         word = (word or "").strip() or None
-        if word and self.wake_detector is None:
-            # The wake word is heard by a tiny Whisper, on the backend
-            # recognition runs on when that is Whisper too
-            if engine == "auto" and isinstance(self.transcriber, WhisperTranscriber):
-                engine = self.transcriber.engine
-            self.wake_detector = WakeWordDetector(engine)
+        if word:
+            self._load_wake_detector(engine)
         self.wake_word = word
         self.awake_until = 0.0  # a new word starts dormant, without a chime
         self._was_dormant = True
+        self._asleep_until_called = False
+
+    def _load_wake_detector(self, engine: str = "auto"):
+        """Load the tiny Whisper that hears the wake word, unless it is."""
+        if self.wake_detector is not None:
+            return
+        # On the backend recognition runs on, when that is Whisper too
+        if engine == "auto" and isinstance(self.transcriber, WhisperTranscriber):
+            engine = self.transcriber.engine
+        self.wake_detector = WakeWordDetector(engine)
+
+    @property
+    def word_to_wake(self) -> str:
+        """The word that wakes Iris: the one listened for, or with the wake
+        word off, the persona's (its name unless it has another)."""
+        return self.wake_word or self.persona.wake_word
+
+    def set_persona_words(self, wake_word: str, sleep_word: str):
+        """Take on a persona's words, as it is switched to or edited. While
+        a wake word is listened for, the new one is, and Iris stays awake
+        or asleep as it was; with the wake word off it stays off."""
+        if self.wake_word:
+            self.wake_word = (wake_word or "").strip() or self.wake_word
+        self.sleep_word = (sleep_word or "").strip() or None
 
     def set_wake_options(self, window: Optional[float] = None, sleep_word: Optional[str] = None):
-        """Change how long it stays awake, and its sleep word ("" for none)."""
+        """Change how long it stays awake (0: until told to sleep), and its
+        sleep word ("" for none). Awake now, it stays awake for the new
+        window from now: one switched off must not still run out."""
         if window is not None:
-            self.wake_window = max(5.0, float(window))
+            self.wake_window = _window(window)
+            if self.wake_word and self.awake_until > time.monotonic():
+                self._stay_awake()
         if sleep_word is not None:
             self.sleep_word = sleep_word.strip() or None
 
     @property
     def dormant(self) -> bool:
         """Waiting to be addressed by the wake word."""
+        if self._asleep_until_called:
+            return True
         return bool(self.wake_word) and time.monotonic() >= self.awake_until
 
     def _go_to_sleep(self):
@@ -585,6 +630,39 @@ class VoiceAssistant:
         only for the wake word. The turn that did it does not wake Iris
         again (awake_until is zero)."""
         self.awake_until = 0.0
+
+    def _is_sleep_word(self, text: str) -> bool:
+        """Whether this is the sleep word, said on its own or with the wake
+        word or the persona's name ("Goodbye, HAL" for a "Hey HAL")."""
+        if not self.sleep_word:
+            return False
+        return any(
+            match_sleep_word(text, self.sleep_word, word)
+            for word in dict.fromkeys([self.word_to_wake, self.persona.name])
+        )
+
+    def _sleep_word_said(self):
+        """The sleep word always puts Iris to sleep, whatever the model would
+        make of it. With the wake word off there is no window to wake into:
+        Iris sleeps until called by the persona's wake word, then listens to
+        everything again. Without the model that hears the wake word it
+        could not be called back, so it stays awake and says so."""
+        if not self.wake_word:
+            try:
+                self._load_wake_detector()
+            except Exception as e:
+                logger.exception("The wake word could not be set up")
+                self._error(f"Iris cannot sleep, as nothing could wake it again. {brief(e)}")
+                return
+            self._asleep_until_called = True
+        self._go_to_sleep()
+
+    def _wake(self):
+        """Woken by name, or by a typed message: awake for the window with
+        the wake word on, and listening to everything again with it off."""
+        self._asleep_until_called = False
+        if self.wake_word:
+            self._stay_awake()
 
     def _end_conversation(self):
         """The sleep tool: Iris goes to sleep once the reply being given has
@@ -602,7 +680,12 @@ class VoiceAssistant:
         self._go_to_sleep()
 
     def _stay_awake(self):
-        """Start the awake window over and tell the UI how long it lasts."""
+        """Start the awake window over and tell the UI how long it lasts.
+        Without a window it stays awake until told to sleep, and there is
+        nothing to count down."""
+        if not self.wake_window:
+            self.awake_until = math.inf
+            return
         self.awake_until = time.monotonic() + self.wake_window
         self._last_window_emit = time.monotonic()
         if self.event_bus:
@@ -611,6 +694,8 @@ class VoiceAssistant:
     def _keep_awake_while_speaking(self):
         """The user is talking: the window must not run out mid-sentence.
         The UI is told at most once a second."""
+        if not self.wake_window:
+            return
         now = time.monotonic()
         self.awake_until = max(self.awake_until, now + self.wake_window)
         if now - self._last_window_emit >= 1.0:
@@ -644,12 +729,13 @@ class VoiceAssistant:
         """
         if dormant:
             audio = decode_audio(audio_path, sampling_rate=16000)
-            woken, remainder = self.wake_detector.heard(audio, self.wake_word)
+            word = self.word_to_wake
+            woken, remainder = self.wake_detector.heard(audio, word)
             if not woken:
                 return
-            self._stay_awake()
+            self._wake()
             if self.event_bus:
-                self.event_bus.emit("wake", {"word": self.wake_word})
+                self.event_bus.emit("wake", {"word": word})
             if len(remainder.split()) < 2:
                 self._chime()
                 return
@@ -817,8 +903,7 @@ class VoiceAssistant:
         text = turn["text"]
         attachments = turn.get("attachments") or []
         # A typed message wakes Iris, as its name does
-        if self.wake_word:
-            self._stay_awake()
+        self._wake()
         # The conversation goes on in the language typed, as if spoken
         self.conversation_language = language.language_of(
             text, self.conversation_language, self.tts_generator.languages()
@@ -852,8 +937,7 @@ class VoiceAssistant:
         user's before it. Iris stays awake for the answer, as after a turn."""
         self._turn_active.set()
         try:
-            if self.wake_word:
-                self._stay_awake()
+            self._wake()
             self._timing = None
             self.chat(GREETING, response_language=self.conversation_language, source=OPENING)
             if self.wake_word and self.awake_until > 0:
@@ -902,13 +986,10 @@ class VoiceAssistant:
             logger.info("Took no turn of the voice's own words: %r", text)
             return
 
-        # "That's all, Iris": back to sleep, nothing to answer
-        if (
-            self.wake_word
-            and self.sleep_word
-            and match_sleep_word(text, self.sleep_word, self.wake_word)
-        ):
-            self._go_to_sleep()
+        # "That's all, Iris": back to sleep, nothing to answer, also with the
+        # wake word off (the persona's then wakes it)
+        if self._is_sleep_word(text):
+            self._sleep_word_said()
             return
 
         # Determine response language: the one the user spoke, if the

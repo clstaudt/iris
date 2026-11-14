@@ -56,6 +56,10 @@ from irisdev.voicetest.wording import normalized
 
 __all__ = ["CONVERSATIONS", "Conversation", "GROUPS", "Turn", "all_conversations", "group"]
 
+# A persona has no sleep word unless it is given one; the conversations that
+# send Iris to sleep by saying one give it this
+SLEEP_WORD = "That's all"
+
 # The everyday conversations ----------------------------------------------------------
 
 CONVERSATIONS = [
@@ -1900,6 +1904,7 @@ def from_a_distance(label: str) -> Conversation:
             Turn(["Okay, that's all, thanks."], expect="sleep", **said),
         ],
         wake_word="Iris",
+        wake_options={"sleep_word": SLEEP_WORD},
         noise=[Noise("fan", rms=0.002)],
         tools={"web": True},
         web={"results": dict(CITY_RESULTS), "delay": 1.0},
@@ -2387,6 +2392,7 @@ WAKE_FORMS = Conversation(
         Turn(["So, Iris, what is the capital of Norway?"], expect="wake", checks=[probe("a wake word inside")]),
     ],
     wake_word="Iris",
+    wake_options={"sleep_word": SLEEP_WORD},
     # A per-word similarity of 0.75 takes "Irish" and "Irises" for "Iris"
     expected_failures=["T2:*", "T3:*", "T15:*"],
     tags=["conversation", "wake word"],
@@ -2486,7 +2492,7 @@ AWAKE_WINDOW = Conversation(
                                      absent=["That's all", "That is all"])]),
     ],
     wake_word="Iris",
-    wake_options={"window": 8.0},
+    wake_options={"window": 8.0, "sleep_word": SLEEP_WORD},
     tools={"web": True},
     web={"results": {"lyon": FOLLOW_UP_RESULTS["lyon"]}, "delay": 6.0},
     stub_rules=[Rule(r"look up|day after", tool=search(topic_query))],
