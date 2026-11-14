@@ -258,6 +258,13 @@ def _take_over(made: Path, folder: Path):
     the one in folder, which keeps its name. What was made of the old sample
     goes first, so the folder never holds a language of one sample beside
     the other's: whatever stops this half way, the voice is one sample's."""
+    logger.info(
+        "Cloning %s%s again (%s): its sample and languages in %s are replaced",
+        PREFIX,
+        folder.name,
+        voice_name(folder),
+        folder,
+    )
     for old in folder.glob("*.safetensors"):
         old.unlink(missing_ok=True)
     (made / SAMPLE_FILE).replace(folder / SAMPLE_FILE)
