@@ -1,7 +1,6 @@
 """The web: Iris searches it for current facts and reads pages."""
 
 import logging
-import time
 
 from iris.plugin import Plugin, PluginContext, Tool
 
@@ -40,16 +39,27 @@ BROWSE_GUIDANCE = (
 )
 
 
-# Tries of a search: the engines ddgs asks (auto), again after a moment,
-# then DuckDuckGo alone. ddgs raises "No results found." both when there are
-# none and when the engines it asked refused (rate limits), which a moment
-# later often answer.
-SEARCH_TRIES = (("auto", 0.0), ("auto", 0.8), ("duckduckgo", 1.5))
+# Tries of a search, each with a fresh DDGS, until one finds something.
+# Measured with ddgs 9.16, most of its engines turn a script away
+# (DuckDuckGo with a bot check or by not answering, Brave with a rate
+# limit, Google with 403, Mojeek with a captcha), which ddgs reports as
+# nothing found. Yahoo answers, but ddgs asks as a browser picked at
+# random, and Yahoo's page for a phone (and for some Safari versions) is
+# one ddgs cannot read: a third to a half of its answers come back empty
+# although Yahoo found plenty. Such an answer comes quickly, and a fresh
+# DDGS is another browser, so Yahoo is asked up to six times, then every
+# engine ddgs has (auto), for a network where others answer.
+SEARCH_TRIES = ("yahoo",) * 6 + ("auto",)
+# Results the model gets
+MAX_RESULTS = 5
+# What ddgs raises when the engines answered and none found anything; any
+# other DDGSException is an engine it could not reach, or that timed out
+NOTHING_FOUND = "No results found."
 
 
 def search(query: str) -> dict:
     """
-    Search the web using DuckDuckGo.
+    Search the web with ddgs's engines.
 
     Args:
         query: Search query string
@@ -57,45 +67,39 @@ def search(query: str) -> dict:
     Returns:
         Dict with 'success', 'result', and 'message' keys. Nothing found is
         a success with "No results found.", so the model says so instead
-        of blaming the service; only a search that could not be made fails.
+        of blaming the service; only a search that could not be made (no
+        try reached an engine) fails.
     """
     logger.info("Searching: %s", query)
-    results, error = [], None
-    for backend, wait in SEARCH_TRIES:
-        time.sleep(wait)
+    error, answered = None, False
+    for backend in SEARCH_TRIES:
         try:
-            results = DDGS().text(query, max_results=5, backend=backend)
-            error = None
-        except DDGSException as e:
-            # Nothing found, or the engines refused: try again
-            logger.warning("Search found nothing (%s, %s): %s", backend, e, query)
-            continue
+            results = DDGS().text(query, max_results=MAX_RESULTS, backend=backend)
         except Exception as e:
-            logger.warning("Search failed (%s): %s", backend, e)
-            error = e
+            if isinstance(e, DDGSException) and str(e) == NOTHING_FOUND:
+                logger.info("Search found nothing (%s): %s", backend, query)
+                answered = True
+            else:
+                logger.warning("Search failed (%s): %s", backend, e)
+                error = e
             continue
         if results:
-            break
-    try:
-        if error is not None and not results:
-            raise error
-        if not results:
-            logger.warning("Search returned no results for: %s", query)
-            return {"success": True, "result": "No results found.", "message": "No results"}
+            logger.info("Search got %d results (%s) for: %s", len(results), backend, query)
+            formatted = [
+                f"- {r.get('title', '')}: {r.get('body', '')} ({r.get('href', '')})" for r in results
+            ]
+            return {
+                "success": True,
+                "result": "\n".join(formatted),
+                "message": f"Search results for: {query}",
+            }
+        answered = True
 
-        logger.info("Search got %d results for: %s", len(results), query)
-        formatted = [
-            f"- {r.get('title', '')}: {r.get('body', '')} ({r.get('href', '')})" for r in results
-        ]
-        return {
-            "success": True,
-            "result": "\n".join(formatted),
-            "message": f"Search results for: {query}",
-        }
-
-    except Exception as e:
-        logger.error("Search failed for '%s': %s", query, e, exc_info=True)
-        return {"success": False, "result": "Search failed", "message": f"Error: {e}"}
+    if error is not None and not answered:
+        logger.error("Search failed for '%s': %s", query, error)
+        return {"success": False, "result": "Search failed", "message": f"Error: {error}"}
+    logger.warning("Search found nothing for: %s", query)
+    return {"success": True, "result": "No results found.", "message": "No results"}
 
 
 class Pages:
