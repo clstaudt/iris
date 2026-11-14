@@ -31,6 +31,11 @@ Event types:
     sleep        {}                                  it fell asleep (window over,
                                                      or the sleep word)
     error        {"message": str, "kind": str}         kind is optional
+    notice       {"message": str, "kind": str,       something to know, not a fault:
+                  "language": str}                   kind "unspoken", replies in
+                                                     the language are shown, not
+                                                     spoken (the voice does not
+                                                     speak it); once per voice
     turn.timing  {"source": "voice"|"text", "total": int,
                   "stages": {"turn_end", "recognition", "reply", "voice": int|None},
                   "components": {stage: str}}

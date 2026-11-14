@@ -6,10 +6,12 @@
   import Pipeline from "./Pipeline.svelte";
   import SetupSwitcher from "./SetupSwitcher.svelte";
   import StageInspector from "./StageInspector.svelte";
+  import Voices from "./Voices.svelte";
 
   const PAGES: { id: SettingsPage; label: string; icon: string }[] = [
     { id: "pipeline", label: "Pipeline", icon: "flow" },
     { id: "personas", label: "Personas", icon: "users" },
+    { id: "voices", label: "Voices", icon: "wave" },
   ];
 
   const page = $derived(PAGES.find((p) => p.id === store.settingsPage) ?? PAGES[0]);
@@ -53,6 +55,8 @@
     <div class="min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4">
       {#if page.id === "pipeline"}
         <Pipeline />
+      {:else if page.id === "voices"}
+        <Voices />
       {:else}
         <Personas />
       {/if}

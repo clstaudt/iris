@@ -42,4 +42,4 @@ Requests are JSON-RPC 2.0; the core's activity arrives as notifications `{"jsonr
 | Plugins and engines | `tools.set`, `plugins.list`, `engines.list` |
 | Debugging | `debug.emit`, `debug.inject_audio` |
 
-Events: `config` (the loaded models and settings, with `tools`, `engines` and `plugins`), `state`, `flags`, `audio.level`, `audio.output`, `chat.user`, `chat.chunk`, `chat.done`, `chat.continued`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `setup.models`, `mic.check`, `memory.updated`, `turn.timing` and `error`. Their payloads are described in `src/iris/events.py`.
+Events: `config` (the loaded models and settings, with `tools`, `engines` and `plugins`), `state`, `flags`, `audio.level`, `audio.output`, `chat.user`, `chat.chunk`, `chat.done`, `chat.continued`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `setup.models`, `mic.check`, `memory.updated`, `turn.timing`, `notice` and `error`. Their payloads are described in `src/iris/events.py`.

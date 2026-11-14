@@ -50,6 +50,8 @@ export interface ChatMessage {
   attachments?: AttachmentInfo[];
   /** Error category, so a resolved warning can be retracted */
   kind?: string;
+  /** A voice being made ready that the conversation waits on, by job id */
+  job?: string;
 }
 
 /** A topic in long-term memory, as listed in the memory panel. */
@@ -218,7 +220,7 @@ const SETUP_KEYS = [
 ] as const;
 
 /** The pages of the settings window. */
-export type SettingsPage = "pipeline" | "personas";
+export type SettingsPage = "pipeline" | "personas" | "voices";
 
 /** What ends a turn: Smart Turn hearing the user has finished, or a silence. */
 export type TurnDetection = "smart_turn" | "silence";
@@ -275,14 +277,68 @@ export interface PersonaSettings {
 export interface VoiceInfo {
   id: string;
   name: string;
+  /** The language it was made for, as shown */
   language: string;
+  /** Whisper codes of the languages it speaks properly */
+  languages?: string[];
+  /** Of those, the ones it is ready to speak now: nothing to download or
+   *  make first */
+  ready?: string[];
+  /** The personas that speak with it */
+  personas?: { id: string; name: string }[];
+  /** A voice cloned here: where its files are, and the languages made of
+   *  its sample so far */
+  cloned?: { folder: string; made: string[] };
+}
+
+/** Making a voice ready to speak a language: a download, then for a cloned
+ *  voice its making, shown wherever it is waited on. */
+export interface VoiceJob {
+  /** engine|voice|language */
+  id: string;
+  engine: SpeechEngine;
+  voice: string;
+  /** "" for a download that serves every language (Kokoro's) */
+  language: string;
+  name: string;
+  personas: string[];
+  /** What started it: "conversation", "languages", "voices", "preview", "clone" */
+  origin: string;
+  state: "queued" | "downloading" | "making" | "ready" | "failed";
+  stage: "download" | "make";
+  /** What downloads: "model", "voice" or "cloning" */
+  what: string;
+  done: number;
+  total: number;
+  /** Nothing has come for a while */
+  stalled: boolean;
+  error: string;
+  /** What goes on, e.g. "Downloading the German voice model" */
+  title: string;
+  /** What it is for, e.g. "Iris will speak German once it's done" */
+  purpose: string;
+}
+
+/** A language Iris talks in. */
+export interface LanguageInfo {
+  /** Whisper code */
+  code: string;
+  name: string;
 }
 
 export interface VoiceOptions {
   engines: Record<SpeechEngine, VoiceInfo[]>;
   /** The engines in the core's order, with their names */
   engine_info?: EngineInfo[];
+  /** The languages Iris talks in, in order */
+  languages?: LanguageInfo[];
   filters: string[];
+  /** Iris's languages, chosen in the app: the voices are made ready for them */
+  chosen?: string[];
+  /** The jobs making voices ready */
+  jobs?: VoiceJob[];
+  /** The voice a persona speaks with once its cloned voice is deleted */
+  fallback?: string;
 }
 
 /** User choices remembered across launches. */
@@ -323,6 +379,9 @@ export interface SavedSettings {
   tts_models_dir?: string;
   /** The first-launch walkthrough has been completed */
   setup_done?: boolean;
+  /** Iris's languages: every persona's voice is made ready for them ahead.
+   *  Conversations are not held to them */
+  languages?: string[];
 }
 
 const SETTINGS_KEY = "iris.settings";
@@ -405,8 +464,13 @@ class IrisStore {
   presence = $state(window.iris?.presence ?? false);
   /** The persona open in the persona editor; "" for a new one */
   editingPersona = $state(loadSettings().persona ?? "iris");
-  /** Each speech engine's voices, for the persona editor */
+  /** Each speech engine's voices, for the persona editor and the Voices page */
   voices = $state<VoiceOptions | null>(null);
+  /** Iris's languages, as chosen; English always */
+  languages = $state<string[]>(loadSettings().languages ?? ["en"]);
+  /** The jobs making voices ready, by id */
+  jobs = $state<Record<string, VoiceJob>>({});
+  private voicesStale: ReturnType<typeof setTimeout> | null = null;
   memoryTopics = $state<MemoryTopic[]>([]);
   /** The walkthrough is shown instead of the conversation: on the first
    *  launch, from the first frame while the core is still booting (nothing
@@ -505,6 +569,10 @@ class IrisStore {
       case "audio.output":
         this.outputLevel = (data.rms as number) ?? 0;
         if (this.previewing && this.outputLevel > 0) this.previewHeard = true;
+        break;
+
+      case "voice.job":
+        this.takeJob(data as unknown as VoiceJob);
         break;
 
       case "chat.user": {
@@ -615,10 +683,25 @@ class IrisStore {
         });
         break;
 
-      // Told in passing, such as the speaker or microphone Iris switched to
-      case "notice":
-        this.messages.push({ role: "system", text: (data.message as string) ?? "", streaming: false });
+      // Something to know that is not a fault, such as replies shown and
+      // not spoken, or the speaker or microphone Iris switched to. It goes
+      // above the reply streaming in, where it stays when the transcript is
+      // rebuilt (the reply comes whole after it)
+      case "notice": {
+        const notice: ChatMessage = {
+          role: "system",
+          text: (data.message as string) ?? "",
+          kind: data.kind as string | undefined,
+          streaming: false,
+        };
+        if (this.streamingIndex !== null) {
+          this.messages.splice(this.streamingIndex, 0, notice);
+          this.streamingIndex++;
+        } else {
+          this.messages.push(notice);
+        }
         break;
+      }
     }
   }
 
@@ -729,7 +812,91 @@ class IrisStore {
   }
 
   async loadVoices() {
-    this.voices = await rpc<VoiceOptions>("persona.voices");
+    const voices = await rpc<VoiceOptions>("voice.list");
+    this.voices = voices;
+    for (const job of voices.jobs ?? []) this.takeJob(job, false);
+  }
+
+  /** A job making a voice ready, as it changes. The conversation shows the
+   *  ones it waits on; once a voice is ready the voices are listed again. */
+  private takeJob(job: VoiceJob, live = true) {
+    this.jobs = { ...this.jobs, [job.id]: job };
+    if (live && job.origin === "conversation") this.showJob(job);
+    if (live && (job.state === "ready" || job.state === "failed") && this.voices) {
+      if (this.voicesStale) clearTimeout(this.voicesStale);
+      this.voicesStale = setTimeout(() => this.loadVoices().catch(() => {}), 300);
+    }
+  }
+
+  /** A job the conversation waits on, as a line of its own that follows it
+   *  in place: its progress, then that it is done (kept as it was said), or
+   *  that it failed, to retry there. Asked for again once done, a new line. */
+  private showJob(job: VoiceJob) {
+    let line: ChatMessage | undefined;
+    for (let i = this.messages.length - 1; i >= 0 && !line; i--) {
+      const message = this.messages[i];
+      if (message.job === job.id && message.kind === "voice.job") line = message;
+    }
+    if (!line) {
+      line = { role: "system", text: job.title, kind: "voice.job", job: job.id, streaming: false };
+      this.messages.push(line);
+      line = this.messages[this.messages.length - 1];
+    }
+    if (job.state === "ready") {
+      line.kind = "voice.job.done";
+      line.text = job.title;
+    }
+  }
+
+  /** The job making a voice ready for a language, if there is one. */
+  jobFor(engine: SpeechEngine, voice: string, language: string): VoiceJob | undefined {
+    return this.jobs[`${engine}|${voice}|${language}`] ?? this.jobs[`${engine}|${voice}|`];
+  }
+
+  /** The jobs running, the ones the conversation waits on first. */
+  get runningJobs(): VoiceJob[] {
+    const running = Object.values(this.jobs).filter((j) => j.state !== "ready" && j.state !== "failed");
+    return running.sort((a, b) => Number(b.origin === "conversation") - Number(a.origin === "conversation"));
+  }
+
+  /** Choose Iris's languages: every persona's voice is made ready for them. */
+  async setLanguages(codes: string[]) {
+    const chosen = [...new Set(["en", ...codes])];
+    this.languages = chosen;
+    this.remember({ languages: chosen });
+    const result = await rpc<{ languages: string[]; jobs: VoiceJob[] }>("languages.set", {
+      languages: chosen,
+    });
+    for (const job of result.jobs ?? []) this.takeJob(job, false);
+    if (this.voices) this.voices.chosen = result.languages;
+  }
+
+  /** Make a voice ready for languages (Iris's own without any). */
+  async makeReady(engine: SpeechEngine, voice: string, languages?: string[]) {
+    const result = await rpc<{ jobs: VoiceJob[] }>("voice.ready", { engine, voice, languages });
+    for (const job of result.jobs ?? []) this.takeJob(job, false);
+  }
+
+  async retryJob(id: string) {
+    const result = await rpc<{ job: VoiceJob | null }>("voice.retry", { id });
+    if (result.job) this.takeJob(result.job, false);
+  }
+
+  /** Rename a cloned voice. Returns an error message, or null once renamed. */
+  async renameVoice(voice: string, name: string): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string }>("voice.rename", { voice, name });
+    if (!result.ok) return result.error ?? "The voice could not be renamed";
+    await this.loadVoices();
+    return null;
+  }
+
+  /** Delete a cloned voice; reassign gives the personas that speak with it
+   *  Kyutai's default voice. Returns an error message, or null once deleted. */
+  async deleteVoice(voice: string, reassign = false): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string }>("voice.delete", { voice, reassign });
+    await this.loadVoices();
+    if (!result.ok) return result.error ?? "The voice could not be deleted";
+    return null;
   }
 
   /** Drop a cloned voice made in the persona editor and not kept (the core
@@ -779,19 +946,43 @@ class IrisStore {
     const voice = `${settings.engine}:${settings.voice}`;
     this.previewing = voice;
     this.previewHeard = false;
-    // A voice that never comes does not stay marked
+    // A voice that never comes does not stay marked, unless it downloads first
     setTimeout(() => {
-      if (this.previewing === voice && !this.previewHeard) this.previewing = null;
+      const downloading = this.runningJobs.some((j) => `${j.engine}:${j.voice}` === voice);
+      if (this.previewing === voice && !this.previewHeard && !downloading) this.previewing = null;
     }, PREVIEW_TIMEOUT);
     let error: string | null = null;
     try {
-      const result = await rpc<{ ok: boolean; error?: string }>("persona.preview", { ...settings });
+      const result = await rpc<{ ok: boolean; error?: string; job?: VoiceJob }>(
+        "persona.preview",
+        { ...settings }
+      );
       if (!result.ok) error = result.error ?? "The voice could not be played";
+      // The voice downloads first, shown on its tile, and plays once it is here
+      if (result.job) this.waitForPreview(result.job, voice);
     } catch (err) {
       error = `The voice could not be played: ${err}`;
     }
     if (error) this.previewing = null;
     return error;
+  }
+
+  /** A preview whose voice downloads first stays marked until it is heard,
+   *  or its download fails. */
+  private waitForPreview(job: VoiceJob, voice: string) {
+    this.takeJob(job, false);
+    const check = () => {
+      if (this.previewing !== voice) return;
+      const now = this.jobs[job.id];
+      if (now?.state === "failed") this.previewing = null;
+      else if (now?.state === "ready") {
+        setTimeout(() => {
+          if (this.previewing === voice && !this.previewHeard) this.previewing = null;
+        }, PREVIEW_TIMEOUT);
+      } else setTimeout(check, 500);
+    };
+    this.previewHeard = false;
+    setTimeout(check, 500);
   }
 
   /** Show Iris as the orb alone, or bring the conversation back. Presence is
@@ -1331,6 +1522,7 @@ class IrisStore {
     else if (saved.whisper_model) options.whisper_model = saved.whisper_model;
     if (saved.turn_detection) options.turn_detection = saved.turn_detection;
     if (saved.tts_models_dir) options.tts_models_dir = saved.tts_models_dir;
+    if (saved.languages) options.languages = saved.languages;
     this.speakReplies = saved.speak_replies ?? true;
     await rpc("assistant.start", options);
   }

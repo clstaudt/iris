@@ -1,8 +1,10 @@
 """Unit tests for multilingual support."""
 
+import json
 import os
 import re
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import numpy as np
@@ -18,172 +20,81 @@ from iris.events import EventBus
 from iris.language import language_of
 from iris.personas import BUILTIN_DIR, Persona
 from iris.tts import (
+    KOKORO_LANGUAGES,
     KOKORO_V1_SYMBOLS,
-    LANGUAGE_VOICE_MAP,
+    KOKORO_VOICES_SPEAK,
     POCKET_LANGUAGES,
     KokoroGenerator,
     PocketGenerator,
     SpeechGenerator,
-    get_language_info,
-    is_language_supported,
     voice_language,
+    voice_languages,
 )
 
 # The languages Iris speaks its replies in, as Whisper codes
 SPOKEN = ("en", "fr", "it", "de", "es", "pt", "nl", "hi", "ja", "zh")
+# The measurements the voices' languages come from
+MEASURED = json.loads((Path(__file__).parent / "fixtures" / "voice_languages.json").read_text())
 
 
 # ---------------------------------------------------------------------------
-# Language mapping helpers
+# Kokoro's languages
 # ---------------------------------------------------------------------------
 
 
-class TestLanguageMap:
-    def test_english_supported(self):
-        assert is_language_supported("en") is True
-
-    def test_french_supported(self):
-        assert is_language_supported("fr") is True
-
-    def test_italian_supported(self):
-        assert is_language_supported("it") is True
-
-    def test_japanese_supported(self):
-        assert is_language_supported("ja") is True
-
-    def test_chinese_supported(self):
-        assert is_language_supported("zh") is True
-
-    def test_german_not_supported(self):
-        assert is_language_supported("de") is False
-
-    def test_unknown_not_supported(self):
-        assert is_language_supported("xx") is False
-
-    def test_get_language_info_returns_code_and_voice(self):
-        info = get_language_info("fr")
-        assert info is not None
-        assert info["code"] == "fr-fr"
-        assert info["default_voice"] == "ff_siwis"
-
-    def test_get_language_info_unsupported_returns_none(self):
-        assert get_language_info("de") is None
-
-    def test_all_map_entries_have_required_keys(self):
-        for lang, info in LANGUAGE_VOICE_MAP.items():
-            assert "code" in info, f"Missing 'code' for {lang}"
-            assert "default_voice" in info, f"Missing 'default_voice' for {lang}"
+def test_kokoro_speaks_no_german_or_dutch():
+    assert set(KOKORO_LANGUAGES) == {"en", "fr", "it", "es", "pt", "hi", "ja", "zh"}
 
 
-# ---------------------------------------------------------------------------
-# KokoroGenerator.generate with language parameter
-# ---------------------------------------------------------------------------
+@patch.object(KokoroGenerator, "_locate_models", return_value=("/m.onnx", "/v.bin"))
+@patch("iris.tts.Kokoro")
+def _kokoro(voice, kokoro, _):
+    kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
+    kokoro.return_value.tokenizer.phonemize.return_value = "fəʊnimz"
+    return KokoroGenerator(voice=voice, speed=1.0), kokoro.return_value
 
 
-class TestGenerateLanguage:
-    """Test that generate() passes the correct lang/voice to kokoro."""
+def test_a_kokoro_voice_speaks_its_own_language_in_itself():
+    generator, kokoro = _kokoro("ff_siwis")
+    os.unlink(generator.generate("Bonjour", language="fr"))
+    assert kokoro.create.call_args.kwargs["lang"] == "fr-fr"
+    assert kokoro.create.call_args.kwargs["voice"] == "ff_siwis"
 
-    @patch.object(KokoroGenerator, "_locate_models")
-    @patch("iris.tts.Kokoro")
-    def test_generate_french_uses_french_voice(self, MockKokoro, mock_locate):
-        mock_locate.return_value = ("/fake/model.onnx", "/fake/voices.bin")
-        mock_kokoro = MockKokoro.return_value
-        mock_kokoro.create.return_value = (__import__("numpy").zeros(100, dtype="float32"), 24000)
 
-        gen = KokoroGenerator(voice="af_bella", speed=1.0)
-        result = gen.generate("Bonjour", language="fr")
+def test_a_language_the_voice_does_not_speak_is_not_said_by_another_voice():
+    """af_bella's French replies were said by ff_siwis, another woman."""
+    generator, kokoro = _kokoro("af_bella")
+    assert generator.generate("Bonjour", language="fr") is None
+    assert generator.generate("こんにちは", language="ja") is None
+    assert generator.generate("Hallo", language="de") is None
+    assert not kokoro.create.called
 
-        assert result is not None
-        mock_kokoro.create.assert_called_once()
-        call_kwargs = mock_kokoro.create.call_args
-        assert call_kwargs.kwargs["lang"] == "fr-fr"
-        assert call_kwargs.kwargs["voice"] == "ff_siwis"
 
-        # Cleanup
-        if result:
-            os.unlink(result)
-
-    @patch.object(KokoroGenerator, "_locate_models")
-    @patch("iris.tts.Kokoro")
-    def test_generate_japanese_uses_japanese_voice(self, MockKokoro, mock_locate):
-        mock_locate.return_value = ("/fake/model.onnx", "/fake/voices.bin")
-        mock_kokoro = MockKokoro.return_value
-        mock_kokoro.create.return_value = (__import__("numpy").zeros(100, dtype="float32"), 24000)
-
-        gen = KokoroGenerator(voice="af_bella", speed=1.0)
-        result = gen.generate("こんにちは", language="ja")
-
-        assert result is not None
-        call_kwargs = mock_kokoro.create.call_args
-        assert call_kwargs.kwargs["lang"] == "ja"
-        assert call_kwargs.kwargs["voice"] == "jf_alpha"
-
-        if result:
-            os.unlink(result)
-
-    @patch.object(KokoroGenerator, "_locate_models")
-    @patch("iris.tts.Kokoro")
-    def test_generate_unsupported_falls_back_to_english(self, MockKokoro, mock_locate):
-        mock_locate.return_value = ("/fake/model.onnx", "/fake/voices.bin")
-        mock_kokoro = MockKokoro.return_value
-        mock_kokoro.create.return_value = (__import__("numpy").zeros(100, dtype="float32"), 24000)
-
-        gen = KokoroGenerator(voice="af_bella", speed=1.0)
-        result = gen.generate("Hallo", language="de")
-
-        assert result is not None
-        call_kwargs = mock_kokoro.create.call_args
-        assert call_kwargs.kwargs["lang"] == "en-us"
-        assert call_kwargs.kwargs["voice"] == "af_bella"  # falls back to instance voice
-
-        if result:
-            os.unlink(result)
-
-    @patch.object(KokoroGenerator, "_locate_models")
-    @patch("iris.tts.Kokoro")
-    def test_generate_english_default(self, MockKokoro, mock_locate):
-        mock_locate.return_value = ("/fake/model.onnx", "/fake/voices.bin")
-        mock_kokoro = MockKokoro.return_value
-        mock_kokoro.create.return_value = (__import__("numpy").zeros(100, dtype="float32"), 24000)
-
-        gen = KokoroGenerator(voice="af_bella", speed=1.0)
-        result = gen.generate("Hello")  # no language arg -> default "en"
-
-        assert result is not None
-        call_kwargs = mock_kokoro.create.call_args
-        assert call_kwargs.kwargs["lang"] == "en-us"
-
-        if result:
-            os.unlink(result)
+def test_english_by_default():
+    generator, kokoro = _kokoro("af_bella")
+    os.unlink(generator.generate("Hello"))
+    assert kokoro.create.call_args.kwargs["lang"] == "en-us"
 
 
 class TestPersonaVoice:
-    """Personas must keep their own voice wherever it can speak the language."""
-
-    @patch.object(KokoroGenerator, "_locate_models")
-    @patch("iris.tts.Kokoro")
-    def _generator(self, voice, MockKokoro, mock_locate):
-        mock_locate.return_value = ("/fake/model.onnx", "/fake/voices.bin")
-        return KokoroGenerator(voice=voice, speed=1.0)
+    """A persona's voice is never swapped for another."""
 
     def test_english_keeps_the_persona_voice(self):
-        assert self._generator("af_sarah").voice_for("en") == ("en-us", "af_sarah")
+        assert _kokoro("af_sarah")[0].code_for("en") == "en-us"
 
     def test_british_voice_gets_british_english(self):
-        assert self._generator("bm_lewis").voice_for("en") == ("en-gb", "bm_lewis")
+        assert _kokoro("bm_lewis")[0].code_for("en") == "en-gb"
 
-    def test_language_the_voice_cannot_speak_uses_its_default(self):
-        assert self._generator("bm_lewis").voice_for("fr") == ("fr-fr", "ff_siwis")
-        assert self._generator("ef_dora").voice_for("it") == ("it", "if_sara")
+    def test_a_language_the_voice_does_not_speak_has_no_code(self):
+        assert _kokoro("bm_lewis")[0].code_for("ja") is None
+        assert _kokoro("bm_lewis")[0].code_for("de") is None
 
-    @pytest.mark.parametrize(
-        "voice",
-        ["ef_dora", "em_alex", "pf_dora", "pm_alex", "hf_alpha", "hm_omega", "ff_siwis",
-         "if_sara", "jf_alpha", "zf_xiaoni"],
-    )  # fmt: skip
-    def test_a_voice_of_another_language_speaks_english_itself(self, voice):
-        """Every Kokoro voice speaks English clearly; the persona keeps it."""
-        assert self._generator(voice).voice_for("en") == ("en-us", voice)
+    @pytest.mark.parametrize("voice", [v for v in KOKORO_VOICES_SPEAK if v != "jf_alpha"])
+    def test_every_kokoro_voice_speaks_english(self, voice):
+        """Whisper heard every one of them word for word in English, but
+        jf_alpha, whose English it took for Japanese one time in two."""
+        assert _kokoro(voice)[0].code_for("en") in ("en-us", "en-gb")
+        assert _kokoro("jf_alpha")[0].code_for("en") is None
 
     @pytest.mark.parametrize(
         "voice, language, code",
@@ -193,58 +104,120 @@ class TestPersonaVoice:
     def test_a_spanish_portuguese_or_hindi_voice_speaks_its_language_itself(
         self, voice, language, code
     ):
-        assert self._generator(voice).voice_for(language) == (code, voice)
+        assert _kokoro(voice)[0].code_for(language) == code
 
     def test_voice_switch_applies_to_the_next_sentence(self):
         """Switching persona swaps generator.voice; the next reply must use it."""
-        gen = self._generator("af_sarah")
-        gen.voice = "bm_lewis"
-        assert gen.voice_for("en") == ("en-gb", "bm_lewis")
+        generator = _kokoro("af_sarah")[0]
+        generator.voice = "bm_lewis"
+        assert generator.code_for("en") == "en-gb"
+
+
+# ---------------------------------------------------------------------------
+# Which languages each voice speaks properly: measured
+# ---------------------------------------------------------------------------
+
+
+def _measured_speaks(engine: str, voice: str, language: str) -> bool:
+    """The rule the measurements are judged by (MEASURED["about"]): the
+    language heard in 3 of 4 of the voice's sentences, and on average about
+    as many of their words as the voices made for the language manage. In
+    the language a voice was made for, its words are enough."""
+    cell = MEASURED[engine][voice][language]
+    bar = MEASURED["bar"][engine].get(language, MEASURED["bar"]["default"])
+    heard = [d == language or p >= 0.5 for d, p in zip(cell["detected"], cell["p"])]
+    own = language == voice_language(engine, voice)
+    words = sum(cell["shares"]) / len(cell["shares"])
+    return (own or sum(heard) / len(heard) >= MEASURED["bar"]["detected"]) and words >= bar
+
+
+@pytest.mark.parametrize("voice", sorted(MEASURED["kokoro"]))
+def test_each_kokoro_voice_speaks_the_languages_measured(voice):
+    measured = {lang for lang in MEASURED["kokoro"][voice] if lang in KOKORO_LANGUAGES
+                and _measured_speaks("kokoro", voice, lang)}
+    assert set(voice_languages("kokoro", voice)) == measured
+
+
+def test_every_kokoro_voice_was_measured_in_every_language_it_has():
+    voices = {v["id"] for v in KokoroGenerator.voices()} or set(KOKORO_VOICES_SPEAK)
+    assert set(KOKORO_VOICES_SPEAK) == set(MEASURED["kokoro"]) >= voices
+    for voice, cells in MEASURED["kokoro"].items():
+        assert set(KOKORO_LANGUAGES) <= set(cells), voice
+
+
+@pytest.mark.parametrize("voice", sorted(MEASURED["kyutai"]))
+def test_the_kyutai_voices_measured_speak_each_language_measured(voice):
+    """Each through the language's model with its own prompt. The voices not
+    measured are taken to do as these do: they are prompts like them."""
+    for language in MEASURED["kyutai"][voice]:
+        speaks = _measured_speaks("kyutai", voice, language)
+        assert speaks == (language in voice_languages("kyutai", voice)), language
+
+
+# Kyutai voices measured in English and another language
+PITCHED = sorted(v for v, cells in MEASURED["kyutai"].items() if "en" in cells and len(cells) > 1)
+
+
+@pytest.mark.parametrize("voice", PITCHED)
+def test_a_kyutai_voice_stays_itself_in_each_language(voice):
+    """Its median pitch in each language is within a third of its English
+    one: Juergen, who spoke Iris's German, has half Anna's pitch."""
+    cells = MEASURED["kyutai"][voice]
+    english = cells["en"]["pitch"]
+    for language in voice_languages("kyutai", voice):
+        if language in cells:
+            assert abs(cells[language]["pitch"] - english) <= english / 3, language
 
 
 # ---------------------------------------------------------------------------
 # Who speaks each language, for each persona shipped with Iris
 # ---------------------------------------------------------------------------
 
-# (engine, voice, the engine's code for the language) a reply in each language
-# is spoken with. Kokoro personas leave German and Dutch, which Kokoro has no
-# voices for, to Pocket TTS; Kyutai personas Hindi, Japanese and Chinese to
-# Kokoro.
-KOKORO_ABROAD = {
-    "fr": ("kokoro", "ff_siwis", "fr-fr"),
-    "it": ("kokoro", "if_sara", "it"),
-    "de": ("kyutai", "juergen", "german"),
-    "es": ("kokoro", "ef_dora", "es"),
-    "pt": ("kokoro", "pf_dora", "pt-br"),
-    "nl": ("kyutai", "daan", "dutch"),
-    "hi": ("kokoro", "hf_alpha", "hi"),
-    "ja": ("kokoro", "jf_alpha", "ja"),
-    "zh": ("kokoro", "zf_xiaoxiao", "cmn"),
-}
-SPOKEN_WITH = {
-    "computer": {"en": ("kokoro", "af_sarah", "en-us"), **KOKORO_ABROAD},
-    "hal": {"en": ("kokoro", "bm_lewis", "en-gb"), **KOKORO_ABROAD},
-    "iris": {
-        "en": ("kyutai", "anna", "english"),
-        "fr": ("kyutai", "estelle", "french"),
-        "it": ("kyutai", "giovanni", "italian"),
-        "de": ("kyutai", "juergen", "german"),
-        "es": ("kyutai", "lola", "spanish"),
-        "pt": ("kyutai", "rafael", "portuguese"),
-        "nl": ("kyutai", "daan", "dutch"),
-        "hi": ("kokoro", "hf_alpha", "hi"),
-        "ja": ("kokoro", "jf_alpha", "ja"),
-        "zh": ("kokoro", "zf_xiaoxiao", "cmn"),
-    },
+# The engine's code for each language: a reply is spoken with the persona's
+# own engine and voice, through it, or not at all
+KOKORO_CODE = {**KOKORO_LANGUAGES}
+POCKET_MODEL = {**POCKET_LANGUAGES}
+SHIPPED = {p.stem: Persona.from_file(p) for p in BUILTIN_DIR.glob("*.yaml")}
+
+
+def spoken_with(persona_id: str, language: str):
+    """(engine, voice, code) a shipped persona's reply in this language is to
+    be spoken with, or None when its voice does not speak the language."""
+    persona = SHIPPED[persona_id]
+    if language not in voice_languages(persona.engine, persona.voice):
+        return None
+    if persona.engine == "kyutai":
+        return "kyutai", persona.voice, POCKET_MODEL[language]
+    code = KOKORO_CODE[language]
+    if code == "en-us" and persona.voice.startswith("b"):
+        code = "en-gb"
+    return "kokoro", persona.voice, code
+
+
+# The languages each shipped persona's voice speaks, pinned
+SHIPPED_SPEAK = {
+    "iris": ["en", "fr", "it", "de", "es", "pt", "nl"],
+    "hal": ["en", "it", "es", "pt", "zh"],
+    "computer": ["en", "es", "pt", "zh"],
 }
 # The language each code of the engines stands for
 CODE_LANGUAGE = {
-    **{info["code"]: lang for lang, info in LANGUAGE_VOICE_MAP.items()},
+    **{code: lang for lang, code in KOKORO_LANGUAGES.items()},
     "en-gb": "en",
     **{model: lang for lang, model in POCKET_LANGUAGES.items()},
 }
 # Kokoro's voices for the languages kokoro-onnx refuses by name
 KOKORO_ESPEAK_VOICES = ["ef_dora", "em_alex", "pf_dora", "pm_alex", "hf_alpha", "hm_omega"]
+
+
+def test_the_persona_editor_is_told_irises_languages_and_each_voices():
+    voices = AssistantController(EventBus()).persona_voices()
+    assert [language["code"] for language in voices["languages"]] == list(SPOKEN)
+    assert voices["languages"][3] == {"code": "de", "name": "German"}
+    kyutai = {voice["id"]: voice for voice in voices["engines"]["kyutai"]}
+    assert kyutai["anna"]["languages"] == SHIPPED_SPEAK["iris"]
+    # The language a voice was made for comes first
+    assert kyutai["juergen"]["languages"][0] == "de"
 
 
 class PreviewPipeline:
@@ -280,14 +253,20 @@ def engines_used():
         phonemize.return_value = "fəʊnimz"
 
         def spoken_with(who: str, language: str, voice: str = "", preview: dict | None = None):
-            pocket.reset_mock()
-            kokoro.reset_mock()
             if voice:
                 generator = SpeechGenerator(who, voice)
             else:
                 persona = Persona.from_file(BUILTIN_DIR / f"{who}.yaml")
                 generator = SpeechGenerator(persona.engine, persona.voice, persona.speed)
-            os.unlink(generator.generate("Text.", language=language, **(preview or {})))
+            pocket.reset_mock()
+            kokoro.reset_mock()
+            path = generator.generate("Text.", language=language, **(preview or {}))
+            if path is None:
+                # Not spoken, and by no other engine
+                assert not kokoro.return_value.create.called
+                assert not model.generate_audio.called
+                return None
+            os.unlink(path)
             if kokoro.return_value.create.called:
                 spoken = kokoro.return_value.create.call_args.kwargs
                 if "phonemes" in spoken and language == "zh":
@@ -298,34 +277,54 @@ def engines_used():
                     assert spoken["phonemes"] is phonemize.return_value
                     return "kokoro", spoken["voice"], phonemize.call_args.args[1]
                 return "kokoro", spoken["voice"], spoken["lang"]
-            # The model loaded last (English loads with a Kyutai persona)
+            # The model the audio came from: loaded now, or with the persona
+            # (English), and the voice its state was made for
             voice = model.get_state_for_audio_prompt.call_args.args[0]
-            return "kyutai", voice, pocket.load_model.call_args.kwargs["language"]
+            loaded = [c.kwargs["language"] for c in pocket.load_model.call_args_list]
+            return "kyutai", voice, loaded[-1] if loaded else "english"
 
         yield spoken_with
 
 
-@pytest.mark.parametrize("persona_id", SPOKEN_WITH)
-@pytest.mark.parametrize("language", SPOKEN)
-def test_each_language_is_spoken_by_its_engine_voice_and_code(engines_used, persona_id, language):
-    assert engines_used(persona_id, language) == SPOKEN_WITH[persona_id][language]
+@pytest.mark.parametrize("persona_id", sorted(SHIPPED))
+def test_each_shipped_persona_speaks_the_languages_pinned(persona_id):
+    persona = SHIPPED[persona_id]
+    assert voice_languages(persona.engine, persona.voice) == SHIPPED_SPEAK[persona_id]
 
 
-@pytest.mark.parametrize("persona_id", SPOKEN_WITH)
+@pytest.mark.parametrize("persona_id", sorted(SHIPPED))
 @pytest.mark.parametrize("language", SPOKEN)
-def test_no_language_is_spoken_with_the_voice_or_code_of_another(
+def test_each_language_is_spoken_with_the_personas_engine_and_voice_or_not_at_all(
     engines_used, persona_id, language
 ):
-    """Italian once came out of the Portuguese model, in its voice: it
-    sounded Portuguese."""
-    engine, voice, code = engines_used(persona_id, language)
-    assert CODE_LANGUAGE[code] == language
-    assert voice_language(engine, voice) == language
+    """Iris's German replies were Juergen's, a man's voice, and HAL's
+    German replies Pocket TTS's: the voice changed mid-conversation."""
+    assert engines_used(persona_id, language) == spoken_with(persona_id, language)
 
 
-@pytest.mark.parametrize("persona_id", SPOKEN_WITH)
-def test_a_language_no_voice_speaks_is_spoken_as_english(engines_used, persona_id):
-    assert engines_used(persona_id, "ru") == SPOKEN_WITH[persona_id]["en"]
+@pytest.mark.parametrize("persona_id", sorted(SHIPPED))
+@pytest.mark.parametrize("language", SPOKEN)
+def test_no_language_is_spoken_with_the_code_of_another(engines_used, persona_id, language):
+    """Italian once came out of the Portuguese model: it sounded Portuguese."""
+    spoken = engines_used(persona_id, language)
+    if spoken is not None:
+        engine, voice, code = spoken
+        assert CODE_LANGUAGE[code] == language
+        assert (engine, voice) == (SHIPPED[persona_id].engine, SHIPPED[persona_id].voice)
+
+
+@pytest.mark.parametrize("persona_id", sorted(SHIPPED))
+def test_a_language_no_voice_speaks_is_not_spoken(engines_used, persona_id):
+    assert engines_used(persona_id, "ru") is None
+
+
+@pytest.mark.parametrize("voice", PocketGenerator.catalogue())
+@pytest.mark.parametrize("language", list(POCKET_LANGUAGES))
+def test_every_kyutai_voice_speaks_each_language_through_its_model(engines_used, voice, language):
+    """Or not at all, a language it does not speak properly."""
+    model = POCKET_LANGUAGES[language]
+    spoken = ("kyutai", voice, model) if language in voice_languages("kyutai", voice) else None
+    assert engines_used("kyutai", language, voice=voice) == spoken
 
 
 @pytest.mark.parametrize("voice", KOKORO_ESPEAK_VOICES)
@@ -333,7 +332,7 @@ def test_a_persona_on_a_spanish_portuguese_or_hindi_voice_is_heard(engines_used,
     """These voices were never heard: kokoro-onnx refused their languages,
     and af_bella spoke in their place, in English as in their own language."""
     language = voice_language("kokoro", voice)
-    code = LANGUAGE_VOICE_MAP[language]["code"]
+    code = KOKORO_LANGUAGES[language]
     assert engines_used("kokoro", language, voice=voice) == ("kokoro", voice, code)
     assert engines_used("kokoro", "en", voice=voice) == ("kokoro", voice, "en-us")
 
@@ -378,14 +377,16 @@ def test_kokoro_onnx_is_only_given_languages_it_takes_and_phonemes_for_the_rest(
         kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
         phonemize = kokoro.return_value.tokenizer.phonemize
         phonemize.return_value = "fəʊnimz"
-        generator = KokoroGenerator(voice="af_sarah")
-        for language, info in LANGUAGE_VOICE_MAP.items():
+        for language, code in KOKORO_LANGUAGES.items():
+            # A voice that speaks the language
+            voice = next(v for v, spoken in KOKORO_VOICES_SPEAK.items() if language in spoken)
+            generator = KokoroGenerator(voice=voice)
             kokoro.reset_mock()
             os.unlink(generator.generate("Text.", language=language))
             spoken = kokoro.return_value.create.call_args.kwargs
             assert spoken["lang"] in SUPPORTED_LANGUAGES
-            if info["code"] not in SUPPORTED_LANGUAGES:
-                phonemize.assert_called_once_with("Text.", info["code"])
+            if code not in SUPPORTED_LANGUAGES:
+                phonemize.assert_called_once_with("Text.", code)
                 assert spoken["phonemes"] is phonemize.return_value
             if language == "zh":
                 # Kokoro's own Mandarin phonemes, the English word in it by espeak
@@ -460,7 +461,8 @@ def test_mandarin_is_given_as_kokoros_own_phonemes():
 )  # fmt: skip
 def test_kokoro_is_given_numbers_in_words_where_it_reads_them_as_english(language, text, read):
     """kokoro-onnx reads numbers with English rules first: "16,50" was 1650."""
-    assert _given_to_kokoro(text, language, "bm_lewis")["text"] == read
+    voice = {"fr": "ff_siwis", "it": "if_sara"}[language]
+    assert _given_to_kokoro(text, language, voice)["text"] == read
 
 
 def test_pocket_tts_is_given_numbers_in_words_except_in_english():
@@ -478,47 +480,53 @@ def test_pocket_tts_is_given_numbers_in_words_except_in_english():
             assert said == ("Am siebenundzwanzigsten November um zehn Uhr." if language == "de" else text)
 
 
-def test_each_pocket_language_has_a_voice_of_its_own():
+def test_each_pocket_language_has_a_voice_made_for_it():
     for lang, model in POCKET_LANGUAGES.items():
         if lang != "en":
             assert voice_language("kyutai", DEFAULT_VOICE_FOR_LANGUAGE[model]) == lang
 
 
-def test_borrowed_pocket_tts_loads_only_the_model_of_its_language():
+def test_a_kokoro_personas_german_loads_no_pocket_tts():
     with patch("iris.tts.TTSModel") as pocket, patch("iris.tts.Kokoro"), patch.object(
         KokoroGenerator, "_locate_models", return_value=("/m.onnx", "/v.bin")
     ):
-        pocket.load_model.return_value.sample_rate = 24000
-        pocket.load_model.return_value.generate_audio.return_value = torch.zeros(100)
         generator = SpeechGenerator("kokoro", "af_sarah")
-        os.unlink(generator.generate("Guten Tag.", language="de"))
+        assert generator.generate("Guten Tag.", language="de") is None
+        generator.prepare_language("de")
 
-        assert pocket.load_model.call_args_list == [call(language="german")]
+        assert not pocket.load_model.called
 
 
 def test_the_voice_for_a_language_is_prepared_once_ahead_of_its_first_reply():
-    """A Kyutai persona's first Japanese reply waited three seconds for
-    Kokoro and espeak's Japanese to load; prepared while the model thinks,
-    they are ready when the reply comes."""
+    """A first German reply waited seconds for Pocket TTS's German model
+    and the voice's prompt for it; prepared while the model thinks, they
+    are ready when the reply comes. A language the voice does not speak
+    has nothing to prepare, and no other engine loads for it."""
     with patch("iris.tts.TTSModel") as pocket, patch("iris.tts.Kokoro") as kokoro, patch.object(
         KokoroGenerator, "_locate_models", return_value=("/m.onnx", "/v.bin")
     ):
-        pocket.load_model.return_value.sample_rate = 24000
-        pocket.load_model.return_value.generate_audio.return_value = torch.zeros(100)
+        model = pocket.load_model.return_value
+        model.sample_rate = 24000
+        model.generate_audio.return_value = torch.zeros(100)
         kokoro.return_value.create.return_value = (np.zeros(100, dtype="float32"), 24000)
         generator = SpeechGenerator("kyutai", "alba")
-        assert not kokoro.called
-
-        generator.prepare_language("ja")
-        generator.prepare_language("ja")
-        [spoken] = kokoro.return_value.create.call_args_list
-        assert (spoken.kwargs["voice"], spoken.kwargs["lang"]) == ("jf_alpha", "ja")
 
         generator.prepare_language("de")
-        assert call(language="german") in pocket.load_model.call_args_list
-        # A language no voice speaks has nothing to prepare
+        generator.prepare_language("de")
+        loaded = [call(language="english"), call(language="german")]
+        assert pocket.load_model.call_args_list == loaded
+        assert model.get_state_for_audio_prompt.call_args_list == [call("alba")]
+        assert model.generate_audio.call_count == 1
+
+        generator.prepare_language("ja")
         generator.prepare_language("ru")
-        assert kokoro.return_value.create.call_count == 1
+        assert not kokoro.called
+        assert model.generate_audio.call_count == 1
+
+        # Another voice is prepared anew
+        generator.voice = "anna"
+        generator.prepare_language("de")
+        assert model.get_state_for_audio_prompt.call_args_list == [call("alba"), call("anna")]
 
 
 # ---------------------------------------------------------------------------

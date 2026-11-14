@@ -57,6 +57,8 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "iris-e2e-"));
 // Where the test breaks the room's speaker, as the core's stand-in reads it
 // (irisdev/e2e_core.py)
 const AUDIO_FAULTS = path.join(home, ".e2e-audio.json");
+// The steps keep setups' homes under that name; the core's is this one
+const coreHome = home;
 const realHome = os.homedir();
 const python =
   process.env.E2E_PYTHON ??
@@ -2080,7 +2082,9 @@ try {
     await voiceDone();
     await checkHeard(since, "the cloned voice's tile after a restart");
     // Back to a voice of the catalogue: the clone stays, to switch back to
-    await page.locator(".voice button.pick", { hasText: exactly(shippedVoice.replace(/^./, (c) => c.toUpperCase())) }).click();
+    // By its name alone: the tile shows the languages it speaks beside it
+    const shippedName = exactly(shippedVoice.replace(/^./, (c) => c.toUpperCase()));
+    await page.locator(".voice button.pick", { has: page.locator(".name", { hasText: shippedName }) }).click();
     await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
     await until("her own voice", () => config().tts_voice === shippedVoice, 10_000);
     const voices = await rpc("persona.voices");
@@ -2112,6 +2116,195 @@ try {
     }
     check(after.mic_on === before.mic_on, "the microphone is not as it was");
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
+  });
+
+  // ------------------------------------------------------------- the Voices page
+
+  const voicesPage = async () => {
+    await openSettings("Voices");
+    await page.locator('section[aria-label="Kyutai"]').waitFor({ timeout: 15_000 });
+  };
+  const tile = (voice) => page.locator(`.tile[data-voice="${voice}"]`);
+  const card = (voice) => page.locator(`article.cloned[data-voice="${voice}"]`);
+  const library = async () => (await rpc("voice.list")).engines;
+  const cloneOf = async (name) => (await library()).kyutai.find((v) => v.cloned && v.name === name);
+  const voiceFilter = page.locator('[role="group"][aria-label="Voices that speak"]');
+  /** A voice was heard: the core reported its level, and the virtual
+   *  speaker played it where the core tells (e2e.speaker) */
+  const heard = async (since, timeout = 90_000) => {
+    await eventAfter("audio.output", since, (data) => data.rms > 0, timeout);
+    await voiceDone();
+    const played = await rpc("e2e.speaker", { since }).catch(() => null);
+    if (played) check(played.seconds > 0, "the speaker played nothing");
+  };
+  let sample = null;
+
+  await step("voices: every voice is listed by engine, with its languages and the personas that speak with it", async () => {
+    await voicesPage();
+    const engines = await library();
+    for (const [engine, label] of [["kyutai", "Kyutai"], ["kokoro", "Kokoro"]]) {
+      const catalogue = (engines[engine] ?? []).filter((v) => !v.cloned);
+      if (!catalogue.length) continue;
+      const shown = await page.locator(`section[aria-label="${label}"] .tile`).count();
+      check(shown === catalogue.length, `${label}: ${shown} tiles for ${catalogue.length} voices`);
+    }
+    // Each with the personas that speak with it, and the languages it speaks
+    const iris = await rpc("persona.get", { id: "iris" });
+    check(iris.engine === "kyutai", `Iris speaks with ${iris.engine}`);
+    const irisVoice = page.locator(`[data-voice="${iris.voice}"]`);
+    check((await irisVoice.locator(".user").allInnerTexts()).includes("Iris"), "Iris is not shown with her voice");
+    const alba = engines.kyutai.find((v) => v.id === "alba");
+    const codes = (await tile("alba").locator(".codes").innerText()).toLowerCase().split(/\s+/);
+    check(codes.join() === alba.languages.join(), `Alba shows ${codes} for ${alba.languages}`);
+    // A persona opens in the persona editor, which leads back here
+    await irisVoice.locator(".user", { hasText: "Iris" }).click();
+    await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
+    await page.locator("button.manage", { hasText: "Manage voices" }).click();
+    await page.locator('section[aria-label="Kyutai"]').waitFor({ timeout: 5000 });
+  });
+
+  await step("voices: the language filter shows the voices that speak every language picked", async () => {
+    await voicesPage();
+    const all = Object.values(await library()).flat();
+    const speaking = (...codes) => all.filter((v) => codes.every((c) => v.languages.includes(c)));
+    const visible = () => page.locator(".tile, article.cloned").count();
+    await voiceFilter.locator("button", { hasText: "French" }).click();
+    await until("the French voices", async () => (await visible()) === speaking("fr").length);
+    check(!(await tile("alba").count()), "Alba, who does not speak French, is shown");
+    check(await tile("anna").count(), "Anna, who speaks French, is hidden");
+    // A language no voice that speaks French speaks cannot be added
+    check(await voiceFilter.locator("button", { hasText: "Japanese" }).isDisabled(), "Japanese can be added");
+    await voiceFilter.locator("button", { hasText: "Hindi" }).click();
+    await until("the voices that speak French and Hindi", async () => (await visible()) === speaking("fr", "hi").length);
+    check(!(await page.locator('section[aria-label="Kyutai"]').count()), "Kyutai is shown without a voice");
+    await voiceFilter.locator("button", { hasText: "Hindi" }).click();
+    await voiceFilter.locator("button", { hasText: "French" }).click();
+    await until("every voice", async () => (await visible()) === all.length);
+  });
+
+  await step("voices: a voice plays from its tile, through the editor's preview, and reaches the speaker", async () => {
+    await voicesPage();
+    const voice = (await library()).kyutai.find((v) => !v.cloned && v.id !== "anna" && v.ready.includes(v.languages[0]));
+    check(voice, "no voice of Kyutai is ready");
+    const since = Date.now();
+    await tile(voice.id).locator(".s-play").click();
+    await tile(voice.id).locator(".s-play.playing").waitFor({ timeout: 2000 });
+    await heard(since);
+    const asked = calls.find((c) => c.at >= since && c.method === "persona.preview");
+    check(asked?.params.voice === voice.id && asked.params.name === voice.name, `the preview asked for ${JSON.stringify(asked?.params)}`);
+    await tile(voice.id).locator(".s-play.playing").waitFor({ state: "detached", timeout: 5000 });
+  });
+
+  await step("voices: a voice is cloned here for the languages picked, plays, and is renamed", async () => {
+    await voicesPage();
+    huggingFace({ token: CLONE_TOKEN, terms: true });
+    sample = sample ?? speechSample();
+    await page.getByRole("button", { name: "Clone a voice" }).click();
+    await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    // English, and French picked besides
+    const languagesFor = page.locator('[aria-label="Languages to make the voice for"]');
+    check((await languagesFor.locator("button", { hasText: "English" }).getAttribute("aria-pressed")) === "true", "English is not picked");
+    await languagesFor.locator("button", { hasText: "French" }).click();
+    const since = Date.now();
+    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+    // Cloned once it is made for every language picked
+    await page.getByRole("button", { name: "Clone a voice" }).waitFor({ timeout: 180_000 });
+    const made = await until("the voice", () => cloneOf("Cloned voice"), 10_000);
+    check(made.cloned.made.includes("en") && made.cloned.made.includes("fr"), `the voice is made for ${made.cloned.made}`);
+    check(events.some((e) => e.at >= since && e.type === "voice.job" && e.data.voice === made.id && e.data.language === "fr"), "making it for French was not shown");
+    // It says the preview, then its name is to be given
+    await heard(since);
+    const name = card(made.id).locator('input[aria-label="Name of the voice"]');
+    await until("the name to be asked for", () => name.evaluate((input) => document.activeElement === input));
+    await name.fill("Testa");
+    await name.press("Enter");
+    await until("the new name", async () => (await cloneOf("Testa"))?.id === made.id);
+    const again = Date.now();
+    await card(made.id).locator(".s-play").click();
+    await heard(again);
+  });
+
+  await step("voices: a cloned voice is cloned again from a new sample, and keeps its name", async () => {
+    await voicesPage();
+    const before = await cloneOf("Testa");
+    check(before, "no voice named Testa");
+    const folder = path.join(coreHome, ".iris", "voices", before.id.split(":")[1]);
+    const old = fs.statSync(path.join(folder, "sample.wav")).mtimeMs;
+    await card(before.id).getByRole("button", { name: "Clone again" }).click();
+    await card(before.id).locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    const since = Date.now();
+    await card(before.id).locator('input[aria-label="Audio file"]').setInputFiles({ name: "again.wav", mimeType: "audio/wav", buffer: sample });
+    await card(before.id).locator(".clone").waitFor({ state: "detached", timeout: 180_000 });
+    await heard(since);
+    const after = await cloneOf("Testa");
+    check(after?.id === before.id, `cloned again, the voice is ${after?.id}`);
+    check(fs.statSync(path.join(folder, "sample.wav")).mtimeMs > old, "the sample was not replaced");
+    check(after.cloned.made.includes("en"), `made for ${after.cloned.made}`);
+  });
+
+  await step("voices: a cloned voice no persona speaks with is deleted", async () => {
+    await voicesPage();
+    const voice = await cloneOf("Testa");
+    const folder = path.join(coreHome, ".iris", "voices", voice.id.split(":")[1]);
+    await card(voice.id).getByRole("button", { name: "Delete" }).click();
+    await card(voice.id).getByRole("button", { name: "Confirm delete" }).click();
+    await card(voice.id).waitFor({ state: "detached", timeout: 10_000 });
+    check(!(await cloneOf("Testa")) && !fs.existsSync(folder), "the voice is still there");
+  });
+
+  await step("voices: a voice a persona speaks with asks before it is deleted, and the persona speaks with Anna", async () => {
+    // A voice made of the sample as the cloning steps make one, and Iris
+    // speaking with it
+    const data = sample.toString("base64");
+    check((await rpc("voice.sample", { data, name: "sample.wav" })).ok, "the sample was refused");
+    const made = await rpc("voice.clone", { name: "Guarded" });
+    check(made.ok, made.error);
+    const voice = made.voice.id;
+    const iris = await rpc("persona.get", { id: "iris" });
+    await rpc("persona.save", { ...iris, voice });
+    await until("Iris on the voice", () => config().tts_voice === voice, 15_000);
+    await openSettings("Pipeline");
+    await voicesPage();
+    await card(voice).locator(".user", { hasText: "Iris" }).waitFor({ timeout: 5000 });
+    await card(voice).getByRole("button", { name: "Delete" }).click();
+    const guard = card(voice).locator(".guard");
+    await guard.getByText("Iris speaks with this voice, and will speak with Anna.").waitFor({ timeout: 5000 });
+    await guard.getByRole("button", { name: "Cancel" }).click();
+    check(await card(voice).count(), "the voice went without being deleted");
+    await card(voice).getByRole("button", { name: "Delete" }).click();
+    await card(voice).locator(".guard").getByRole("button", { name: "Delete" }).click();
+    await card(voice).waitFor({ state: "detached", timeout: 10_000 });
+    await until("Iris on Anna", () => config().tts_voice === "anna", 15_000);
+    check((await rpc("persona.get", { id: "iris" })).voice === "anna", "Iris was not saved with Anna");
+  });
+
+  await step("voices: a reply its voice is not ready for is shown with its download, and spoken once the voice is ready", async () => {
+    // Italian's model is not here: the stand-in downloads it slowly
+    huggingFace({ hidden: ["italian"] });
+    check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
+    const question = "Reply only in Italian, in one short sentence: what is the capital of Italy?";
+    const since = await ask(question);
+    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const job = await eventAfter("voice.job", since, (data) => data.voice === "anna" && data.language === "it", 30_000);
+    check(job.data.origin === "conversation", `the download was started by ${job.data.origin}`);
+    // The reply is shown at once, and the download in the conversation and
+    // under the orb, with its progress, while it goes on
+    await page.locator(".bubble.assistant").last().waitFor();
+    const line = page.locator(`.job[data-job="${job.data.id}"]`);
+    await line.waitFor({ timeout: 5000 });
+    await until("its progress", async () => / MB, \d+ %/.test(await line.innerText()), 10_000);
+    check((await line.innerText()).includes("Iris will speak Italian once it's done"), `the line says: ${await line.innerText()}`);
+    check(await page.locator(`[data-job="${job.data.id}"]`).count() >= 2, "the download is not shown under the orb");
+    const ready = await eventAfter("voice.job", since, (data) => data.id === job.data.id && data.state === "ready", 60_000);
+    // Nothing was spoken of the reply meanwhile
+    const sounded = events.filter((e) => e.type === "audio.output" && e.data.rms > 0 && e.at >= done.at && e.at <= ready.at);
+    check(!sounded.length, `${sounded.length} audible moments while the voice was not ready`);
+    await page.getByText("Anna's voice is ready for Italian").waitFor({ timeout: 5000 });
+    // The next reply in Italian is spoken, and reaches the speaker
+    const next = await ask(question);
+    const timing = await eventAfter("turn.timing", next, () => true, 180_000);
+    check(timing.data.components.voice === "kyutai:anna", `spoken by ${timing.data.components.voice}`);
+    await heard(next);
   });
 
   await step("nothing went wrong in the page", async () => {
