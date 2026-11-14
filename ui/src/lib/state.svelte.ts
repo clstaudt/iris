@@ -153,9 +153,14 @@ export interface AssistantConfig {
   speak_replies?: boolean;
   barge_in?: boolean;
   barge_in_available?: boolean;
+  /** The word listened for; "" while the wake word is off */
   wake_word?: string;
+  /** Seconds Iris stays awake after a turn; 0 when it sleeps only when told */
   wake_window?: number;
+  /** The persona's sleep word; "" for none */
   sleep_word?: string;
+  /** The persona's wake word, also while the wake word is off */
+  persona_wake_word?: string;
   stt_model_path?: string;
   tts_models_dir?: string;
   /** Whether Smart Turn or a silence ends a turn */
@@ -258,6 +263,10 @@ export interface PersonaSettings {
   /** "" for none */
   audio_filter: string;
   description: string;
+  /** Its name unless it is given another */
+  wake_word?: string;
+  /** "" for none */
+  sleep_word?: string;
   /** Shipped with Iris: it can be reset once edited, but not deleted */
   shipped?: boolean;
   edited?: boolean;
@@ -287,9 +296,16 @@ export interface SavedSettings {
   tools?: Record<string, boolean>;
   ollama_host?: string;
   amnesia?: boolean;
-  /** "" means the wake word is off */
-  wake_word?: string;
+  /** The wake word switch; the words are each persona's own */
+  wake_on?: boolean;
+  /** Seconds Iris stays awake after a turn, kept while sleeping when idle
+   *  is off */
   wake_window?: number;
+  /** Whether Iris falls asleep after wake_window without a turn */
+  idle_sleep?: boolean;
+  /** Before the words were each persona's: one wake word ("" for off) and
+   *  one sleep word for all, which go to the persona in use */
+  wake_word?: string;
   sleep_word?: string;
   /** Whisper size chosen in the pipeline; none for the best this computer runs */
   whisper_model?: string;
@@ -310,6 +326,8 @@ export interface SavedSettings {
 }
 
 const SETTINGS_KEY = "iris.settings";
+/** Seconds Iris stays awake after a turn unless another time is chosen */
+export const DEFAULT_WAKE_WINDOW = 30;
 /** How long a voice preview may take to start (an engine's first load), in ms */
 const PREVIEW_TIMEOUT = 60_000;
 /** Turn timings kept, as many as the core keeps */
@@ -937,20 +955,33 @@ class IrisStore {
     await this.loadMemory();
   }
 
-  /** Listen only for this word until addressed; "" listens to everything. */
-  async setWakeWord(word: string) {
-    saveSettings({ wake_word: word });
+  /** Listen only for the persona's wake word until addressed, or (off) to
+   *  everything. */
+  async setWake(on: boolean) {
+    saveSettings({ wake_on: on });
     this.awakeUntil = null;
-    await rpc("wake.set", { word });
+    await rpc("wake.set", { on });
   }
 
-  /** How long Iris stays awake after a turn, and its sleep word. */
-  async setWakeOptions(options: { window?: number; sleep_word?: string }) {
-    saveSettings({
-      ...(options.window !== undefined ? { wake_window: options.window } : {}),
-      ...(options.sleep_word !== undefined ? { sleep_word: options.sleep_word } : {}),
-    });
-    await rpc("wake.options", options);
+  /** A persona's wake word or sleep word (the current persona's without an
+   *  id). An empty wake word is its name again, an empty sleep word none. */
+  async setPersonaWords(words: { wake_word?: string; sleep_word?: string }, id?: string) {
+    const result = await rpc<{ ok: boolean; personas?: string[]; names?: Record<string, string> }>(
+      "persona.words",
+      { ...(id ? { id } : {}), ...words }
+    );
+    if (result.ok && result.personas) {
+      this.personas = result.personas;
+      this.personaNames = result.names ?? {};
+    }
+  }
+
+  /** Whether Iris falls asleep when nothing was said for a while, and after
+   *  how long; the time is kept while it is off. */
+  async setIdleSleep(on: boolean, window = loadSettings().wake_window ?? DEFAULT_WAKE_WINDOW) {
+    saveSettings({ idle_sleep: on, wake_window: window });
+    if (!on) this.awakeUntil = null;
+    await rpc("wake.options", { window: on ? window : 0 });
   }
 
   /** Point Iris at model folders it should use as they are ("" = download).
@@ -1191,7 +1222,8 @@ class IrisStore {
     saveSettings({
       persona: choices.persona,
       input_device: choices.input_device,
-      wake_word: choices.wake_word,
+      wake_on: choices.wake_on,
+      idle_sleep: choices.idle_sleep,
       tools: choices.tools,
       stt_model_path: choices.stt_model_path,
       tts_models_dir: choices.tts_models_dir,
@@ -1205,6 +1237,13 @@ class IrisStore {
     if (host) this.keepServer(host);
     this.persona = choices.persona;
     this.needsSetup = false;
+    // The words are the persona's, which Iris starts with
+    if (choices.wake_word !== undefined) {
+      await this.setPersonaWords(
+        { wake_word: choices.wake_word, sleep_word: choices.sleep_word },
+        choices.persona
+      ).catch((err) => console.error("[store] persona.words failed:", err));
+    }
     await this.startAssistant({ greet });
     this.loadLists();
   }
@@ -1228,7 +1267,16 @@ class IrisStore {
       if (choices.persona !== this.persona) await this.setPersona(choices.persona);
       const device = this.inputDevices.find((d) => d.name === choices.input_device);
       if (device && device.name !== config?.input_device) await this.setMic(device.index);
-      if (choices.wake_word !== (config?.wake_word ?? "")) await this.setWakeWord(choices.wake_word);
+      if (choices.wake_word !== undefined) {
+        await this.setPersonaWords(
+          { wake_word: choices.wake_word, sleep_word: choices.sleep_word },
+          choices.persona
+        );
+      }
+      if (choices.wake_on !== !!this.config?.wake_word) await this.setWake(choices.wake_on);
+      if (choices.idle_sleep !== (this.config?.wake_window ?? DEFAULT_WAKE_WINDOW) > 0) {
+        await this.setIdleSleep(choices.idle_sleep);
+      }
       for (const [id, on] of Object.entries(choices.tools)) {
         const tool = this.config?.tools?.[id];
         if (tool?.available && !!tool.enabled !== on) await this.setTool(id, on);
@@ -1251,6 +1299,7 @@ class IrisStore {
    *  walkthrough). */
   private async startAssistant({ restore = true, greet = false } = {}) {
     this.started = true;
+    await this.adoptWakeWords();
     const saved = loadSettings();
     const options: Record<string, unknown> = greet ? { greet: true } : {};
     if (!restore) options.restore_thread = false;
@@ -1261,15 +1310,36 @@ class IrisStore {
     if (saved.tools) options.tools = saved.tools;
     if (saved.ollama_host) options.ollama_host = saved.ollama_host;
     if (saved.amnesia) options.amnesia = true;
-    if (saved.wake_word) options.wake_word = saved.wake_word;
-    if (saved.wake_window) options.wake_window = saved.wake_window;
-    if (saved.sleep_word !== undefined) options.sleep_word = saved.sleep_word;
+    if (saved.wake_on) options.wake_on = true;
+    if (saved.idle_sleep === false) options.wake_window = 0;
+    else if (saved.wake_window) options.wake_window = saved.wake_window;
     if (saved.stt_model_path) options.stt_model_path = saved.stt_model_path;
     else if (saved.whisper_model) options.whisper_model = saved.whisper_model;
     if (saved.turn_detection) options.turn_detection = saved.turn_detection;
     if (saved.tts_models_dir) options.tts_models_dir = saved.tts_models_dir;
     this.speakReplies = saved.speak_replies ?? true;
     await rpc("assistant.start", options);
+  }
+
+  /** The wake word and sleep word kept for all personas before each had
+   *  its own become those of the persona in use, once, so they go on
+   *  working; the switch is whether there was a wake word. */
+  private async adoptWakeWords() {
+    const saved = loadSettings();
+    if (saved.wake_word === undefined && saved.sleep_word === undefined) return;
+    // The switch holds whatever becomes of the words
+    saveSettings({ wake_on: saved.wake_on ?? !!saved.wake_word?.trim() });
+    try {
+      const result = await rpc<{ ok: boolean }>("wake.adopt", {
+        persona: saved.persona ?? "iris",
+        wake_word: saved.wake_word ?? "",
+        sleep_word: saved.sleep_word ?? "",
+      });
+      // Tried again at the next start, should it fail
+      if (result.ok) saveSettings({ wake_word: undefined, sleep_word: undefined });
+    } catch (err) {
+      console.error("[store] wake.adopt failed:", err);
+    }
   }
 
   private loadLists() {

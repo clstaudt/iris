@@ -570,8 +570,13 @@ try {
     for (const name of ["Camera", "Screen", "Web search"]) {
       await page.getByRole("switch", { name }).waitFor({ timeout: 10_000 });
     }
+    // The persona's words: its name, and no sleep word
+    const word = page.locator('input[aria-label="Wake word"]');
+    await until("the persona's name as its wake word", async () => (await word.inputValue()) === "Iris");
+    check((await page.locator("#walkthrough-sleep-word").inputValue()) === "", "a sleep word is set");
+    check(await page.getByRole("switch", { name: "Sleep when idle" }).isDisabled(), "sleeping when idle is offered without a wake word");
     await page.getByRole("switch", { name: "Wake word" }).click();
-    await page.locator('input[aria-label="Wake word"]').fill(WAKE_WORD);
+    await word.fill(WAKE_WORD);
     await footerButton("Continue").click();
   });
 
@@ -592,6 +597,8 @@ try {
     // Typed turns need no microphone; the greeting keeps Iris awake meanwhile
     await rpc("mic.set", { on: false });
     check(started.data.wake_word === WAKE_WORD, `the wake word is ${started.data.wake_word}`);
+    check(started.data.wake_window === 30, `Iris falls asleep after ${started.data.wake_window} s`);
+    check((await rpc("persona.get", { id: "iris" })).wake_word === WAKE_WORD, "the wake word is not Iris's own");
     check(started.data.llm_model === model, `the model is ${started.data.llm_model}`);
     check(started.data.persona === "Iris", `the persona is ${started.data.persona}`);
     if (serverHost) check(started.data.ollama_host === serverHost, `the server is ${started.data.ollama_host}`);
@@ -742,6 +749,7 @@ try {
     await until("the chain to show Off", async () => (await stageValue("Wake word")) === "Off");
     await toggle.click();
     await until("the chain to show the word", async () => (await stageValue("Wake word")) === WAKE_WORD);
+    check((await settings()).wake_on === true, "the switch is not kept");
   });
 
   await step("voice: the persona's voice plays", async () => {
@@ -798,10 +806,13 @@ try {
   await step("personas: a new one is created, becomes active, and is deleted", async () => {
     await page.locator("button.s-btn", { hasText: "New persona" }).click();
     await page.locator("input.title").fill("Testa");
+    // Its wake word is its name
+    check((await page.locator("#persona-wake-word").inputValue()) === "Testa", "the wake word does not follow the name");
     await page.locator("#persona-personality").fill("You are Testa, made by a test.");
     await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
     await until("Testa in the list", () => page.locator("button.card", { hasText: "Testa" }).count());
     await until("Testa to be active", () => config().persona === "Testa", 60_000);
+    check(config().wake_word === "Testa", `Testa is woken by ${config().wake_word}`);
     check(await page.locator("button.card", { hasText: "Testa" }).locator(".s-chip").count(), "not marked active");
     await page.locator("button.s-btn.danger", { hasText: "Delete" }).click();
     await page.locator("button.s-btn.danger", { hasText: "Confirm delete" }).click();
@@ -822,7 +833,7 @@ try {
   });
 
   await step("personas: a voice plays while the microphone listens, and is not taken for the user", async () => {
-    await rpc("wake.set", { word: "" });
+    await rpc("wake.set", { on: false });
     await rpc("mic.set", { on: true });
     await until("Iris to listen", () => rpc("app.info").then((info) => info.state === "listening"), 15_000);
     const since = Date.now();
@@ -831,7 +842,7 @@ try {
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 30_000);
     await new Promise((resolve) => setTimeout(resolve, 6000));
     await rpc("mic.set", { on: false });
-    await rpc("wake.set", { word: WAKE_WORD });
+    await rpc("wake.set", { on: true });
     const heard = events.find((e) => e.at >= since && e.type === "chat.user");
     check(!heard, `the preview was heard as the user saying: ${heard?.data.text}`);
     // And once more: the voice still plays after the first preview
@@ -865,6 +876,12 @@ try {
     await page.locator("button.s-btn.danger", { hasText: "Reset" }).click();
     await page.locator("button.s-btn.danger", { hasText: "Confirm reset" }).click();
     await until("her shipped voice", () => config().tts_voice === shipped, 10_000);
+    // And her name as the wake word; the test's own is set in the editor again
+    await until("her name as the wake word", () => config().wake_word === "Iris", 10_000);
+    await until("Iris's form", async () => (await page.locator("#persona-wake-word").inputValue()) === "Iris");
+    await page.locator("#persona-wake-word").fill(WAKE_WORD);
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("the test's wake word", () => config().wake_word === WAKE_WORD, 10_000);
   });
 
   await step("setups: a new one, renamed, switched and deleted", async () => {
@@ -1638,8 +1655,12 @@ try {
     await sleepWord.fill("Goodnight");
     await sleepWord.press("Enter");
     await until("the sleep word", () => config().sleep_word === "Goodnight");
+    check((await rpc("persona.get", { id: "iris" })).sleep_word === "Goodnight", "the sleep word is not Iris's own");
     await inspector.locator("#stay-awake").selectOption("60");
     await until("a minute awake", () => config().wake_window === 60);
+    await setSwitch("Sleep when idle", false, () => config().wake_window === 0);
+    check(await inspector.locator("#stay-awake").isDisabled(), "the time can be chosen while Iris does not sleep when idle");
+    await setSwitch("Sleep when idle", true, () => config().wake_window === 60);
     await openStage("Turn end");
     await option("Silence").click();
     await until("silence", () => config().turn_detection === "silence");
@@ -1652,6 +1673,9 @@ try {
     await openStage("Persona");
     await option("HAL").click();
     await until("HAL", () => config().persona === "HAL", 60_000);
+    // HAL's words: his name, and no sleep word
+    check(config().wake_word === "HAL", `HAL is woken by ${config().wake_word}`);
+    check(config().sleep_word === "", `HAL sleeps by ${config().sleep_word}`);
     // Remembered before amnesia: what was typed
     await openStage("Memory");
     await setSwitch("Remember conversations", false, () => config().amnesia === true);
@@ -1660,8 +1684,14 @@ try {
 
     const restarted = Date.now();
     await restartCore();
-    // Launched once more without the microphone
+    // Launched once more without the microphone, and with the wake word kept
+    // as it was before each persona had its own: it goes to the persona in use
     await page.evaluate(() => sessionStorage.setItem("e2e.mic", "denied"));
+    await page.evaluate(() => {
+      const kept = JSON.parse(localStorage.getItem("iris.settings") ?? "{}");
+      delete kept.wake_on;
+      localStorage.setItem("iris.settings", JSON.stringify({ ...kept, wake_word: "HAL" }));
+    });
     await page.reload();
     const started = await until("the app to start Iris", () =>
       calls.find((c) => c.at >= restarted && c.method === "assistant.start"), 30_000);
@@ -1673,15 +1703,18 @@ try {
       speak_replies: false,
       ...(bargeIn ? { barge_in: false } : {}),
       amnesia: true,
-      wake_word: WAKE_WORD,
+      wake_on: true,
       wake_window: 60,
-      sleep_word: "Goodnight",
+      wake_word: undefined,
+      sleep_word: undefined,
       turn_detection: "silence",
     };
     for (const [key, value] of Object.entries(expected)) {
       check(options[key] === value, `Iris was started with ${key} ${JSON.stringify(options[key])}, not ${JSON.stringify(value)}`);
     }
     check(options.tools?.web === false, `Iris was started with the tools ${JSON.stringify(options.tools)}`);
+    const migrated = await settings();
+    check(migrated.wake_on === true && !("wake_word" in migrated), `the wake word was kept as ${JSON.stringify(migrated)}`);
     await eventAfter("config", restarted, () => true, 180_000);
     await rpc("mic.set", { on: false });
     const now = config();
@@ -1719,6 +1752,8 @@ try {
     await openStage("Persona");
     await option("Iris").click();
     await until("Iris", () => config().persona === "Iris", 60_000);
+    check(config().wake_word === WAKE_WORD, `Iris is woken by ${config().wake_word}`);
+    check(config().sleep_word === "Goodnight", `Iris sleeps by ${config().sleep_word}`);
     await openStage("Output");
     await setSwitch("Speak replies", true, () => config().speak_replies === true);
     if (bargeIn) await setSwitch("Interrupt by voice", true, () => config().barge_in === true);
@@ -1749,7 +1784,7 @@ try {
     const greeting = await eventAfter("chat.done", since, () => true, 180_000);
     check(greeting.data.text.trim().length > 0, "the greeting is empty");
     const after = config();
-    for (const key of ["llm_model", "ollama_host", "wake_word", "persona"]) {
+    for (const key of ["llm_model", "ollama_host", "wake_word", "sleep_word", "wake_window", "persona"]) {
       check(after[key] === before[key], `${key} changed from ${before[key]} to ${after[key]}`);
     }
     check(after.mic_on === before.mic_on, "the microphone is not as it was");

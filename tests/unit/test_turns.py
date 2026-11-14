@@ -37,6 +37,7 @@ def _bare_assistant():
     assistant.hold_event = threading.Event()
     assistant.speak_replies = True
     assistant.wake_word = None
+    assistant.sleep_word = None
     assistant.conversation_language = "en"
     assistant._reply_language = "en"
     assistant._turn_active = threading.Event()

@@ -8,14 +8,13 @@
  *  background from their step on, while the user goes on with the rest. */
 
 import { onEvent, rpc } from "./bridge";
-import { loadSettings, store, type PersonaSettings } from "./state.svelte";
+import { DEFAULT_WAKE_WINDOW, loadSettings, store, type PersonaSettings } from "./state.svelte";
 
 export const STEPS = ["welcome", "server", "models", "microphone", "voice", "extras", "ready"] as const;
 export type Step = (typeof STEPS)[number];
 
 /** The model setup offers first, when the server has it: small, and it calls tools */
 export const PREFERRED_MODEL = "qwen3:1.7b";
-export const DEFAULT_WAKE_WORD = "Iris";
 /** Plugins the walkthrough does not offer: memory is always on, and going to
  *  sleep comes with the wake word */
 const UNOFFERED_TOOLS = new Set(["memory", "sleep"]);
@@ -53,6 +52,8 @@ export interface PersonaOption {
   speed: number;
   audio_filter: string;
   description: string;
+  wake_word: string;
+  sleep_word: string;
 }
 
 export interface ToolOption {
@@ -70,8 +71,13 @@ export interface WalkthroughChoices {
   persona: string;
   /** The microphone by name; undefined for the system's */
   input_device?: string;
+  wake_on: boolean;
+  /** The persona's words; undefined leaves them (they were not shown) */
+  wake_word?: string;
   /** "" for none */
-  wake_word: string;
+  sleep_word?: string;
+  /** Whether Iris falls asleep when nothing was said for a while */
+  idle_sleep: boolean;
   tools: Record<string, boolean>;
   stt_model_path: string;
   tts_models_dir: string;
@@ -156,8 +162,13 @@ class Walkthrough {
 
   // -- wake word and tools ---------------------------------------------
   wakeOn = $state(false);
-  wakeWord = $state(DEFAULT_WAKE_WORD);
+  /** The persona's words, as edited here */
+  wakeWord = $state("");
+  sleepWord = $state("");
+  idleSleep = $state(true);
   tools = $state<ToolOption[]>([]);
+  /** The persona whose words the fields hold */
+  private wordsOf: string | null = null;
 
   /** What Skip puts back on the step shown */
   private undo: (() => void) | null = null;
@@ -183,6 +194,11 @@ class Walkthrough {
       else if (model.state === "downloading" && model.total) done += model.done;
     }
     return total ? Math.min(1, done / total) : 1;
+  }
+
+  /** The name of the persona chosen, its wake word unless given another */
+  get personaName(): string {
+    return this.personas.find((p) => p.id === this.persona)?.name ?? "Iris";
   }
 
   get downloadsFailed(): boolean {
@@ -229,9 +245,11 @@ class Walkthrough {
     this.heard = false;
 
     this.persona = store.persona || saved.persona || "iris";
-    const word = config ? config.wake_word : saved.wake_word;
-    this.wakeOn = !!word;
-    this.wakeWord = word || DEFAULT_WAKE_WORD;
+    this.wakeOn = config ? !!config.wake_word : !!(saved.wake_on ?? saved.wake_word);
+    this.idleSleep = config
+      ? (config.wake_window ?? DEFAULT_WAKE_WINDOW) > 0
+      : saved.idle_sleep !== false;
+    this.wordsOf = null;
     this.tools = [];
 
     if (!firstRun) {
@@ -320,11 +338,14 @@ class Walkthrough {
       this.undo = () => (this.persona = persona);
       this.loadPersonas();
     } else if (step === "extras") {
-      const { wakeOn, wakeWord } = this;
+      this.takePersonaWords();
+      const { wakeOn, idleSleep } = this;
       const tools = this.tools.map((tool) => ({ ...tool }));
       this.undo = () => {
         this.wakeOn = wakeOn;
-        this.wakeWord = wakeWord;
+        this.idleSleep = idleSleep;
+        this.wordsOf = null;
+        this.takePersonaWords();
         if (tools.length) this.tools = tools;
       };
       this.loadTools();
@@ -333,8 +354,14 @@ class Walkthrough {
 
   private leave(step: Step) {
     if (step === "microphone") this.closeMicrophone();
+    // The persona chosen brings its words, unless they are its already
+    if (step === "voice") this.takePersonaWords();
+    // A wake word left empty is the persona's name
+    if (step === "extras" && !this.wakeWord.trim()) this.wakeWord = this.personaName;
     // A wake word needs a small model of its own, fetched with the others
-    if (step === "extras" && this.firstRun && this.wakeOn) this.download();
+    if (step === "extras" && this.firstRun && (this.wakeOn || this.sleepWord.trim())) {
+      this.download();
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -440,7 +467,9 @@ class Walkthrough {
       whisper_model: loadSettings().whisper_model,
       stt_path: this.sttPath || undefined,
       tts_dir: this.ttsDir || undefined,
-      wake_word: this.wakeOn ? this.wakeWord.trim() || DEFAULT_WAKE_WORD : undefined,
+      // The sleep word wakes Iris by the wake word, on or off
+      wake_word:
+        this.wakeOn || this.sleepWord.trim() ? this.wakeWord.trim() || this.personaName : undefined,
     });
     this.downloads = result.models;
   }
@@ -539,6 +568,8 @@ class Walkthrough {
         speed: p.speed,
         audio_filter: p.audio_filter,
         description: p.description,
+        wake_word: p.wake_word || p.name,
+        sleep_word: p.sleep_word ?? "",
       }));
     if (!this.personas.some((p) => p.id === this.persona) && this.personas.length) {
       this.persona = this.personas[0].id;
@@ -552,6 +583,17 @@ class Walkthrough {
   // ---------------------------------------------------------------------
   // Wake word and tools
   // ---------------------------------------------------------------------
+
+  /** Show the words of the persona chosen, unless they are shown already:
+   *  another persona chosen since brings its own. */
+  private async takePersonaWords() {
+    if (!this.personas.length) await this.loadPersonas().catch(() => {});
+    if (this.wordsOf === this.persona) return;
+    const persona = this.personas.find((p) => p.id === this.persona);
+    this.wakeWord = persona?.wake_word || this.personaName;
+    this.sleepWord = persona?.sleep_word ?? "";
+    this.wordsOf = this.persona;
+  }
 
   async loadTools() {
     if (this.tools.length) return;
@@ -587,7 +629,11 @@ class Walkthrough {
       ...(this.server !== null && this.model ? { llm_model: this.model } : {}),
       persona: this.persona,
       ...(device ? { input_device: device.name } : {}),
-      wake_word: this.wakeOn ? this.wakeWord.trim() || DEFAULT_WAKE_WORD : "",
+      wake_on: this.wakeOn,
+      ...(this.wordsOf === this.persona
+        ? { wake_word: this.wakeWord.trim() || this.personaName, sleep_word: this.sleepWord.trim() }
+        : {}),
+      idle_sleep: this.idleSleep,
       tools: Object.fromEntries(this.tools.map((tool) => [tool.id, tool.on])),
       stt_model_path: this.sttPath,
       tts_models_dir: this.ttsDir,

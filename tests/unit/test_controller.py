@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 
 from iris.audio import AudioPlayer
+from iris.assistant import VoiceAssistant
 from iris.controller import AssistantController, silent_microphone_message
 from iris.events import EventBus
 from iris.memory import MemoryStore
@@ -57,6 +58,9 @@ class FakeAssistant:
         # Loaded: recognition and the voice
         self.transcriber = object()
         self.voice_error = None
+        self.persona = kwargs.get("persona")
+        self.wake_word = kwargs.get("wake_word")
+        self.sleep_word = kwargs.get("sleep_word")
 
     def run_loop(self):
         while not self.stop_event.is_set():
@@ -64,6 +68,8 @@ class FakeAssistant:
 
     def set_wake_word(self, word):
         self.wake_word = word or None
+
+    set_persona_words = VoiceAssistant.set_persona_words
 
     def config_info(self):
         return {
