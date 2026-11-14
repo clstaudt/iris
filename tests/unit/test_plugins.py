@@ -11,7 +11,7 @@ from iris import engines, plugins
 from iris.engines import RecognitionEngine, SpeechEngine
 from iris.plugin import Plugin, PluginContext
 from iris.tools import Tools
-from iris.tts import SpeechGenerator, engine_speaks, list_voices
+from iris.tts import SpeechGenerator, list_voices
 
 CLOCK = '''
     import time
@@ -137,8 +137,12 @@ def test_an_installed_plugin_registers_its_engines(tmp_path, monkeypatch):
     assert loaded.plugins[-1].source == "package iris-voices"
 
     assert "whisperer" in engines.speech_engines()
-    assert engine_speaks("whisperer", "de") and not engine_speaks("whisperer", "fr")
-    assert list_voices("whisperer") == [{"id": "soft", "name": "Soft", "language": "English"}]
+    assert engines.voice_speaks("whisperer", "soft", "de")
+    assert not engines.voice_speaks("whisperer", "soft", "fr")
+    # Each of its voices speaks its languages, unless it tells otherwise
+    assert list_voices("whisperer") == [
+        {"id": "soft", "name": "Soft", "language": "English", "languages": ["en", "de"]}
+    ]
     generator = SpeechGenerator("whisperer", "soft")
     assert generator.generate("Hallo", language="de") == "/tmp/whisper.wav"
     assert generator._engine("whisperer").spoken == [("Hallo", "de", "soft")]
@@ -169,10 +173,12 @@ def test_an_engine_id_that_is_taken_fails_the_plugin_whole(tmp_path, monkeypatch
 def test_the_built_in_engines_are_registered():
     assert list(engines.speech_engines())[:2] == ["kyutai", "kokoro"]
     assert "whisper" in engines.recognition_engines()
-    # Kyutai borrows Kokoro's voice for Japanese, Kokoro Kyutai's for German
-    assert engines.speaking_engine("kyutai", "ja") == ("kokoro", "jf_alpha")
-    assert engines.speaking_engine("kokoro", "de") == ("kyutai", "juergen")
-    assert engines.speaking_engine("kokoro", "ru") is None
+    # Iris talks in the languages of all its voices together; no engine
+    # lends another its voices
+    assert engines.speech_languages() == set("en fr it de es pt nl hi ja zh".split())
+    assert not engines.voice_speaks("kyutai", "anna", "ja")
+    assert not engines.voice_speaks("kokoro", "af_heart", "de")
+    assert not engines.voice_speaks("nobody", "anna", "en")
 
 
 def test_the_example_plugin_loads_from_its_folder(monkeypatch):

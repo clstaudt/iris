@@ -45,13 +45,15 @@ from iris.speech_models import KOKORO_MB, WHISPER_MB
 from iris.tts import (
     KOKORO_MODEL_FILE,
     KOKORO_VOICES_FILE,
+    LANGUAGE_NAMES,
     SpeechGenerator,
     SpeechPipeline,
-    engine_speaks,
     find_kokoro_models,
+    in_order,
     kokoro_files_in,
     list_voices,
     voice_language,
+    voice_languages,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,7 +104,7 @@ VISION_MODEL = "qwen3-vl:8b"
 # Events that make up the visible conversation. Kept here so a UI that
 # reloads (or attaches late) can rebuild its transcript; streaming chunks are
 # left out because chat.done carries the full reply.
-TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "chat.continued", "tool.use", "error")
+TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "chat.continued", "tool.use", "notice", "error")
 TRANSCRIPT_LIMIT = 500
 # Turn timings kept for the app
 TIMINGS_KEPT = 20
@@ -1161,8 +1163,9 @@ class AssistantController:
         generator.engine = persona.engine
         generator.voice = persona.voice
         generator.speed = persona.speed
-        # A language the new voice cannot speak is not kept up
-        if not generator.speaks(assistant.conversation_language):
+        # The conversation keeps its language, also one the new voice does
+        # not speak: its replies in it are shown
+        if assistant.conversation_language not in generator.languages():
             assistant.conversation_language = "en"
         assistant.player.audio_filter = (
             get_filter(persona.audio_filter) if persona.audio_filter else None
@@ -1182,7 +1185,8 @@ class AssistantController:
 
     def persona_voices(self) -> dict:
         """For the persona editor: the speech engines (names, whether they
-        take a speed) and their voices, and the audio filters."""
+        take a speed) and their voices, each with the languages it speaks
+        properly; the languages Iris talks in; and the audio filters."""
         models_dir = self.assistant.tts_generator.models_dir if self.assistant else None
         registered = engines.speech_engines()
         return {
@@ -1190,6 +1194,10 @@ class AssistantController:
             "engine_info": [
                 {"id": engine.id, "name": engine.name, "takes_speed": engine.takes_speed}
                 for engine in registered.values()
+            ],
+            "languages": [
+                {"code": code, "name": LANGUAGE_NAMES.get(code, code)}
+                for code in in_order(engines.speech_languages())
             ],
             "filters": list(AUDIO_FILTERS),
         }
@@ -1287,10 +1295,11 @@ class AssistantController:
         engine, voice = settings.get("engine"), settings.get("voice")
         if engine not in engines.speech_engines() or not voice:
             return {"ok": False, "error": "No voice chosen"}
-        # In the voice's own language, when Iris can speak it with that engine
+        # In the voice's own language, or the first it speaks
         language = voice_language(engine, voice)
-        if not engine_speaks(engine, language):
-            language = "en"
+        spoken = voice_languages(engine, voice)
+        if language not in spoken:
+            language = "en" if "en" in spoken or not spoken else spoken[0]
         name = (settings.get("name") or "").strip() or "Iris"
         line = PREVIEW_LINES.get(language, PREVIEW_LINES["en"]).format(name=name)
         sound = {

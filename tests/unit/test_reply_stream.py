@@ -347,7 +347,9 @@ def test_neither_the_voice_nor_the_transcript_gets_any_markup():
     assistant.speak_replies = True
     assistant.conversation = conversation
     assistant.speech_pipeline = Voice()
-    assistant.tts_generator = SimpleNamespace(languages=lambda: frozenset({"en"}))
+    assistant.tts_generator = SimpleNamespace(
+        languages=lambda: frozenset({"en"}), speaks=lambda language: True
+    )
     assistant.interrupt_event = threading.Event()
     assistant.suspend_event = threading.Event()
     assistant.tools = MagicMock()
@@ -363,6 +365,43 @@ def test_neither_the_voice_nor_the_transcript_gets_any_markup():
     assert assistant.speech_pipeline.spoken == ["Let me look that up for you.", "Hm.Mars is red."]
 
 
+def test_a_reply_its_voice_does_not_speak_is_shown_and_the_user_told_once():
+    """HAL's voice speaks no German. Pocket TTS's German voice said HAL's
+    German replies: the voice changed in the middle of the conversation.
+    The replies are shown, and nothing else speaks them."""
+    conversation, _ = _typed(
+        [[say("Mir geht es gut, danke. Und dir?")], [say("Das freut mich sehr.")]]
+    )
+    assistant = object.__new__(VoiceAssistant)
+    assistant.event_bus = MagicMock()
+    assistant.speak_replies = True
+    assistant.conversation = conversation
+    assistant.speech_pipeline = Voice()
+    assistant.tts_generator = SimpleNamespace(
+        engine="kokoro", voice="bm_lewis", languages=lambda: frozenset({"en", "de"}),
+        speaks=lambda language: language == "en", prepare_language=lambda language: None,
+    )
+    assistant.persona = SimpleNamespace(name="HAL")
+    assistant._unspoken_told = set()
+    assistant._timing = None
+    assistant.interrupt_event = threading.Event()
+    assistant.suspend_event = threading.Event()
+    assistant.tools = MagicMock()
+    assistant.status_manager = MagicMock(status_lock=threading.Lock())
+
+    assistant.chat("Wie geht es dir?", response_language="de")
+    assistant.chat("Gut!", response_language="de")
+
+    events = [c.args for c in assistant.event_bus.emit.call_args_list]
+    assert assistant.speech_pipeline.spoken == []
+    shown = [data["text"] for kind, data in events if kind == "chat.done"]
+    assert shown == ["Mir geht es gut, danke. Und dir?", "Das freut mich sehr."]
+    told = [data for kind, data in events if kind == "notice"]
+    assert [(n["kind"], n["language"]) for n in told] == [("unspoken", "de")]
+    # Kept as it was read
+    assert conversation.conversation_history[-1]["content"] == "Das freut mich sehr."
+
+
 class PreparingVoice:
     """A speech generator that notes the languages it is asked to prepare."""
 
@@ -371,6 +410,9 @@ class PreparingVoice:
 
     def languages(self):
         return frozenset({"en", "ja"})
+
+    def speaks(self, language):
+        return True
 
     def prepare_language(self, language):
         self.prepared.append(language)
