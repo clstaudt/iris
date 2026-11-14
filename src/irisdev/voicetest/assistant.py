@@ -288,12 +288,16 @@ class IrisUnderTest:
         self.assistant.conversation.language = "en"
 
     def seed_memory(self, topics: list[dict]):
-        """Topics remembered from earlier conversations ({title, gist,
+        """Topics remembered from earlier in the thread ({title, gist,
         summary}), as filing leaves them: listed in the memory index, their
-        turns long out of the recent conversation."""
+        turns long out of the recent conversation. A new thread is stored
+        for them."""
         store = self.assistant.memory.store
+        conversation = self.assistant.conversation
+        if conversation.thread is None:
+            conversation.open_thread(store.create_thread(conversation.persona.id))
         for topic in topics:
-            store.create_topic(topic["title"], topic["gist"], topic["summary"])
+            store.create_topic(conversation.thread, topic["title"], topic["gist"], topic["summary"])
 
     def speaking(self) -> bool:
         """Whether it is still speaking its reply (optional for an assistant

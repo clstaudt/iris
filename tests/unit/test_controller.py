@@ -230,22 +230,26 @@ def test_history_keeps_the_visible_conversation():
 
 
 def test_the_conversation_is_shown_again_after_a_restart(tmp_path):
-    """With memory, one conversation goes on across launches: a new core
-    shows its recent turns again, oldest first, as the app shows turns, and
-    keeps them for a window that reloads; notes to the model stay out."""
+    """With memory, a thread goes on across launches: a new core shows its
+    recent turns again, oldest first, as the app shows turns, and keeps them
+    for a window that reloads; notes to the model stay out."""
     earlier = MemoryStore(tmp_path / "memory.db")
-    earlier.add_turn("user", "My sister's cat is called Pepper.", "voice")
-    earlier.add_turn("assistant", "Pepper is a good name for a cat.")
-    earlier.add_turn("system", "You are now HAL.")
-    earlier.add_turn("user", "明日の東京の天気は？", "text")
-    earlier.add_turn("assistant", "晴れです。")
+    thread = earlier.create_thread("iris")
+    earlier.add_turn(thread, "user", "My sister's cat is called Pepper.", "voice")
+    earlier.add_turn(thread, "assistant", "Pepper is a good name for a cat.")
+    earlier.add_turn(thread, "system", "You are now HAL.")
+    earlier.add_turn(thread, "user", "明日の東京の天気は？", "text")
+    earlier.add_turn(thread, "assistant", "晴れです。")
 
     bus = EventBus()
     shown = []
     bus.subscribe(lambda kind, data: shown.append((kind, data)))
     controller = AssistantController(bus)
     # The new core reads what the last one wrote
-    controller.assistant = SimpleNamespace(memory=SimpleNamespace(store=MemoryStore(tmp_path / "memory.db")))
+    controller.assistant = SimpleNamespace(
+        memory=SimpleNamespace(store=MemoryStore(tmp_path / "memory.db")),
+        conversation=SimpleNamespace(thread=thread),
+    )
     controller._restore_thread()
 
     assert shown == [
@@ -272,9 +276,10 @@ def test_the_conversation_before_a_restart_comes_back_marked_as_such():
         {"role": "system", "text": "a note", "source": None},
         {"role": "assistant", "text": "Hello", "source": None},
     ]
-    store = type("Store", (), {"recent_turns": lambda self: turns})()
-    memory = type("Memory", (), {"store": store})()
-    controller.assistant = type("Assistant", (), {"memory": memory})()
+    store = SimpleNamespace(recent_turns=lambda thread: turns)
+    controller.assistant = SimpleNamespace(
+        memory=SimpleNamespace(store=store), conversation=SimpleNamespace(thread=1)
+    )
     controller._restore_thread()
 
     events = controller.history()["events"]

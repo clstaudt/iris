@@ -244,8 +244,9 @@ class VoiceAssistant:
                 turns share one conversation and never overlap.
             speak_replies: If False, replies are streamed as text only
             ollama_host: Ollama server URL; None follows OLLAMA_HOST
-            memory: Keep one continuous conversation in long-term memory
-                (~/.iris/memory.db, or IRIS_MEMORY_DB), remembered by topic
+            memory: Keep the conversation in long-term memory (~/.iris/memory.db,
+                or IRIS_MEMORY_DB), in threads remembered by topic; it starts
+                in a new thread (see ConversationManager.open_thread)
             wake_word: If set, listen only for this word until addressed, and
                 fall dormant again after wake_window seconds without a turn
                 (the persona's, which the controller passes when it is on)
@@ -407,6 +408,10 @@ class VoiceAssistant:
             host=ollama_host,
             memory=self.memory,
         )
+        # The app lists the threads anew once one was talked in
+        self.conversation.on_stored = lambda: self.event_bus and self.event_bus.emit(
+            "threads.changed", {}
+        )
         if self.memory:
             self.memory.start()
 
@@ -467,6 +472,7 @@ class VoiceAssistant:
         what the user chose."""
         return PluginContext(
             memory=self.memory.store if self.memory else None,
+            thread=lambda: self.conversation.thread,
             sleep=self._end_conversation,
             can_sleep=lambda: bool(self.wake_word),
         )
@@ -495,6 +501,8 @@ class VoiceAssistant:
             "ollama_url": effective_host(self.conversation.host),
             "memory": self.memory is not None,
             "amnesia": self.conversation.amnesia,
+            # The thread the conversation is in; None for a new one
+            "thread": self.conversation.thread,
             "wake_word": self.wake_word or "",
             "wake_window": self.wake_window,
             "sleep_word": self.sleep_word or "",

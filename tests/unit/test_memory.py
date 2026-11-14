@@ -19,27 +19,32 @@ def store():
     return MemoryStore(":memory:")
 
 
-def _exchange(store, user, assistant, source="voice"):
-    store.add_turn("user", user, source)
-    store.add_turn("assistant", assistant)
+@pytest.fixture
+def thread(store):
+    return store.create_thread("iris")
+
+
+def _exchange(store, thread, user, assistant, source="voice"):
+    store.add_turn(thread, "user", user, source)
+    store.add_turn(thread, "assistant", assistant)
 
 
 # -- store -------------------------------------------------------------------
 
 
-def test_recent_turns_fit_the_budget_oldest_first(store):
+def test_recent_turns_fit_the_budget_oldest_first(store, thread):
     for n in range(10):
-        _exchange(store, f"question {n} " + "x" * 80, f"answer {n} " + "y" * 80)
-    turns = store.recent_turns(budget=100)
+        _exchange(store, thread, f"question {n} " + "x" * 80, f"answer {n} " + "y" * 80)
+    turns = store.recent_turns(thread, budget=100)
     assert turns[-1]["text"].startswith("answer 9")
     assert [t["id"] for t in turns] == sorted(t["id"] for t in turns)
     assert sum(len(t["text"]) // 4 for t in turns) <= 100
 
 
-def test_unfiled_turns_group_into_exchanges_without_notes(store):
-    _exchange(store, "Plan a Lisbon trip", "Three days: Alfama, Belém, Sintra.")
-    store.add_turn("system", "You are now HAL.")
-    _exchange(store, "Thanks!", "You're welcome.")
+def test_unfiled_turns_group_into_exchanges_without_notes(store, thread):
+    _exchange(store, thread, "Plan a Lisbon trip", "Three days: Alfama, Belém, Sintra.")
+    store.add_turn(thread, "system", "You are now HAL.")
+    _exchange(store, thread, "Thanks!", "You're welcome.")
     exchanges = store.unfiled_exchanges()
     assert len(exchanges) == 2
     assert (
@@ -49,36 +54,38 @@ def test_unfiled_turns_group_into_exchanges_without_notes(store):
     assert len(exchanges[0].turn_ids) == 2
 
 
-def test_search_finds_words_anywhere_and_names_the_topic(store):
-    topic = store.create_topic("Lisbon trip", "3 days, Sintra", "Trip in late October.")
-    _exchange(store, "Which neighborhood in Lisbon?", "Stay in Chiado, near Rossio station.")
-    store.mark_filed([t["id"] for t in store.recent_turns()], topic)
-    _exchange(store, "Tomatoes before the frost?", "No, after the last frost.")
+def test_search_finds_words_anywhere_and_names_the_topic(store, thread):
+    topic = store.create_topic(thread, "Lisbon trip", "3 days, Sintra", "Trip in late October.")
+    _exchange(
+        store, thread, "Which neighborhood in Lisbon?", "Stay in Chiado, near Rossio station."
+    )
+    store.mark_filed(thread, [t["id"] for t in store.recent_turns(thread)], topic)
+    _exchange(store, thread, "Tomatoes before the frost?", "No, after the last frost.")
 
-    hits = store.search("what was that station called? (Rossio)")
+    hits = store.search(thread, "what was that station called? (Rossio)")
     assert hits and hits[0]["title"] == "Lisbon trip"
     assert "[Rossio]" in hits[0]["snippet"]
     # Unfiled turns are searchable too
-    assert store.search("frost")[0]["topic_id"] is None
-    assert store.search("???") == []
+    assert store.search(thread, "frost")[0]["topic_id"] is None
+    assert store.search(thread, "???") == []
 
 
-def test_forget_removes_the_topic_its_turns_and_their_search_entries(store):
-    topic = store.create_topic("Secret", "surprise party", "A surprise party for Ana.")
-    _exchange(store, "Plan a surprise party for Ana", "Saturday at eight.")
-    store.mark_filed([t["id"] for t in store.recent_turns()], topic)
+def test_forget_removes_the_topic_its_turns_and_their_search_entries(store, thread):
+    topic = store.create_topic(thread, "Secret", "surprise party", "A surprise party for Ana.")
+    _exchange(store, thread, "Plan a surprise party for Ana", "Saturday at eight.")
+    store.mark_filed(thread, [t["id"] for t in store.recent_turns(thread)], topic)
     store.forget(topic)
     assert store.topic(topic) is None
-    assert store.recent_turns() == []
-    assert store.search("surprise") == []
+    assert store.recent_turns(thread) == []
+    assert store.search(thread, "surprise") == []
 
 
-def test_index_lists_recent_topics_first_within_budget(store, monkeypatch):
+def test_index_lists_recent_topics_first_within_budget(store, thread, monkeypatch):
     clock = iter(range(1000, 2000))
     monkeypatch.setattr(memory_module.time, "time", lambda: next(clock))
     for n in range(30):
-        store.create_topic(f"Topic {n}", "a gist " * 5, "summary")
-    lines = store.index_lines(budget=60)
+        store.create_topic(thread, f"Topic {n}", "a gist " * 5, "summary")
+    lines = store.index_lines(thread, budget=60)
     assert lines[0].startswith("#30 Topic 29:")
     assert 1 < len(lines) < 30
 
@@ -102,11 +109,11 @@ class ScriptedChat:
         return self.summaries.pop(0)
 
 
-def test_new_subjects_become_topics_and_small_talk_does_not(store):
-    _exchange(store, "Plan a Lisbon trip for late October", "Alfama, Belém, Sintra.")
-    _exchange(store, "How do I get to Sintra?", "Train from Rossio.")
-    _exchange(store, "My sister's birthday is November 3rd", "Noted.")
-    _exchange(store, "Thanks!", "You're welcome.")
+def test_new_subjects_become_topics_and_small_talk_does_not(store, thread):
+    _exchange(store, thread, "Plan a Lisbon trip for late October", "Alfama, Belém, Sintra.")
+    _exchange(store, thread, "How do I get to Sintra?", "Train from Rossio.")
+    _exchange(store, thread, "My sister's birthday is November 3rd", "Noted.")
+    _exchange(store, thread, "Thanks!", "You're welcome.")
     chat = ScriptedChat(
         decisions=[
             {"remember": True, "topic_id": 0, "title": "Lisbon trip"},
@@ -121,19 +128,19 @@ def test_new_subjects_become_topics_and_small_talk_does_not(store):
         ],
     )
     assert Filer(store, chat).file() is True
-    topics = {t.title: t.id for t in store.topics()}
+    topics = {t.title: t.id for t in store.topics(thread)}
     assert set(topics) == {"Lisbon trip", "Sister's birthday"}
     assert len(store.topic(topics["Lisbon trip"]).turns) == 4
     assert store.unfiled_exchanges() == []
     # One summary per topic, not per exchange
     assert chat.summaries == []
     # Small talk is kept and searchable, just not a topic
-    assert store.search("welcome")[0]["topic_id"] is None
+    assert store.search(thread, "welcome")[0]["topic_id"] is None
 
 
-def test_each_decision_sees_the_exchange_before_it(store):
-    _exchange(store, "My Golf's brakes squeak", "Probably worn pads.")
-    _exchange(store, "I booked the garage for the 12th", "Noted.")
+def test_each_decision_sees_the_exchange_before_it(store, thread):
+    _exchange(store, thread, "My Golf's brakes squeak", "Probably worn pads.")
+    _exchange(store, thread, "I booked the garage for the 12th", "Noted.")
     chat = ScriptedChat(
         decisions=[
             {"remember": True, "topic_id": 0, "title": "Golf brakes"},
@@ -146,9 +153,9 @@ def test_each_decision_sees_the_exchange_before_it(store):
     assert "#1 Golf brakes" in chat.prompts[1]
 
 
-def test_continuing_a_subject_updates_its_topic(store):
-    topic = store.create_topic("Lisbon trip", "late Oct", "Trip in late October.")
-    _exchange(store, "For Lisbon, where should I stay?", "Chiado.")
+def test_continuing_a_subject_updates_its_topic(store, thread):
+    topic = store.create_topic(thread, "Lisbon trip", "late Oct", "Trip in late October.")
+    _exchange(store, thread, "For Lisbon, where should I stay?", "Chiado.")
     chat = ScriptedChat(
         decisions=[{"remember": True, "topic_id": topic, "title": "Lisbon stay"}],
         summaries=[
@@ -157,23 +164,23 @@ def test_continuing_a_subject_updates_its_topic(store):
     )
     assert Filer(store, chat).file() is True
     assert store.topic(topic).summary == "Trip in late October, staying in Chiado."
-    assert len(store.topics()) == 1
+    assert len(store.topics(thread)) == 1
     assert "What is known so far:\nTrip in late October." in chat.prompts[-1]
 
 
-def test_a_topic_number_that_does_not_exist_starts_a_new_topic(store):
-    _exchange(store, "Plan a Lisbon trip", "Sure.")
+def test_a_topic_number_that_does_not_exist_starts_a_new_topic(store, thread):
+    _exchange(store, thread, "Plan a Lisbon trip", "Sure.")
     chat = ScriptedChat(
         decisions=[{"remember": True, "topic_id": 42, "title": "Lisbon"}],
         summaries=[{"summary": "Lisbon trip.", "gist": "Lisbon"}],
     )
     Filer(store, chat).file()
-    assert [t.title for t in store.topics()] == ["Lisbon"]
+    assert [t.title for t in store.topics(thread)] == ["Lisbon"]
     assert store.unfiled_exchanges() == []
 
 
-def test_failed_filing_leaves_turns_for_next_time(store):
-    _exchange(store, "Plan a Lisbon trip", "Sure.")
+def test_failed_filing_leaves_turns_for_next_time(store, thread):
+    _exchange(store, thread, "Plan a Lisbon trip", "Sure.")
 
     def broken(messages, schema):
         raise ConnectionError("server away")
@@ -186,11 +193,13 @@ def test_failed_filing_leaves_turns_for_next_time(store):
 # -- tools -------------------------------------------------------------------
 
 
-def test_recall_returns_the_summary_and_latest_exchanges(store):
-    topic = store.create_topic("Lisbon trip", "late Oct", "Trip in late October with Sintra.")
-    _exchange(store, "Where to stay in Lisbon?", "Chiado.")
-    store.mark_filed([t["id"] for t in store.recent_turns()], topic)
-    tools = Tools([memory_plugin.plugin], PluginContext(memory=store))
+def test_recall_returns_the_summary_and_latest_exchanges(store, thread):
+    topic = store.create_topic(
+        thread, "Lisbon trip", "late Oct", "Trip in late October with Sintra."
+    )
+    _exchange(store, thread, "Where to stay in Lisbon?", "Chiado.")
+    store.mark_filed(thread, [t["id"] for t in store.recent_turns(thread)], topic)
+    tools = Tools([memory_plugin.plugin], PluginContext(memory=store, thread=lambda: thread))
 
     result = tools.execute("recall", topic_id=topic)
     assert result["success"] and result["topic_id"] == topic
@@ -206,24 +215,27 @@ def test_recall_returns_the_summary_and_latest_exchanges(store):
 
 
 @patch("iris.llm.ollama")
-def _conversation(store, mock_ollama, tools=None):
+def _conversation(store, thread, mock_ollama, tools=None):
+    """A conversation in the thread."""
     mock_ollama.show.return_value.modelinfo = {}
     keeper = MemoryKeeper(store, lambda messages, schema: {})
-    return ConversationManager("fake-llm", tools=tools, memory=keeper)
+    conversation = ConversationManager("fake-llm", tools=tools, memory=keeper)
+    conversation.open_thread(thread)
+    return conversation
 
 
-def test_context_holds_the_index_and_the_live_thread(store):
-    store.create_topic("Lisbon trip", "late Oct, Sintra", "Trip in late October.")
-    _exchange(store, "Hi", "Hello!")
-    messages = _conversation(store).manage_context()
+def test_context_holds_the_index_and_the_live_thread(store, thread):
+    store.create_topic(thread, "Lisbon trip", "late Oct, Sintra", "Trip in late October.")
+    _exchange(store, thread, "Hi", "Hello!")
+    messages = _conversation(store, thread).manage_context()
     assert messages[0]["role"] == "system"
     assert "#1 Lisbon trip: late Oct, Sintra (today)" in messages[0]["content"]
     assert [m["content"] for m in messages[1:]] == ["Hi", "Hello!"]
 
 
-def test_recalled_topics_stay_in_context_for_a_few_turns(store):
-    topic = store.create_topic("Lisbon trip", "late Oct", "Staying in Chiado.")
-    conversation = _conversation(store)
+def test_recalled_topics_stay_in_context_for_a_few_turns(store, thread):
+    topic = store.create_topic(thread, "Lisbon trip", "late Oct", "Staying in Chiado.")
+    conversation = _conversation(store, thread)
     conversation.pinned[topic] = PIN_TURNS
     assert (
         "Recalled #1 Lisbon trip: Staying in Chiado." in conversation.manage_context()[0]["content"]
@@ -235,11 +247,11 @@ def test_recalled_topics_stay_in_context_for_a_few_turns(store):
     assert "Recalled" not in conversation.manage_context()[0]["content"]
 
 
-def test_turns_are_recorded_with_their_source(store):
-    conversation = _conversation(store)
+def test_turns_are_recorded_with_their_source(store, thread):
+    conversation = _conversation(store, thread)
     conversation._record("What's on today?", "Nothing planned.", "text")
     conversation.add_note("You are now HAL.")
-    turns = store.recent_turns()
+    turns = store.recent_turns(thread)
     assert [(t["role"], t["source"]) for t in turns] == [
         ("user", "text"),
         ("assistant", None),
@@ -355,23 +367,23 @@ def test_a_call_in_flight_is_cut_off_when_the_conversation_resumes(fake_ollama):
     assert time.monotonic() - started < 0.5
 
 
-def test_an_interrupted_filing_saves_nothing_half_done(store):
-    _exchange(store, "Plan a Lisbon trip", "Sure.")
+def test_an_interrupted_filing_saves_nothing_half_done(store, thread):
+    _exchange(store, thread, "Plan a Lisbon trip", "Sure.")
 
     def interrupted(messages, schema, abort=lambda: False):
         raise memory_module.FilingInterruptedError()
 
     assert Filer(store, interrupted).file() is False
     assert len(store.unfiled_exchanges()) == 1
-    assert store.topics() == []
+    assert store.topics(thread) == []
 
 
 # -- the conversation comes first --------------------------------------------
 
 
-def test_filing_stops_before_the_next_call_and_resumes_later(store):
-    _exchange(store, "Plan a Lisbon trip", "Alfama, Belém, Sintra.")
-    _exchange(store, "My sister's birthday is November 3rd", "Noted.")
+def test_filing_stops_before_the_next_call_and_resumes_later(store, thread):
+    _exchange(store, thread, "Plan a Lisbon trip", "Alfama, Belém, Sintra.")
+    _exchange(store, thread, "My sister's birthday is November 3rd", "Noted.")
     chat = ScriptedChat(
         decisions=[
             {"remember": True, "topic_id": 0, "title": "Lisbon trip"},
@@ -402,7 +414,7 @@ def test_filing_stops_before_the_next_call_and_resumes_later(store):
     assert store.topic(1).summary == "Lisbon in late October."
 
 
-def test_a_busy_conversation_gets_the_llm_first(store, monkeypatch):
+def test_a_busy_conversation_gets_the_llm_first(store, thread, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(memory_module.time, "monotonic", lambda: clock[0])
     busy = [False]
@@ -438,37 +450,37 @@ def test_old_databases_get_the_summarized_column(tmp_path):
 
     store = MemoryStore(path)
     assert store.pending_summaries() == {}  # existing filed turns count as summarized
-    assert store.recent_turns()[0]["text"] == "hello"
+    assert store.recent_turns(1)[0]["text"] == "hello"
 
 
 # -- amnesia mode ------------------------------------------------------------
 
 
-def test_amnesia_keeps_the_conversation_going_but_writes_nothing(store):
-    _exchange(store, "Plan a Lisbon trip", "Alfama, Belém, Sintra.")
-    conversation = _conversation(store)
+def test_amnesia_keeps_the_conversation_going_but_writes_nothing(store, thread):
+    _exchange(store, thread, "Plan a Lisbon trip", "Alfama, Belém, Sintra.")
+    conversation = _conversation(store, thread)
     conversation.set_amnesia(True)
     conversation._record("Something private", "Understood.", "voice")
     conversation.add_note("You are now HAL.")
 
     # Nothing reached the store, but the model still follows the conversation
-    assert [t["text"] for t in store.recent_turns()] == [
+    assert [t["text"] for t in store.recent_turns(thread)] == [
         "Plan a Lisbon trip",
         "Alfama, Belém, Sintra.",
     ]
     contents = [m["content"] for m in conversation.manage_context()[1:]]
     assert contents[-3:] == ["Something private", "Understood.", "You are now HAL."]
-    assert store.search("private") == []
+    assert store.search(thread, "private") == []
 
     # Ending amnesia forgets those turns entirely
     conversation.set_amnesia(False)
     assert "Something private" not in [m["content"] for m in conversation.manage_context()]
     conversation._record("Back on the record", "Noted.", "text")
-    assert store.recent_turns()[-1]["text"] == "Noted."
+    assert store.recent_turns(thread)[-1]["text"] == "Noted."
 
 
-def test_amnesia_still_reads_memory(store):
-    store.create_topic("Lisbon trip", "late Oct, Sintra", "Trip in late October.")
-    conversation = _conversation(store)
+def test_amnesia_still_reads_memory(store, thread):
+    store.create_topic(thread, "Lisbon trip", "late Oct, Sintra", "Trip in late October.")
+    conversation = _conversation(store, thread)
     conversation.set_amnesia(True)
     assert "#1 Lisbon trip" in conversation.manage_context()[0]["content"]
