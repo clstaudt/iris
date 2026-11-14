@@ -1045,6 +1045,46 @@ try {
     check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "the voice changed");
   });
 
+  await step("voice cloning: Save is offered for what changed, a voice cloned again too, and Cancel takes it back", async () => {
+    const save = page.locator("button.s-btn.primary", { hasText: "Save" });
+    const effect = (name) => page.locator("button.toggle", { hasText: exactly(name) });
+    const pick = (name) => page.locator(".voice button.pick", { hasText: exactly(name) });
+    const offered = async (yes, after) =>
+      check((await save.isEnabled()) === yes, `Save is ${yes ? "not " : ""}offered after ${after}`);
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Iris" }).first().click();
+    await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
+    await offered(false, "opening her");
+    await effect("Phone").click();
+    await offered(true, "choosing an effect");
+    await effect("None").click();
+    await offered(false, "choosing no effect again");
+    await pick("Anna").click();
+    await offered(true, "choosing another voice");
+    await pick("Iris").click();
+    await offered(false, "choosing her cloned voice again");
+    // A voice cloned again is chosen, and is hers once saved
+    await page.getByRole("button", { name: "Clone again" }).click();
+    await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    const made = Date.now();
+    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: speechSample() });
+    await until("the voice cloned again", () => page.locator(".voice.active .pick", { hasText: exactly("Iris 2") }).count(), 120_000);
+    await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
+    await voiceDone();
+    await offered(true, "cloning a voice");
+    await effect("Phone").click();
+    await effect("None").click();
+    await offered(true, "an effect and back, with the voice cloned again");
+    await pick("Iris").click();
+    await offered(false, "choosing her saved voice");
+    await pick("Iris 2").click();
+    await offered(true, "choosing the voice cloned again");
+    // Cancel goes back to what is saved
+    await page.locator("button.s-btn", { hasText: "Cancel" }).click();
+    await until("her saved voice", () => page.locator(".voice.active .pick", { hasText: exactly("Iris") }).count());
+    await offered(false, "Cancel");
+  });
+
   await step("setups: a new one, renamed, switched and deleted", async () => {
     await openSettings();
     const current = page.locator(".switcher .current");
