@@ -318,7 +318,7 @@ def test_a_language_no_voice_speaks_is_not_spoken(engines_used, persona_id):
     assert engines_used(persona_id, "ru") is None
 
 
-@pytest.mark.parametrize("voice", [v["id"] for v in PocketGenerator.voices()])
+@pytest.mark.parametrize("voice", PocketGenerator.catalogue())
 @pytest.mark.parametrize("language", list(POCKET_LANGUAGES))
 def test_every_kyutai_voice_speaks_each_language_through_its_model(engines_used, voice, language):
     """Or not at all, a language it does not speak properly."""

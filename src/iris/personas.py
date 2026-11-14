@@ -1,12 +1,12 @@
 """Persona definitions for the Iris voice assistant."""
 
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
+from iris import names
 from iris.tts import KOKORO_VOICE_NAME
 
 
@@ -138,8 +138,9 @@ class Persona:
 
 
 def slug(name: str) -> str:
-    """A file name for a persona called this."""
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "persona"
+    """A file name for a persona called this ("Der Führer" is der-fuehrer).
+    A persona keeps the file it was saved in under an earlier spelling."""
+    return names.slug(name, "persona")
 
 
 class _PersonaDumper(yaml.SafeDumper):
@@ -327,10 +328,26 @@ def find_persona(persona_id: str) -> Optional[Persona]:
     return PERSONAS.get(persona_id)
 
 
+def speaking_with(voice: str) -> list[Persona]:
+    """The personas that speak with this voice, as their files say now, by
+    name."""
+    found = [persona for persona in load_all_personas().values() if persona.voice == voice]
+    return sorted(found, key=lambda persona: persona.name.casefold())
+
+
 def voice_in_use(voice: str) -> bool:
     """Whether a persona speaks with this voice, as its files say now (a
     cloned voice is kept while one does)."""
-    return any(persona.voice == voice for persona in load_all_personas().values())
+    return bool(speaking_with(voice))
+
+
+def voice_users() -> dict[tuple[str, str], list[Persona]]:
+    """The personas that speak with each voice, by (engine, voice), as their
+    files say now, by name."""
+    users: dict[tuple[str, str], list[Persona]] = {}
+    for persona in sorted(load_all_personas().values(), key=lambda p: p.name.casefold()):
+        users.setdefault((persona.engine, persona.voice), []).append(persona)
+    return users
 
 
 def shipped(persona_id: str) -> bool:

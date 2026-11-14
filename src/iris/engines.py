@@ -18,6 +18,18 @@ from typing import Optional
 BUILT_IN = "built-in"
 
 
+@dataclass(frozen=True)
+class Step:
+    """A step of making a voice ready to speak a language, as the app shows
+    it: "download" with what is downloaded ("model", the language's or the
+    engine's model; "voice", the voice's own files for it; "cloning", the
+    model that makes a cloned voice), or "make" (a cloned voice made for the
+    language from its sample)."""
+
+    stage: str
+    what: str = ""
+
+
 class SpeechEngine:
     """Turns text into speech. Subclass it and register the class.
 
@@ -69,6 +81,31 @@ class SpeechEngine:
         speaks all of the engine's languages, unless the engine says
         otherwise."""
         return cls.languages
+
+    @classmethod
+    def ready(cls, voice: str, language: str, models_dir: str | Path | None = None) -> bool:
+        """Whether the voice can speak the language now, with nothing to
+        download or make first. Speaking never fetches what is missing: a
+        reply in a language the voice is not ready for is shown, while
+        make_ready() gets it, with progress."""
+        return cls.available(models_dir)
+
+    @classmethod
+    def make_ready(
+        cls,
+        voice: str,
+        language: str,
+        models_dir: str | Path | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+        on_step: Callable[[Step], None] | None = None,
+    ):
+        """Download, and make, what speaking the language in the voice needs.
+        on_step is told each step as it starts, on_progress the bytes of a
+        download (done, total). Raises when it cannot be had."""
+
+    def voice_changed(self, voice: str):
+        """A voice was made again (a cloned one, from a new sample): what is
+        kept loaded of it is dropped."""
 
     def prepare(self):
         """Load what its first reply needs, when it is the persona's engine.
