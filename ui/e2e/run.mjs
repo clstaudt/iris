@@ -741,7 +741,8 @@ try {
 
   await step("language model: the server's models are listed and one is chosen", async () => {
     await openStage("Language model");
-    await until("the model list", () => option("").count(), 60_000);
+    // The models, not the servers above them
+    await until("the model list", () => inspector.locator("button.s-option").count(), 60_000);
     if (!model) {
       model = (await inspector.locator(".s-option:has(.s-chip:text('tools')) .name").first().innerText()).trim();
     }
@@ -1633,6 +1634,9 @@ try {
       }
       check(sent.images.length >= 2 && sent.images.every((url) => url.startsWith("data:image/jpeg;base64,")),
         `the model was sent ${sent.images.length} pictures`);
+      // The stub answers at once: its reply is spoken after this, unless
+      // waited for, and the next steps' messages would wait behind it
+      await eventAfter("audio.output", since, (data) => data.rms > 0, 60_000);
       await voiceDone();
     } finally {
       await runOn(usual.host, usual.model);
