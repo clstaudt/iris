@@ -45,11 +45,29 @@ for package in (
     "primp",
     "livekit",  # its native library, for echo cancellation
     "pocket_tts",  # the configs of its models
+    "py3langid",  # its model, which tells the language a reply is written in
+    "num2words",  # numbers in words, for voices that read no digits
+    "pykakasi",  # its dictionaries, which read kanji in kana for Kokoro
+    "cn2an",  # its config, which reads numbers in Chinese for misaki
+    "pypinyin",  # the readings misaki's Mandarin is made from
 ):
     package_datas, package_binaries, package_imports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_imports
+
+# jieba, which cuts Mandarin into words for misaki: its dictionary and the
+# model it cuts unknown words with, not its part-of-speech, keyword and
+# Paddle models (29 MB), which misaki does not use
+UNUSED_JIEBA = ("jieba.lac_small", "jieba.posseg", "jieba.analyse")
+package_datas, package_binaries, package_imports = collect_all(
+    "jieba",
+    filter_submodules=lambda name: not name.startswith(UNUSED_JIEBA),
+    exclude_datas=["lac_small/**", "posseg/**", "analyse/**"],
+)
+datas += package_datas
+binaries += package_binaries
+hiddenimports += package_imports
 
 a = Analysis(
     ["iris_rpc.py"],
@@ -69,6 +87,12 @@ a = Analysis(
         "pytest",
         "typer",
         "irisdev",
+        # misaki's frontend for Kokoro's v1.1 Mandarin model, with the 43 MB
+        # of readings only it uses; Iris speaks v1.0 with misaki's own
+        "misaki.zh_frontend",
+        "pypinyin_dict",
+        *UNUSED_JIEBA,
+        "paddle",
     ],
     noarchive=False,
 )

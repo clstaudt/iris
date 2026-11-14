@@ -4,6 +4,7 @@ self-talk are held and measured. Nothing here loads a speech model."""
 
 import http.client
 import json
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -12,16 +13,20 @@ import httpx
 import numpy as np
 import ollama
 import pytest
+import torch
 from ddgs.exceptions import DDGSException
+from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 
 from iris.events import EventBus
 from iris.llm import ConversationManager
+from iris.memory import MemoryStore
 from iris.plugins import web
 from iris.status import StatusManager
 from iris.tools import Tools
+from iris.tts import POCKET_LANGUAGES, PocketGenerator, kokoro_speech
 from iris.turns import SmartTurn
 from irisdev.voicetest import assistant as under_test
-from irisdev.voicetest import scripted, sounds, wording
+from irisdev.voicetest import scripted, sounds, voices, wording
 from irisdev.voicetest.acoustics import (
     HEARD_KEPT,
     LOOKBACK,
@@ -38,7 +43,7 @@ from irisdev.voicetest.acoustics import (
 from irisdev.voicetest.assistant import IrisUnderTest, Log, unwatch_verdicts, watch_verdicts
 from irisdev.voicetest.conversations import DEFAULT_GROUPS, GROUPS, all_conversations, group
 from irisdev.voicetest.fakeweb import Each, FakeWeb, as_results, latest_match, match_query
-from irisdev.voicetest.script import EXPECTATIONS, At, Check, Conversation, Say, Silence, Turn
+from irisdev.voicetest.script import EXPECTATIONS, At, Check, Conversation, Restart, Say, Silence, Turn
 from irisdev.voicetest.scripted import (
     BUDGETS,
     CHIMES,
@@ -67,6 +72,7 @@ from irisdev.voicetest.stub_llm import (
     results,
     search,
 )
+from irisdev.voicetest.voices import VOICES, UserVoice, kokoro_language
 
 
 def tone(seconds: float, level: float = 0.5, rate: int = RATE) -> np.ndarray:
@@ -297,6 +303,81 @@ class TestStubModel:
             assert again.list().models
         finally:
             stub.close()
+
+
+class NamedLanguagesOnly:
+    """Kokoro as kokoro-onnx is: it takes only some languages by name, and
+    any other spoken from phonemes given with it. Notes what it was asked."""
+
+    def __init__(self):
+        self.asked = []
+        self.tokenizer = SimpleNamespace(phonemize=lambda text, code: f"<{code}:{text}>")
+
+    def create(self, text, voice, speed=1.0, lang="en-us", phonemes=None):
+        assert lang in KOKORO_ONNX_LANGUAGES, f"Language must be one of them. Got {lang}"
+        self.asked.append((voice, lang, phonemes))
+        return np.zeros(2400, dtype=np.float32), 24000
+
+
+@pytest.mark.parametrize("name", [n for n, v in VOICES.items() if v["engine"] == "kokoro"])
+def test_every_kokoro_voice_of_the_user_can_speak(name, monkeypatch, tmp_path):
+    """The Spanish user could not say a word: kokoro-onnx refuses Spanish,
+    Portuguese and Hindi by name, so "across languages" could not be held.
+    Each is given what Iris gives Kokoro (iris.tts.kokoro_speech)."""
+    kokoro = NamedLanguagesOnly()
+    monkeypatch.setattr(UserVoice, "_kokoro", kokoro)
+    voice = UserVoice.named(tmp_path, name)
+    assert len(voice.utterance(["Hello there."])) > 0
+    [(spoken, lang, phonemes)] = kokoro.asked
+    code = kokoro_language(voice.voice, voice.language)
+    given = kokoro_speech(kokoro.tokenizer, "Hello there.", voice.language, code)
+    assert spoken == voice.voice
+    assert (lang, phonemes) == (given["lang"], given.get("phonemes"))
+    assert lang in KOKORO_ONNX_LANGUAGES
+
+
+class PocketWithoutCloning:
+    """Pocket TTS as it loads without the gated weights for voice cloning:
+    it speaks only with its own voices."""
+
+    def __init__(self, cloning: bool):
+        self.has_voice_cloning = cloning
+        self.sample_rate = 24000
+        self.prompts = []
+
+    def get_state_for_audio_prompt(self, prompt):
+        if not self.has_voice_cloning and "/" in str(prompt):
+            raise ValueError("We could not download the weights for the model with voice cloning")
+        self.prompts.append(prompt)
+        return prompt
+
+    def generate_audio(self, state, text):
+        return torch.zeros(2400)
+
+
+@pytest.mark.parametrize("name, own", [("de", "eve"), ("nl", "michael")])
+def test_without_voice_cloning_the_user_speaks_with_one_of_pocket_tts_voices(name, own, monkeypatch, tmp_path):
+    """The German and Dutch users are cloned voices: where cloning cannot be
+    had, no German or Dutch turn could be held at all. Their stand-ins are
+    not the voices Iris answers in."""
+    model = PocketWithoutCloning(cloning=False)
+    monkeypatch.setattr(voices.TTSModel, "load_model", lambda language: model)
+    monkeypatch.setattr(UserVoice, "_pocket", {})
+    voice = UserVoice.named(tmp_path, name)
+    assert len(voice.utterance(["Hallo."])) > 0
+    assert model.prompts == [own]
+    assert own not in {PocketGenerator.default_voice(language) for language in POCKET_LANGUAGES}
+    # Kept apart from what a cloned voice said
+    clone = UserVoice.named(tmp_path, name)
+    clone._pocket = {}
+    monkeypatch.setattr(voices.TTSModel, "load_model", lambda language: PocketWithoutCloning(cloning=True))
+    monkeypatch.setattr(UserVoice, "_kokoro", NamedLanguagesOnly())
+    assert clone._key("Hallo.") != voice._key("Hallo.")
+
+
+def test_the_user_speaks_every_language_iris_speaks():
+    spoken = {v["language"] for v in VOICES.values()}
+    assert {"en", "fr", "it", "es", "ja", "de", "nl", "pt", "zh", "hi"} <= spoken
 
 
 def test_heard_share_counts_the_words_said():
@@ -815,8 +896,10 @@ class TestScript:
         assert len({c.name for c in conversations}) == len(conversations)
         assert set(DEFAULT_GROUPS) <= set(GROUPS) and group("basic")[0].name == "a question and a follow-up"
         for conversation in conversations:
-            turns = [t for t in conversation.turns if isinstance(t, (Turn, Silence))]
+            turns = [t for t in conversation.turns if isinstance(t, (Turn, Silence, Restart))]
             assert turns == conversation.turns, conversation.name
+            for topic in conversation.memory_topics:
+                assert conversation.memory and {"title", "gist", "summary"} <= set(topic), conversation.name
             for entry in conversation.expected_failures:
                 number, colon, name = entry.partition(":")
                 if colon:
@@ -927,6 +1010,45 @@ def test_settings_wait_for_the_config_that_shows_them():
         iris.configure("volume", 3)
 
 
+def test_an_assistant_with_speech_on_its_way_has_not_finished():
+    """HAL's Portuguese reply was written whole, its first clip still being
+    synthesized, Iris idle and the speaker silent: the turn was taken as
+    answered before a word of it was heard."""
+    log = Log()
+    log("state", {"state": "idle"})
+    on_its_way = [True]
+    assistant = SimpleNamespace(log=log, endpoint=Space(noise=0).endpoint("a"), speaking=lambda: on_its_way[0])
+    assert not under_test.finished(assistant)
+    on_its_way[0] = False
+    assert under_test.finished(assistant)
+    # An assistant that cannot tell is judged by its speaker alone
+    assert under_test.finished(SimpleNamespace(log=log, endpoint=assistant.endpoint))
+
+
+def test_memory_starts_iris_again_with_a_memory_of_its_own(monkeypatch, tmp_path):
+    """The app runs Iris with memory; the voice test, without it unless a
+    conversation asks for it, and then in a new memory each time."""
+    monkeypatch.setenv("IRIS_MEMORY_DB", str(tmp_path / "memory.db"))
+    iris = object.__new__(IrisUnderTest)
+    iris.log, iris.home, iris.options, iris._memories = Log(), tmp_path, {"memory": False}, 0
+    iris.controller = None
+    started = []
+
+    def restart():
+        started.append((iris.options["memory"], os.environ["IRIS_MEMORY_DB"]))
+        iris.log("config", {"memory": iris.options["memory"]})
+
+    iris.restart = restart
+    assert iris.configure("memory", True) and iris.configure("memory", False) and iris.configure("memory", True)
+    assert started == [(True, str(tmp_path / "memory-1.db")), (False, str(tmp_path / "memory-1.db")),
+                       (True, str(tmp_path / "memory-2.db"))]
+
+    store = MemoryStore(":memory:")
+    iris.controller = SimpleNamespace(assistant=SimpleNamespace(memory=SimpleNamespace(store=store)))
+    iris.seed_memory([{"title": "Nazaré", "gist": "a lighthouse", "summary": "A red lighthouse."}])
+    assert [t.title for t in store.topics()] == ["Nazaré"] and store.recent_turns() == []
+
+
 # Holding conversations, with a stand-in assistant ---------------------------------------------
 
 
@@ -959,6 +1081,8 @@ class StandIn:
         self.think, self.reply = think, reply
         # An error to report with each reply
         self.error = None
+        # What a recognizer hears the voice say
+        self.heard_back = ""
         self.persona = "iris"
         self.settings = []
         self._history = []
@@ -1031,6 +1155,21 @@ class StandIn:
 
     def voice_queued(self):
         return False
+
+    def restart(self):
+        """Quit and start again; the conversation is shown again, as Iris
+        shows it from its memory."""
+        self.log("state", {"state": "idle"})
+        for message in self._history:
+            if message["role"] == "user":
+                self.log("chat.user", {"text": message["content"], "source": "voice"})
+            else:
+                self.log("chat.done", {"text": message["content"], "interrupted": False})
+        self.log("state", {"state": "listening"})
+
+    def transcribe(self, path):
+        """What a recognizer hears its voice say: heard_back, when set."""
+        return self.heard_back, "en"
 
 
 @pytest.fixture
@@ -1139,6 +1278,59 @@ class TestHolding:
         [quiet] = runner.hold(Conversation("none", [Turn(["four"], at=At.finished(0.2),
                                                          error_mentions=["stopped"])]))
         assert quiet.failed == ["error"]
+
+    def test_a_restart_between_turns_shows_the_conversation_again(self, held):
+        runner, fake, space = held
+        results = runner.hold(Conversation("restart", [
+            Turn(["hello there"], at=At.finished(0.2)),
+            Restart(restores=["hello there", "Reply to hello there"]),
+            Turn(["and again"], at=At.finished(0.2)),
+            Restart(restores=["banana"]),
+        ]))
+        first, restart, third, missing = results
+        assert first.passed and third.passed, (first.failures, third.failures)
+        assert restart.passed and restart.said == "(restart)"
+        assert restart.users == [(restart.users[0][0], "voice", "hello there")]
+        assert [text for _, text, _ in restart.replies] == ["Reply to hello there"]
+        # What was shown again is no turn of the user's
+        assert third.heard == "and again" and third.users == [(third.users[0][0], "voice", "and again")]
+        assert missing.failed == ["restored"]
+        assert len(fake.log.since(0, "action.restart")) == 2
+        stand_in = SimpleNamespace(**{k: getattr(fake, k) for k in ("log", "endpoint")})
+        elsewhere = ScriptedConversations(stand_in, space, FakeVoice(), report=lambda line: None)
+        [skipped] = elsewhere.hold(Conversation("no restart", [Restart()]))
+        assert skipped.skipped == "the assistant cannot be restarted"
+
+    def test_the_voice_reads_what_it_is_given_and_the_turn_is_judged_on_its_words(self, held):
+        runner, fake, space = held
+        [result] = runner.hold(Conversation("reading", [
+            Turn(["一二三"], reading=["ichi ni san shi go roku"], at=At.finished(0.2))]))
+        assert result.passed, result.failures
+        said = space.utterances[0]
+        assert said.text == "一二三" and said.speech_end - said.speech_start == pytest.approx(0.9, abs=0.05)
+
+    def test_what_the_voice_is_heard_saying_is_compared_with_the_reply(self, held):
+        runner, fake, space = held
+        fake.heard_back = "Reply to hello"
+        [heard] = runner.hold(Conversation("heard", [Turn(["hello"], at=At.finished(0.2), spoken_share=0.9)]))
+        assert heard.passed, heard.failures
+        assert heard.spoken == "Reply to hello"
+        fake.heard_back = "Chinese letter, Chinese letter"
+        [garbled] = runner.hold(Conversation("garbled", [Turn(["hello"], at=At.finished(0.2), spoken_share=0.9)]))
+        assert garbled.failed == ["spoken_share"]
+
+    def test_the_numbers_the_voice_is_heard_saying_are_found_as_written(self, held):
+        """"10:30" holds 10 and 30; normalized, it would be 1030."""
+        runner, fake, space = held
+        fake.heard_back = "Der Markt öffnet um 10:30 Uhr, Eintritt 3,50 €."
+        [heard] = runner.hold(Conversation("numbers", [Turn(["hello"], at=At.finished(0.2),
+                                                            spoken_numbers=["10", "30", "3", "50"])]))
+        assert heard.passed, heard.failures
+        fake.heard_back = "Der Markt öffnet um Gas um."
+        [garbled] = runner.hold(Conversation("garbled", [Turn(["hello"], at=At.finished(0.2),
+                                                              spoken_numbers=["10", "1"])]))
+        assert garbled.failed == ["spoken_numbers"]
+        assert "['10', '1']" in garbled.failures[0]
 
     def test_a_turn_not_called_for_is_skipped(self, held):
         runner, fake, space = held

@@ -46,7 +46,7 @@ from irisdev.voicetest.assistant import (
 )
 from irisdev.voicetest.fakesight import FakeCamera, FakeScreen
 from irisdev.voicetest.fakeweb import FakeWeb
-from irisdev.voicetest.script import GAP, At, Conversation, Echo, Noise, Say, Silence, Sound, Turn
+from irisdev.voicetest.script import GAP, At, Conversation, Echo, Noise, Restart, Say, Silence, Sound, Turn
 from irisdev.voicetest.sounds import gain_for_snr, sound
 from irisdev.voicetest.voices import UserVoice
 from irisdev.voicetest.wording import (
@@ -519,7 +519,7 @@ class ScriptedConversations:
         return UserVoice(self.voice.cache, "kokoro", kokoro_voice, "en")
 
     def _utterance(self, turn: Turn, conversation: Conversation) -> np.ndarray:
-        parts = turn.real_parts if (turn.real_parts and self.real_model) else turn.parts
+        parts = turn.real_parts if (turn.real_parts and self.real_model) else (turn.reading or turn.parts)
         voice = self.voice_for(turn.voice or conversation.voice, turn.speed)
         return voice.utterance(parts, level=turn.level, room_response=turn.room, splice=turn.splice,
                                unsaid=turn.unsaid or None)
@@ -538,6 +538,11 @@ class ScriptedConversations:
     def missing(self, conversation: Conversation) -> str:
         """Why the conversation cannot be held here, or ""."""
         needs = set(conversation.needs)
+        restarts = conversation.memory or any(isinstance(t, Restart) for t in conversation.turns)
+        if restarts and not hasattr(self.assistant, "restart"):
+            return "the assistant cannot be restarted"
+        if conversation.memory_topics and not hasattr(self.assistant, "seed_memory"):
+            return "the assistant's memory cannot be seeded"
         if "stub" in needs and self.stub is None:
             return "needs the scripted model"
         if "real_model" in needs and self.stub is not None:
@@ -582,6 +587,11 @@ class ScriptedConversations:
         self._synthesize_ahead(conversation)
         if conversation.fresh and hasattr(assistant, "restart"):
             assistant.restart()
+        if conversation.memory:
+            # First: it starts Iris again, with the other settings as they were
+            self._set("memory", True, "memory", False)
+            if conversation.memory_topics:
+                assistant.seed_memory(conversation.memory_topics)
         assistant.clear_conversation()
         assistant.set_wake_word(conversation.wake_word or "")
         wait_until(lambda: finished(assistant), self._timeout)
@@ -705,12 +715,13 @@ class ScriptedConversations:
         self.results_so_far = results
         running: Optional[Running] = None
         for number, turn in enumerate(conversation.turns, 1):
-            if isinstance(turn, Silence):
+            if isinstance(turn, (Silence, Restart)):
                 if running is not None:
                     end = self._complete(running)
                     results.append(self._finish(running, end))
                     running = None
-                results.append(self._silence(turn, number, conversation))
+                step = self._silence if isinstance(turn, Silence) else self._restart
+                results.append(step(turn, number, conversation))
                 continue
             text = " ".join(p for p in (turn.real_parts if (turn.real_parts and self.real_model) else turn.parts)
                             if isinstance(p, str))
@@ -1106,6 +1117,36 @@ class ScriptedConversations:
             result.resources = self.resources.sample(silence.text)
         return result
 
+    def _restart(self, restart: Restart, number: int, conversation: Conversation) -> TurnResult:
+        """Quit the assistant and start it again, once it has finished; the
+        conversation it shows again must hold what restart.restores names,
+        and the replies as well as the user's turns."""
+        log = self.assistant.log
+        wait_until(lambda: finished(self.assistant), self._timeout)
+        result = TurnResult(conversation.name, number, restart.text, tags=list(conversation.tags), at="restart",
+                            label=restart.name)
+        start = time.monotonic()
+        log("action.restart", {"args": []})
+        self.assistant.restart()
+        shown = log.since(start, "chat.user") + log.since(start, "chat.done")
+        result.users = [(round(at - start, 3), d.get("source", "voice"), d.get("text", ""))
+                        for at, kind, d in shown if kind == "chat.user"]
+        result.replies = [(round(at - start, 3), d.get("text", ""), bool(d.get("interrupted")))
+                          for at, kind, d in shown if kind == "chat.done"]
+        texts = [d.get("text", "").lower() for _, _, d in shown]
+        missing = [w for w in restart.restores if not any(w.lower() in text for text in texts)]
+        if missing:
+            result.fail("restored", f"the conversation shown again lacks {missing}: {texts}")
+        if restart.restores and not (result.users and result.replies):
+            result.fail("restored", f"the conversation shown again has {len(result.users)} turns of the user's "
+                                    f"and {len(result.replies)} replies")
+        result.errors = [d.get("message", "") for _, _, d in log.since(start, "error")]
+        for error in result.errors:
+            result.fail("error", f"error: {error}")
+        if self.resources is not None:
+            result.resources = self.resources.sample(restart.text)
+        return result
+
     # Measuring and judging -------------------------------------------------------
 
     def _finish(self, running: Running, end: float) -> TurnResult:
@@ -1435,7 +1476,8 @@ class ScriptedConversations:
         timing)."""
         turns = {n: t for n, t in enumerate(conversation.turns, 1) if isinstance(t, Turn)}
         wanted = self.transcribe_replies or any(
-            t.reply_language or t.spoken_once or t.spoken_excludes for t in turns.values()
+            t.reply_language or t.spoken_once or t.spoken_excludes or t.spoken_share is not None
+            or t.spoken_numbers for t in turns.values()
         )
         if not wanted or not hasattr(self.assistant, "transcribe"):
             return
@@ -1470,6 +1512,14 @@ class ScriptedConversations:
             if turn.reply_language and result.spoken_language and result.spoken_language != turn.reply_language:
                 result.fail("language", f"the reply was spoken in {result.spoken_language}, "
                                         f"not {turn.reply_language}")
+            missing = [n for n in turn.spoken_numbers if not re.search(rf"(?<!\d){re.escape(n)}(?!\d)", result.spoken)]
+            if missing:
+                result.fail("spoken_numbers", f"the voice was not heard saying {missing}: {result.spoken!r}")
+            if turn.spoken_share is not None and result.reply:
+                share = heard_share(result.spoken, result.reply, turn.reply_language or result.language or "en")
+                if share < turn.spoken_share:
+                    result.fail("spoken_share", f"the voice was heard saying {share:.0%} of the reply: "
+                                                f"{result.spoken!r} for {result.reply!r}")
             self._expected_after(result, number, conversation)
 
     def _expected_after(self, result: TurnResult, number: int, conversation: Conversation):

@@ -1,6 +1,8 @@
 """Unit tests for preparing reply text for speech: lists must be read with
 a pause after each item, not run together as one sentence."""
 
+import pytest
+
 from iris.llm import (
     PIECE_GROWTH,
     PIECE_SENTENCE_FROM,
@@ -34,6 +36,35 @@ class TestListPauses:
 
     def test_emoji_only_line_dropped(self):
         assert clean("Done\n\n😀") == "Done."
+
+
+class TestEveryLanguageIsKept:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "東京の明日の天気は晴れで、最高気温は十八度です。",
+            "あしたは、はれるでしょう！",
+            "カタカナのテキストですか？",
+            "北京明天是晴天，最高气温十八度左右。",
+            "你好！你想知道什么？",
+            "（全角の括弧）と「かぎ括弧」です。",
+            "Ein Satz auf Deutsch, mit Umlauten: schön.",
+            "Uma frase em português, não é?",
+            "कल दिल्ली में मौसम साफ़ रहेगा।",
+        ],
+    )
+    def test_text_in_every_language_iris_speaks_is_spoken_whole(self, text):
+        """The emoji filter took U+24C2 to U+1F251 for emoji: every kanji,
+        kana and Chinese character and the full-width punctuation, so a
+        Japanese or Chinese reply was never spoken."""
+        assert clean(text) == text
+
+    @pytest.mark.parametrize(
+        "emoji", ["😀", "🎉", "🚀", "🇯🇵", "☀️", "✨", "❤️", "🤖", "🥳", "🫶", "⭐", "👍🏽", "👩‍💻", "Ⓜ️"]
+    )
+    def test_emoji_are_dropped_in_any_language(self, emoji):
+        assert clean(f"晴れです{emoji}。") == "晴れです。"
+        assert clean(f"Sunny {emoji} today.") == "Sunny  today."
 
 
 class TestSpeechBreak:
@@ -123,3 +154,63 @@ class TestSplitSpeech:
         sentence = "This sentence goes on " + "and on " * 50 + "until it stops. Next one."
         spoken = pieces(words("A first short sentence here. " + sentence))
         assert spoken[1] == sentence[: -len(" Next one.")]
+
+
+def characters(text: str, size: int = 2) -> list[str]:
+    """Text streamed a few characters at a time, the way tokens of a language
+    without spaces arrive."""
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+JAPANESE = (
+    "東京の明日の天気は晴れで、最高気温は十八度の予報です。"
+    "朝は少し冷えるので、上着を持って出かけるといいでしょう。"
+    "午後からは風が強くなり、夕方には北の風が吹く見込みです。"
+    "週末にかけては雲が増えて、日曜日には雨が降るかもしれません。"
+)
+CHINESE = (
+    "北京明天是晴天，最高气温十八度左右，适合出门散步。"
+    "早上比较冷，出门的时候最好带一件外套！"
+    "你想知道周末的天气怎么样吗？"
+    "周末可能会下雨，记得带伞。"
+)
+HINDI = (
+    "कल दिल्ली में मौसम साफ़ रहेगा और तापमान अठारह डिग्री होगा। "
+    "सुबह थोड़ी ठंड होगी, इसलिए जैकेट साथ रखें। "
+    "शाम को हवा तेज़ चलेगी।"
+)
+
+
+class TestSentencesWithoutSpaces:
+    """Japanese and Chinese end a sentence with 。！？ and go on without a
+    space: a reply must still be spoken from its first sentence, not once it
+    has arrived whole."""
+
+    def test_japanese_is_spoken_from_its_first_sentence(self):
+        spoken = pieces(characters(JAPANESE))
+        assert spoken[0] == "東京の明日の天気は晴れで、最高気温は十八度の予報です。"
+        assert "".join(spoken) == JAPANESE
+
+    def test_chinese_ends_sentences_at_full_stops_exclamations_and_questions(self):
+        cut = speech_break(CHINESE, 0, len(CHINESE), first=True)
+        assert CHINESE[:cut] == "北京明天是晴天，最高气温十八度左右，适合出门散步。"
+        spoken = pieces(characters(CHINESE))
+        assert spoken[0] == CHINESE[:cut]
+        assert "".join(spoken) == CHINESE
+        assert all(piece[-1] in "。！？" for piece in spoken)
+
+    def test_a_closing_quote_stays_with_its_sentence(self):
+        text = "彼は「明日また来ます。」と言いました。それから帰りました。"
+        cut = speech_break(text, 0, len(text), first=True)
+        assert text[:cut] == "彼は「明日また来ます。」"
+
+    def test_a_comma_is_no_sentence_end(self):
+        assert split_speech("東京の天気は晴れで、最高気温は十八度の", 0) == (
+            "",
+            "東京の天気は晴れで、最高気温は十八度の",
+        )
+
+    def test_hindi_ends_sentences_at_the_danda(self):
+        spoken = pieces(words(HINDI))
+        assert spoken[0] == "कल दिल्ली में मौसम साफ़ रहेगा और तापमान अठारह डिग्री होगा।"
+        assert " ".join(spoken) == HINDI

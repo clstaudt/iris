@@ -2,15 +2,19 @@
 
 `iris-rpc --check` imports each engine and reports what fails, a smoke test
 for packaged builds (a missing library would otherwise only show up as a
-quietly disabled feature).
+quietly disabled feature). It also has the voices' readers read a line, as
+a missing table or dictionary shows only once they read.
 """
 
 import importlib
 import multiprocessing
+import re
 import sys
 import traceback
 
+from iris.numbers import numbers_in_words
 from iris.rpc_server import main
+from iris.tts import READERS
 
 # What the core needs at runtime, by feature
 ENGINES = {
@@ -28,6 +32,16 @@ ENGINES = {
     "camera": "cv2",
     "screen capture": "mss",
     "audio devices": "sounddevice",
+    "numbers in words": "num2words",
+    "Japanese in kana": "pykakasi",
+    "Mandarin pronunciation": "misaki.zh",
+}
+
+# What the voices are given to read, and what it must not hold any more
+READS = {
+    "numbers in words": (lambda: numbers_in_words("am 27. November um 10:30 Uhr", "de"), r"\d"),
+    "Japanese in kana": (lambda: READERS.kana("東京の天気は晴れ、18度"), r"[\d\u4e00-\u9fff]"),
+    "Mandarin pronunciation": (lambda: READERS.mandarin("北京明天23度", english=str), r"[\d\u4e00-\u9fff]"),
 }
 
 
@@ -40,6 +54,16 @@ def check() -> int:
         except Exception:
             failed += 1
             print(f"FAILED  {feature} ({module})")
+            traceback.print_exc(file=sys.stdout)
+    for feature, (read, left) in READS.items():
+        try:
+            said = read()
+            if not said.strip() or re.search(left, said):
+                raise ValueError(f"read as {said!r}")
+            print(f"ok      {feature} reads")
+        except Exception:
+            failed += 1
+            print(f"FAILED  {feature} reads")
             traceback.print_exc(file=sys.stdout)
     return failed
 

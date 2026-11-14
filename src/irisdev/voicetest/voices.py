@@ -6,10 +6,14 @@ given in seconds, for a user who stops mid-sentence or thinks aloud.
 
 Other users are other voices (VOICES): British and American, an Indian and
 a French voice speaking English, a Pocket TTS voice close to Iris's own,
-and voices speaking French, Italian, Spanish, Japanese, German and Dutch.
-Kokoro is called directly with the language to speak, so a French voice can
-speak English with its accent. German and Dutch are spoken by Pocket TTS,
-cloning a voice from a prompt (not Pocket's default voices, which Iris uses).
+and voices speaking each language Iris speaks: French, Italian, Spanish,
+Portuguese, Japanese, Chinese, Hindi, German and Dutch. Kokoro is called
+directly with the language to speak, so a French voice can speak English
+with its accent, and is given each language as Iris gives it (numbers in
+words, Japanese in kana, Mandarin as misaki's phonemes, espeak's phonemes
+for the languages kokoro-onnx does not take by name). German and Dutch are
+spoken by Pocket TTS, cloning a voice from a prompt (not Pocket's default
+voices, which Iris uses), numbers in words.
 
 Said as pieces, a sentence with pauses ends each piece with a sentence's
 fall in pitch. Spliced, it is synthesized whole and the pauses are cut into
@@ -18,6 +22,7 @@ stops mid-sentence and the voice says so.
 """
 
 import hashlib
+import logging
 import tempfile
 from pathlib import Path
 from typing import Optional, Union
@@ -28,8 +33,11 @@ from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 from pocket_tts import TTSModel
 
-from iris.tts import KOKORO_MODEL_FILE, KOKORO_VOICES_FILE, POCKET_LANGUAGES, find_kokoro_models
+from iris.numbers import numbers_in_words
+from iris.tts import KOKORO_MODEL_FILE, KOKORO_VOICES_FILE, POCKET_LANGUAGES, find_kokoro_models, kokoro_speech
 from irisdev.voicetest.acoustics import RATE, in_room, room, to_rate
+
+logger = logging.getLogger(__name__)
 
 # The user's voice, not one an Iris persona uses by default
 USER_ENGINE = "kokoro"
@@ -49,6 +57,9 @@ KOKORO_LANGUAGES = {
 }
 # Pocket TTS clones a voice from this, said by a Kokoro voice, for German and Dutch
 CLONE_PROMPT = "Hello, I am reading this short passage so my voice can be recognized clearly."
+# Pocket TTS's own voices (each speaks every language it has) that stand in
+# for a woman's and a man's cloned voice where it cannot clone
+CLONE_STAND_INS = {"f": "eve", "m": "michael"}
 # Whisper for finding where the pieces of a spliced sentence meet
 SPLICE_MODEL = "base"
 
@@ -66,6 +77,9 @@ VOICES = {
     "it": {"engine": "kokoro", "voice": "im_nicola", "language": "it"},
     "es": {"engine": "kokoro", "voice": "em_alex", "language": "es"},
     "ja": {"engine": "kokoro", "voice": "jm_kumo", "language": "ja"},
+    "pt": {"engine": "kokoro", "voice": "pm_alex", "language": "pt"},
+    "zh": {"engine": "kokoro", "voice": "zf_xiaobei", "language": "zh"},
+    "hi": {"engine": "kokoro", "voice": "hm_omega", "language": "hi"},
     "de": {"engine": "kyutai", "voice": "clone:af_nicole", "language": "de"},
     "nl": {"engine": "kyutai", "voice": "clone:am_adam", "language": "nl"},
     # Another person in the room, for asides not from the user
@@ -115,8 +129,19 @@ class UserVoice:
         return cls(cache, speed=speed, **VOICES[name])
 
     def _key(self, text: str) -> str:
-        spec = f"{self.engine}:{self.voice}:{self.language}:{self.speed}:{text}"
+        spec = f"{self.engine}:{self._spoken_voice()}:{self.language}:{self.speed}:{text}"
+        # Read as Iris reads it (kana, misaki's Mandarin, numbers in words),
+        # kept apart from what was synthesized before it did
+        if self.language in ("ja", "zh") or self.language != "en" and any(c.isdigit() for c in text):
+            spec += ":as-iris-reads-it"
         return hashlib.sha1(spec.encode()).hexdigest()[:16]
+
+    def _spoken_voice(self) -> str:
+        """The voice the user speaks with: a cloned one is Pocket TTS's own
+        voice for the language where cloning cannot be had (see _pocket_voice)."""
+        if self.engine == "kyutai" and self.voice.startswith("clone:"):
+            return self._pocket_voice()[2]
+        return self.voice
 
     def _speak(self, text: str) -> np.ndarray:
         path = self.cache / f"{self._key(text)}.wav"
@@ -130,12 +155,14 @@ class UserVoice:
 
     def _synthesize(self, text: str) -> tuple[np.ndarray, int]:
         if self.engine == "kokoro":
-            audio, rate = self._kokoro_engine().create(
-                text, voice=self.voice, speed=self.speed, lang=kokoro_language(self.voice, self.language)
-            )
+            kokoro, code = self._kokoro_engine(), kokoro_language(self.voice, self.language)
+            spoken = kokoro_speech(kokoro.tokenizer, text, self.language, code)
+            audio, rate = kokoro.create(voice=self.voice, speed=self.speed, **spoken)
             return np.asarray(audio, dtype=np.float32), int(rate)
         if self.engine == "kyutai":
-            model, state = self._pocket_voice()
+            model, state, _ = self._pocket_voice()
+            if self.language != "en":
+                text = numbers_in_words(text, self.language)
             return model.generate_audio(state, text).numpy().astype(np.float32), int(model.sample_rate)
         raise ValueError(f"The user cannot speak with the engine {self.engine!r}")
 
@@ -149,14 +176,20 @@ class UserVoice:
         return cls._kokoro
 
     def _pocket_voice(self):
-        """Pocket TTS for the language, and the voice's state: a named voice,
-        or one cloned from a Kokoro voice reading CLONE_PROMPT."""
+        """Pocket TTS for the language, the voice's state, and the voice it
+        is: a named voice, or one cloned from a Kokoro voice reading
+        CLONE_PROMPT. Pocket TTS clones only with weights that are gated on
+        Hugging Face; without them, a cloned voice is one of Pocket TTS's own
+        voices instead (CLONE_STAND_INS), never the one Iris answers in."""
         language = POCKET_LANGUAGES.get(self.language, "english")
         key = (language, self.voice)
         if key not in self._pocket:
             model = TTSModel.load_model(language=language)
-            prompt = self.voice
-            if self.voice.startswith("clone:"):
+            voice = prompt = self.voice
+            if voice.startswith("clone:") and not getattr(model, "has_voice_cloning", True):
+                voice = prompt = CLONE_STAND_INS[voice.split(":", 1)[1][1:2]]
+                logger.warning("Pocket TTS cannot clone voices here: the user speaks %s as %s", language, voice)
+            elif voice.startswith("clone:"):
                 speaker = UserVoice(self.cache, "kokoro", self.voice.split(":", 1)[1], "en")
                 prompt = str(self.cache / f"prompt-{speaker._key(CLONE_PROMPT)}.wav")
                 if not Path(prompt).exists():
@@ -165,7 +198,7 @@ class UserVoice:
                 state = model.get_state_for_audio_prompt(prompt)
             except Exception as error:
                 raise RuntimeError(f"Pocket TTS cannot speak with the voice {self.voice!r} here: {error}")
-            self._pocket[key] = (model, state)
+            self._pocket[key] = (model, state, voice)
         return self._pocket[key]
 
     def utterance(self, parts: list[Part], level: Optional[float] = None,

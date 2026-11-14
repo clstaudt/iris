@@ -18,11 +18,14 @@ import torch
 from kokoro_onnx import Kokoro
 from kokoro_onnx import tokenizer as kokoro_tokenizer
 from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
+from kokoro_onnx.config import VOCAB as KOKORO_VOCAB
+from misaki import zh as misaki_zh
 from phonemizer.backend import EspeakBackend
 from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
 from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
+from pykakasi import kakasi
 
 from iris.audio import get_filter
 from iris.engines import (
@@ -33,6 +36,7 @@ from iris.engines import (
     spoken_languages,
 )
 from iris.events import brief
+from iris.numbers import numbers_in_words
 
 warnings.filterwarnings("ignore")
 
@@ -81,6 +85,82 @@ class KeptEspeak:
 
 kokoro_tokenizer.phonemizer = KeptEspeak()
 
+# Kokoro v1.0 was trained on misaki's Mandarin, which writes some sounds as
+# symbols of their own. kokoro-onnx's table lacks them, but Kokoro keeps them
+# on token ids the table gives to capital letters, which espeak never writes:
+# each is passed as the symbol the table has on its id.
+KOKORO_V1_IDS = {"̃": 17, "ʣ": 18, "ʥ": 19, "ʦ": 20, "ʨ": 21, "ᵝ": 22, "ꭧ": 23}
+_ON_ID = {token: symbol for symbol, token in KOKORO_VOCAB.items()}
+KOKORO_V1_SYMBOLS = str.maketrans(
+    {s: _ON_ID[t] for s, t in KOKORO_V1_IDS.items() if s not in KOKORO_VOCAB and t in _ON_ID}
+)
+# Words in Latin letters inside Mandarin, said by espeak's English
+LATIN_WORDS = re.compile(r"[A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*)*")
+
+
+class Readers:
+    """Read Japanese and Mandarin for Kokoro. Each reader is made the first
+    time it is needed (a fraction of a second), and used by one thread at a
+    time."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._kana = None
+        self._mandarin = None
+
+    def kana(self, text: str) -> str:
+        """Japanese as espeak can read it: its numbers in kanji, and every
+        kanji in hiragana. espeak reads no kanji: it says "Chinese letter",
+        in English, for each."""
+        with self._lock:
+            if self._kana is None:
+                self._kana = kakasi()
+            return "".join(item["hira"] for item in self._kana.convert(numbers_in_words(text, "ja")))
+
+    def mandarin(self, text: str, english) -> str:
+        """Kokoro's own phonemes for Mandarin (misaki's, numbers read in
+        Chinese), and english(words) for words in Latin letters."""
+        with self._lock:
+            if self._mandarin is None:
+                self._mandarin = misaki_zh.ZHG2P()
+            parts, last = [], 0
+            for match in LATIN_WORDS.finditer(text):
+                parts += [self._mandarin(text[last : match.start()])[0], english(match[0])]
+                last = match.end()
+            parts.append(self._mandarin(text[last:])[0])
+        return " ".join(p.strip() for p in parts if p.strip()).translate(KOKORO_V1_SYMBOLS)
+
+
+READERS = Readers()
+
+
+def kokoro_speech(tokenizer, text: str, language: str, code: str) -> dict:
+    """What Kokoro is given to say a text: the text, the language kokoro-onnx
+    is to read it in, and phonemes when they are made here.
+
+    kokoro-onnx reads numbers with English rules before espeak does, in any
+    language ("16,50 €" as 1650): French, Italian, Spanish and Portuguese
+    numbers are given in words. Japanese is given in kana, and Mandarin as
+    misaki's phonemes, Kokoro's own: espeak reads neither well. Spanish,
+    Portuguese and Hindi, which kokoro-onnx refuses by name, are given as
+    espeak's phonemes, named as English only to pass its check.
+
+    Args:
+        tokenizer: kokoro-onnx's tokenizer, for espeak's phonemes
+        language: Whisper code of the text's language
+        code: Kokoro's code for it (LANGUAGE_VOICE_MAP)
+    """
+    if language in ("fr", "it", "es", "pt"):
+        text = numbers_in_words(text, language)
+    if language == "ja":
+        return {"text": READERS.kana(text), "lang": code}
+    if language == "zh":
+        english = lambda words: tokenizer.phonemize(words, "en-us")  # noqa: E731
+        return {"text": text, "lang": "en-us", "phonemes": READERS.mandarin(text, english)}
+    if code in KOKORO_ONNX_LANGUAGES:
+        return {"text": text, "lang": code}
+    return {"text": text, "lang": "en-us", "phonemes": tokenizer.phonemize(text, code)}
+
 # Kokoro model download URLs
 KOKORO_MODEL_URL = (
     "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx"
@@ -96,7 +176,8 @@ KOKORO_VOICES_URL = (
 # speaks English well, so a persona keeps its own voice in English; another
 # language is spoken by the persona's voice when it was made for it, by that
 # language's default voice otherwise. Kokoro has no German or Dutch voices:
-# those are left to Pocket TTS.
+# those are left to Pocket TTS. Of the Chinese voices, Whisper understands
+# nineteen words in twenty from zf_xiaoxiao, a third from zf_xiaoni.
 LANGUAGE_VOICE_MAP = {
     "en": {"code": "en-us", "default_voice": "af_bella", "voice_prefixes": "ab"},
     "fr": {"code": "fr-fr", "default_voice": "ff_siwis", "voice_prefixes": "f"},
@@ -105,7 +186,7 @@ LANGUAGE_VOICE_MAP = {
     "pt": {"code": "pt-br", "default_voice": "pf_dora", "voice_prefixes": "p"},
     "hi": {"code": "hi", "default_voice": "hf_alpha", "voice_prefixes": "h"},
     "ja": {"code": "ja", "default_voice": "jf_alpha", "voice_prefixes": "j"},
-    "zh": {"code": "cmn", "default_voice": "zf_xiaoni", "voice_prefixes": "z"},
+    "zh": {"code": "cmn", "default_voice": "zf_xiaoxiao", "voice_prefixes": "z"},
 }
 
 
@@ -280,19 +361,8 @@ class KokoroGenerator(SpeechEngine):
             temp_audio.close()
 
             # Generate audio using kokoro-onnx Python API
-            if kokoro_lang in KOKORO_ONNX_LANGUAGES:
-                audio_data, sample_rate = self.kokoro.create(
-                    text=text, voice=voice, speed=self.speed, lang=kokoro_lang
-                )
-            else:
-                # kokoro-onnx takes only some languages by name. Kokoro
-                # speaks Spanish, Portuguese and Hindi from espeak's
-                # phonemes, as Kokoro's own pipeline does; the language
-                # named is only there to pass kokoro-onnx's check
-                phonemes = self.kokoro.tokenizer.phonemize(text, kokoro_lang)
-                audio_data, sample_rate = self.kokoro.create(
-                    text=text, voice=voice, speed=self.speed, lang="en-us", phonemes=phonemes
-                )
+            spoken = kokoro_speech(self.kokoro.tokenizer, text, language, kokoro_lang)
+            audio_data, sample_rate = self.kokoro.create(voice=voice, speed=self.speed, **spoken)
 
             # Save audio to file
             sf.write(temp_audio.name, audio_data, sample_rate)
@@ -312,6 +382,11 @@ class KokoroGenerator(SpeechEngine):
             return None
 
 
+# Characters that stand alone, as Japanese and Chinese (and Korean) put no
+# spaces between words
+STANDS_ALONE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+
+
 def heard_part(text: str, fraction: float) -> str:
     """The words of a spoken text that were heard out by the time this
     fraction of its audio had played (judged by length: speech goes through
@@ -319,11 +394,15 @@ def heard_part(text: str, fraction: float) -> str:
     end = int(len(text) * max(0.0, min(1.0, fraction)))
     if end >= len(text):
         return text
-    if not text[end].isspace():
-        # Cut in the middle of a word, which was not heard out
-        end = max(text.rfind(" ", 0, end), text.rfind("\n", 0, end))
-        if end < 0:
-            return ""
+
+    def inside_a_word(at: int) -> bool:
+        before, after = text[at - 1], text[at]
+        spaced = not (STANDS_ALONE.match(before) or STANDS_ALONE.match(after))
+        return spaced and not before.isspace() and not after.isspace()
+
+    # Cut in the middle of a word, which was not heard out: back to its start
+    while end > 0 and inside_a_word(end):
+        end -= 1
     return text[:end].rstrip()
 
 
@@ -356,6 +435,20 @@ KOKORO_VOICE_LANGUAGES = {
     "j": ("ja", "Japanese"),
     "p": ("pt", "Portuguese"),
     "z": ("zh", "Chinese"),
+}
+# A word in each language a voice speaks, said (and not played) to load what
+# speaking the language needs
+GREETINGS = {
+    "en": "Hello.",
+    "fr": "Bonjour.",
+    "it": "Ciao.",
+    "de": "Hallo.",
+    "es": "Hola.",
+    "pt": "Olá.",
+    "nl": "Hallo.",
+    "hi": "नमस्ते।",
+    "ja": "こんにちは。",
+    "zh": "你好。",
 }
 LANGUAGE_NAMES = {
     "en": "English",
@@ -527,6 +620,9 @@ class PocketGenerator(SpeechEngine):
         model = self._model(pocket_lang)
         state = self._voice_state(pocket_lang, voice)
         try:
+            # Only the English model reads digits ("am Gas im November"),
+            # and it drops the cents of an amount of money
+            text = numbers_in_words(text, language if pocket_lang != "english" else "en")
             sentences = pocket_sentences(text)
             if not sentences:
                 return None
@@ -584,6 +680,8 @@ class SpeechGenerator:
         # language, cannot be loaded; once, until it speaks again
         self.on_failure: Callable[[str], None] | None = None
         self._failing: set[tuple[str, str]] = set()
+        # (engine, language) prepared for their first reply
+        self._prepared: set[tuple[str, str]] = set()
         if prepare:
             self.prepare()
 
@@ -599,6 +697,30 @@ class SpeechGenerator:
         """Load the current engine now, so its first reply is not delayed."""
         with self._lock:
             self._engine(self.engine).prepare()
+
+    def prepare_language(self, language: str):
+        """Load what a reply in this language needs before it comes, while
+        the model thinks: the engine the persona borrows for it, and the
+        language's model, voice or phonemes. The first reply in a language
+        would otherwise wait seconds for them (Kokoro and espeak's Japanese,
+        for a Kyutai persona). Once per engine and language."""
+        speaker = speaking_engine(self.engine, language)
+        if speaker is None:
+            return
+        engine, voice = speaker[0], speaker[1] or self.voice
+        if (engine, language) in self._prepared:
+            return
+        with self._lock:
+            try:
+                generator = self._engine(engine)
+                generator.voice = voice
+                path = generator.generate(GREETINGS.get(language, GREETINGS["en"]), language=language)
+            except Exception:
+                logger.exception("Could not prepare the voice for %s", language)
+                return
+        if path:
+            Path(path).unlink(missing_ok=True)
+        self._prepared.add((engine, language))
 
     def _engine(self, engine: str) -> SpeechEngine:
         if engine not in self._engines:

@@ -1,6 +1,7 @@
 """Unit tests for streamed replies: tool rounds, and nothing unspoken."""
 
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -360,6 +361,45 @@ def test_neither_the_voice_nor_the_transcript_gets_any_markup():
     used = {"tool": "search", "label": "Searched the web", "detail": "Mars news"}
     assert ("tool.use", used) in events
     assert assistant.speech_pipeline.spoken == ["Let me look that up for you.", "Hm.Mars is red."]
+
+
+class PreparingVoice:
+    """A speech generator that notes the languages it is asked to prepare."""
+
+    def __init__(self):
+        self.prepared = []
+
+    def languages(self):
+        return frozenset({"en", "ja"})
+
+    def prepare_language(self, language):
+        self.prepared.append(language)
+
+
+def test_the_voice_for_the_reply_is_prepared_while_the_model_thinks():
+    conversation, _ = _typed([[say("こんにちは。元気です。")]])
+    assistant = object.__new__(VoiceAssistant)
+    assistant.event_bus = MagicMock()
+    assistant.speak_replies = True
+    assistant.conversation = conversation
+    assistant.speech_pipeline = Voice()
+    assistant.tts_generator = PreparingVoice()
+    assistant.interrupt_event = threading.Event()
+    assistant.suspend_event = threading.Event()
+    assistant.tools = MagicMock()
+    assistant.status_manager = MagicMock(status_lock=threading.Lock())
+
+    assistant.chat("日本語で話して", response_language="ja")
+    deadline = time.monotonic() + 2
+    while not assistant.tts_generator.prepared and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert assistant.tts_generator.prepared == ["ja"]
+
+    # With the voice off, nothing is spoken, so nothing is prepared
+    assistant.speak_replies = False
+    assistant.chat("日本語で話して", response_language="ja")
+    time.sleep(0.1)
+    assert assistant.tts_generator.prepared == ["ja"]
 
 
 def test_without_tools_a_typed_call_is_never_run():

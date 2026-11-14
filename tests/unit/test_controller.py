@@ -2,10 +2,12 @@
 
 import threading
 import time
+from types import SimpleNamespace
 
 from iris.audio import AudioPlayer
 from iris.controller import AssistantController, silent_microphone_message
 from iris.events import EventBus
+from iris.memory import MemoryStore
 from iris.personas import get_persona
 from iris.tts import SpeechGenerator
 
@@ -217,6 +219,40 @@ def test_history_keeps_the_visible_conversation():
     events = controller.history()["events"]
     assert [e["type"] for e in events] == ["chat.user", "chat.done"]
     assert events[1]["data"]["text"] == "Hello"
+
+
+def test_the_conversation_is_shown_again_after_a_restart(tmp_path):
+    """With memory, one conversation goes on across launches: a new core
+    shows its recent turns again, oldest first, as the app shows turns, and
+    keeps them for a window that reloads; notes to the model stay out."""
+    earlier = MemoryStore(tmp_path / "memory.db")
+    earlier.add_turn("user", "My sister's cat is called Pepper.", "voice")
+    earlier.add_turn("assistant", "Pepper is a good name for a cat.")
+    earlier.add_turn("system", "You are now HAL.")
+    earlier.add_turn("user", "明日の東京の天気は？", "text")
+    earlier.add_turn("assistant", "晴れです。")
+
+    bus = EventBus()
+    shown = []
+    bus.subscribe(lambda kind, data: shown.append((kind, data)))
+    controller = AssistantController(bus)
+    # The new core reads what the last one wrote
+    controller.assistant = SimpleNamespace(memory=SimpleNamespace(store=MemoryStore(tmp_path / "memory.db")))
+    controller._restore_thread()
+
+    assert shown == [
+        ("chat.user", {"text": "My sister's cat is called Pepper.", "source": "voice", "restored": True}),
+        ("chat.done", {"text": "Pepper is a good name for a cat.", "interrupted": False, "restored": True}),
+        ("chat.user", {"text": "明日の東京の天気は？", "source": "text", "restored": True}),
+        ("chat.done", {"text": "晴れです。", "interrupted": False, "restored": True}),
+    ]
+    assert [(e["type"], e["data"]) for e in controller.history()["events"]] == shown
+
+    # Without memory there is nothing to show again
+    shown.clear()
+    controller.assistant = SimpleNamespace(memory=None)
+    controller._restore_thread()
+    assert shown == []
 
 
 def test_the_conversation_before_a_restart_comes_back_marked_as_such():

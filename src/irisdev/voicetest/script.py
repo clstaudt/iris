@@ -4,7 +4,8 @@ A Conversation is a list of turns and the settings it is held with (tools,
 a scripted web, the model's rules, a persona, noise in the room). A Turn is
 one thing the user says or types, and says when (At), what else happens
 meanwhile (actions such as Stop, asides and sounds in the room), and what is
-expected of Iris.
+expected of Iris. Between turns, a Silence watches that nothing happens, and
+a Restart quits Iris and starts it again.
 
 At says when something happens, relative to the turn before (for a turn)
 or to the turn itself (for its actions and asides):
@@ -221,6 +222,10 @@ class Turn:
     unsaid: list = field(default_factory=list)
     # What is said instead to a real model
     real_parts: Optional[list] = None
+    # What the user's voice reads aloud instead of the parts, which the turn
+    # is still judged against (the same words, written so the voice reads
+    # them right)
+    reading: Optional[list] = None
     # Said only when this holds for the reply before it (its text)
     when: Optional[Callable[[str], bool]] = None
 
@@ -263,6 +268,12 @@ class Turn:
     # Phrases the reply's voice says exactly once, and never, as transcribed
     spoken_once: list[str] = field(default_factory=list)
     spoken_excludes: list[str] = field(default_factory=list)
+    # The share of the reply's words (characters in Japanese and Chinese)
+    # its voice is heard saying, as transcribed, at least
+    spoken_share: Optional[float] = None
+    # Numbers the reply's voice is heard saying, as Whisper writes them back
+    # (in digits): "10" and "30" of a time said as "zehn Uhr dreißig"
+    spoken_numbers: list[str] = field(default_factory=list)
     # Words of which an error the turn reports should mention at least one
     # (case ignored): the turn must report such an error, and it does not
     # fail the turn
@@ -321,6 +332,22 @@ class Silence:
 
 
 @dataclass
+class Restart:
+    """Iris is quit and started again, as when the app is relaunched; with
+    memory on, the conversation comes back from it."""
+
+    # Words the conversation shown again after the restart holds (its
+    # chat.user and chat.done events), each in one of them; given, the user's
+    # turns and the replies must both be shown again
+    restores: list[str] = field(default_factory=list)
+    name: str = ""
+
+    @property
+    def text(self) -> str:
+        return "(restart)"
+
+
+@dataclass
 class Conversation:
     name: str
     turns: list
@@ -352,6 +379,10 @@ class Conversation:
     fresh: bool = False
     # Messages the conversation starts with
     seed_history: list = field(default_factory=list)
+    # Held with long-term memory on, as the app runs Iris, in a memory of
+    # its own; and topics remembered from before ({title, gist, summary})
+    memory: bool = False
+    memory_topics: list = field(default_factory=list)
     # Checks known to fail today: "check" for any turn, "T2:check" for one,
     # "T2:*" for all of a turn's
     expected_failures: list = field(default_factory=list)

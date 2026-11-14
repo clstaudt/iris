@@ -32,7 +32,7 @@ from irisdev.voicetest.assistant import AssistantUnderTest, IrisUnderTest, finis
 from irisdev.voicetest.conversations import CONVERSATIONS, GROUPS, group
 from irisdev.voicetest.fakesight import FakeCamera, FakeScreen
 from irisdev.voicetest.fakeweb import FakeWeb
-from irisdev.voicetest.script import At, Conversation, Say, Silence, Sound, Turn
+from irisdev.voicetest.script import At, Conversation, Restart, Say, Silence, Sound, Turn
 from irisdev.voicetest.scripted import BUDGETS, ScriptedConversations, TurnResult, summarize
 from irisdev.voicetest.selftalk import SelfTalk, SelfTalkResult
 from irisdev.voicetest.stub_llm import Rule, StubModel
@@ -50,6 +50,7 @@ __all__ = [
     "FakeWeb",
     "GROUPS",
     "IrisUnderTest",
+    "Restart",
     "Rule",
     "Say",
     "ScriptedConversations",

@@ -758,6 +758,14 @@ class VoiceAssistant:
                 clean_text, language=self._speech_language(clean_text)
             )
 
+    def _prepare_voice(self, language: str):
+        """Load what a reply in this language needs, ahead of it (see
+        SpeechGenerator.prepare_language)."""
+        try:
+            self.tts_generator.prepare_language(language)
+        except Exception:
+            logger.exception("Could not prepare the voice for %s", language)
+
     def _speech_language(self, text: str) -> str:
         """The language a piece of the reply is spoken in: the one it is
         written in. The model may answer in another language than the
@@ -976,6 +984,11 @@ class VoiceAssistant:
             # the reply is spoken in the language it is written in
             self.speech_pipeline.current_language = response_language
             self._reply_language = response_language
+            # What speaking that language needs loads while the model thinks
+            if self.speak_replies:
+                threading.Thread(
+                    target=self._prepare_voice, args=(response_language,), daemon=True
+                ).start()
             self.speech_pipeline.begin_reply()
             if self._timing is not None:
                 self._timing.reply_started()

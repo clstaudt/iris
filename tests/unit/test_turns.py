@@ -7,6 +7,8 @@ attributes the code under test touches are filled in.
 import queue
 import threading
 
+import pytest
+
 from iris.assistant import VoiceAssistant
 from iris.events import EventBus
 from iris.tts import SpeechGenerator
@@ -187,3 +189,46 @@ def test_a_typed_turn_goes_on_in_the_language_typed():
 
     assert answered == ["it", "it"]
     assert assistant.conversation_language == "it"
+
+
+def test_english_typed_after_german_speech_is_answered_in_english():
+    """Typed turns took the language last spoken: English typed after German
+    speech was answered "in German"."""
+    assistant = _bare_assistant()
+    assistant.status_manager = QuietStatus()
+    assistant.interrupt_event = threading.Event()
+    assistant.transcriber = Transcript("Was ist die Hauptstadt von Australien?", "de")
+    answered = []
+    assistant.chat = lambda text, response_language, source=None, attachments=None: (
+        answered.append((source, response_language))
+    )
+    assistant._answer_spoken("/tmp/heard.wav")
+    assistant._run_text_turn({"text": "What is the capital of Canada?", "id": "t1"})
+    assistant._run_text_turn({"text": "Wie spät ist es jetzt in Tokio?", "id": "t2"})
+
+    assert answered == [("voice", "de"), ("text", "en"), ("text", "de")]
+
+
+@pytest.mark.parametrize(
+    "text, language",
+    [
+        ("Wie wird das Wetter morgen in Hamburg?", "de"),
+        ("明日の東京の天気を教えてください。", "ja"),
+        ("北京明天的天气怎么样？", "zh"),
+        ("Qual é a capital do Brasil?", "pt"),
+        ("Hoe laat gaat het Rijksmuseum morgen open?", "nl"),
+        ("कल दिल्ली में मौसम कैसा रहेगा?", "hi"),
+    ],
+)
+def test_a_first_typed_message_is_answered_and_spoken_in_its_language(text, language):
+    assistant = _bare_assistant()
+    events = []
+    assistant.event_bus.subscribe(lambda kind, data: events.append((kind, data)))
+    answered = []
+    assistant.chat = lambda text, response_language, source=None, attachments=None: (
+        answered.append(response_language)
+    )
+    assistant._run_text_turn({"text": text, "id": "t1"})
+
+    assert answered == [language]
+    assert events[0][1]["language"] == language

@@ -107,10 +107,29 @@ def failure_message(error: Exception, host: Optional[str], model: Optional[str] 
 # A bullet or numbered list marker at the start of a line
 LIST_ITEM = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
 # A line already ending in punctuation that makes the voice pause, perhaps
-# followed by closing quotes or brackets
-PAUSED_END = re.compile(r"[.!?…:;,][\"'”’)\]]*$")
-# Where streamed text may be cut for speech: after a sentence or at a line
-SPEECH_BREAK = re.compile(r"[.!?](?= )|\n")
+# followed by closing quotes or brackets (Japanese and Chinese ones, and the
+# Hindi danda, too)
+PAUSED_END = re.compile(r"[.!?…:;,。！？、，：；।॥][\"'”’)\]」』）]*$")
+# Emoji, which the voice does not say: pictographs and the symbols and
+# dingbats used as emoji, with their skin tones, presentation selector and
+# joiner. Only these blocks: a range across them once took every Japanese
+# and Chinese character for an emoji, and those replies were never spoken.
+EMOJI = re.compile(
+    "["
+    "\U0001f000-\U0001faff"  # pictographs, emoticons, transport, flags, skin tones
+    "\u2600-\u27bf"  # miscellaneous symbols and dingbats
+    "\u2b00-\u2bff"  # arrows, stars and squares
+    "\u24c2\ufe0f\u200d\u20e3"  # circled M, emoji presentation, joiner, keycap
+    "]+"
+)
+# Where streamed text may be cut for speech: after a sentence or at a line.
+# Japanese and Chinese end a sentence with 。！？ and go on without a space,
+# so the text after it must have begun (a closing quote or bracket stays with
+# the sentence); Hindi ends one with a danda.
+CLOSING = "」』）】〉》”’\"')\\]"
+SPEECH_BREAK = re.compile(
+    rf"[.!?](?= )|[।॥](?=\s)|[。！？]+[{CLOSING}]*(?=[^{CLOSING}。！？])|\n"
+)
 # The number of a numbered list item, which looks like a sentence end
 LIST_NUMBER = re.compile(r"(?:^|\n)\s*\d+\.$")
 
@@ -275,6 +294,9 @@ class ConversationManager:
         self._no_tools: set[str] = set()
         self.model = model
         self.vision_model = vision_model
+        # The language the user spoke or typed last (Whisper code), so the
+        # model is told when the user goes back to English
+        self.language = "en"
         self.conversation_history = []
         # The last complete reply, as it is kept in the conversation
         self.reply: Optional[str] = None
@@ -467,19 +489,7 @@ class ConversationManager:
         html = markdown.markdown(separate_lists(text))
         clean_text = BeautifulSoup(html, "html.parser").get_text()
 
-        # Remove emojis using regex (matches all emoji characters)
-        emoji_pattern = re.compile(
-            "["
-            "\U0001f600-\U0001f64f"  # emoticons
-            "\U0001f300-\U0001f5ff"  # symbols & pictographs
-            "\U0001f680-\U0001f6ff"  # transport & map symbols
-            "\U0001f1e0-\U0001f1ff"  # flags (iOS)
-            "\U00002702-\U000027b0"
-            "\U000024c2-\U0001f251"
-            "]+",
-            flags=re.UNICODE,
-        )
-        clean_text = emoji_pattern.sub("", clean_text)
+        clean_text = EMOJI.sub("", clean_text)
 
         return pause_at_line_ends(clean_text).strip()
 
@@ -820,13 +830,16 @@ class ConversationManager:
         # Get managed conversation context
         messages = self.manage_context(with_tools=use_tools)
 
-        # Inject a language instruction so the LLM replies in the right language
-        if response_language != "en":
+        # Inject a language instruction so the LLM replies in the right
+        # language: any but English, and English when the user goes back to
+        # it, or the model carries on in the language the conversation was in
+        if response_language != "en" or self.language != "en":
             lang_name = _lang_names.get(response_language, response_language)
             messages.append({
                 "role": "system",
                 "content": f"The user is speaking in {lang_name}. Respond in {lang_name}.",
             })
+        self.language = response_language
 
         # Add current user message, with the files still in context
         user_message = {"role": "user", "content": prompt + self._files_context(attachments)}
