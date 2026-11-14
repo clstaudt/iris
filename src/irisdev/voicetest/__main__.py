@@ -1,10 +1,14 @@
 """Talk to Iris in a virtual room, and report how it went.
 
-    python -m irisdev.voicetest conversations [--llm-host URL --llm-model NAME] [--only TEXT]
+    python -m irisdev.voicetest conversations [--group NAME] [--only TEXT] [--tag TAG]
+    python -m irisdev.voicetest conversations --run whisper-matrix
+    python -m irisdev.voicetest conversations --list
     python -m irisdev.voicetest selftalk --llm-host URL --llm-model NAME [--minutes 5]
 
 Without a server, conversations use a scripted model (StubModel), which
-tests the voice without a model's time; replies are then not checked. Iris
+tests the voice without a model's time; replies are then not checked, apart
+from facts that come from the scripted model or the scripted web. Web
+searches go to a scripted web (FakeWeb) unless --web real is given. Iris
 keeps its personas, memory and plugins in a folder of its own, so the
 user's are left alone; the speech models already on this computer are used
 (irisdev.voicetest.isolation). Nothing is played on the speakers or heard
@@ -26,7 +30,6 @@ from pathlib import Path
 import soundfile as sf
 
 from irisdev.voicetest import (
-    CONVERSATIONS,
     IrisUnderTest,
     ScriptedConversations,
     SelfTalk,
@@ -36,6 +39,10 @@ from irisdev.voicetest import (
     summarize,
 )
 from irisdev.voicetest.acoustics import RATE
+from irisdev.voicetest.conversations import GROUPS, group
+from irisdev.voicetest.resources import Resources
+from irisdev.voicetest.runners import RUNS, report_all
+from irisdev.voicetest.script import Echo, Noise
 from irisdev.voicetest.scripted import budgets_from
 from irisdev.voicetest.stub_llm import MODEL
 
@@ -52,16 +59,47 @@ def save_audio(folder: Path, endpoints, start: float, end: float):
         sf.write(folder / f"{slug(endpoint.name)}-speaker.wav", endpoint.speaker.recording(start, end), RATE)
 
 
+def choose(args) -> list:
+    """The conversations asked for: of the groups given (basic by default),
+    those whose name or a tag holds an --only text, with every --tag."""
+    chosen = group(*(args.group or ["basic"]))
+    if args.only:
+        wanted = [o.lower() for o in args.only]
+        chosen = [c for c in chosen if any(o in c.name.lower() or any(o == t.lower() for t in c.tags) for o in wanted)]
+    if args.tag:
+        chosen = [c for c in chosen if all(t in c.tags for t in args.tag)]
+    if args.noise or args.echo_room is not None:
+        changed = []
+        for conversation in chosen:
+            conversation = type(conversation)(**conversation.__dict__)
+            if args.noise:
+                sound, _, snr = args.noise.partition(":")
+                conversation.noise = list(conversation.noise) + [Noise(sound, snr=float(snr or 15))]
+            if args.echo_room is not None:
+                conversation.echo = Echo(gain=args.echo_gain, room=args.echo_room, drive=args.echo_drive)
+            changed.append(conversation)
+        chosen = changed
+    return chosen
+
+
 def conversations(args, out: Path) -> int:
-    chosen = [c for c in CONVERSATIONS if not args.only or any(o.lower() in c.name for o in args.only)]
-    if not chosen:
-        print(f"No conversation matches {args.only}; there are: " + ", ".join(c.name for c in CONVERSATIONS))
+    if args.list:
+        for name, members in GROUPS.items():
+            print(f"{name}:")
+            for conversation in members:
+                print(f"  {conversation.name}  [{', '.join(conversation.tags)}]")
+        return 0
+    chosen = [] if args.run else choose(args)
+    if not chosen and not args.run:
+        print("No conversation matches; see --list for the groups and their conversations")
         return 2
+    if args.web == "real":
+        os.environ["IRIS_VOICETEST_WEB"] = "real"
     stub = None if args.llm_host else StubModel(first_token=args.first_token)
-    space = Space(echo_gain=args.echo_gain)
+    space = Space(echo_gain=args.echo_gain, echo_room=args.echo_room, echo_drive=args.echo_drive)
     endpoint = space.endpoint(args.persona)
     voice = UserVoice(args.voice_cache)
-    iris = IrisUnderTest(endpoint, args.llm_host or stub.url, args.llm_model or MODEL, args.persona)
+    iris = IrisUnderTest(endpoint, args.llm_host or stub.url, args.llm_model or MODEL, args.persona, stub=stub)
     print(f"Starting {args.persona} ({'scripted model' if stub else args.llm_model})")
     iris.start()
     warm = out / "warm.wav"
@@ -70,29 +108,40 @@ def conversations(args, out: Path) -> int:
     warm.unlink()
     runner = ScriptedConversations(
         iris, space, voice, check_replies=stub is None, budgets=budgets_from(args.budgets),
-        reply_timeout=args.reply_timeout or (300.0 if stub is None else 180.0),
+        reply_timeout=args.reply_timeout or (300.0 if stub is None else 180.0), stub=stub,
+        resources=Resources(), transcribe_replies=args.transcribe,
     )
     results = []
     try:
         for round_ in range(args.repeat):
+            for name in args.run or []:
+                begun = time.monotonic()
+                results += RUNS[name](runner)
+                save_audio(out / f"{round_ + 1}-{slug(name)}", [endpoint], begun, time.monotonic())
             for number, conversation in enumerate(chosen, 1):
+                print(f"{conversation.name}")
                 begun = time.monotonic()
                 results += runner.hold(conversation)
-                save_audio(out / f"{round_ + 1}-{number:02d}-{slug(conversation.name)}", [endpoint],
+                save_audio(out / f"{round_ + 1}-{number:03d}-{slug(conversation.name)}", [endpoint],
                            begun, time.monotonic())
     finally:
         iris.close()
         if stub:
             stub.close()
     summary = summarize(results)
+    conclusions = report_all(results, runner.budgets)
     report = {
         "model": "scripted" if stub else args.llm_model,
         "persona": args.persona,
+        "web": args.web,
         "summary": summary,
+        "conclusions": conclusions,
         "turns": [asdict(r) | {"passed": r.passed} for r in results],
     }
-    (out / "report.json").write_text(json.dumps(report, indent=2))
+    (out / "report.json").write_text(json.dumps(report, indent=2, default=str))
     print(_summary_lines(summary))
+    for line in conclusions:
+        print(line)
     print(f"Report and recordings: {out}")
     return 0 if summary["passed"] == summary["turns"] else 1
 
@@ -139,15 +188,22 @@ def selftalk(args, out: Path) -> int:
 def _summary_lines(summary: dict) -> str:
     def stat(name, label):
         value = summary.get(name)
-        return f"{label}: median {value['median']:.2f} s, worst {value['worst']:.2f} s" if value else None
+        if not value:
+            return None
+        return f"{label}: median {value['median']:.2f} s, p90 {value['p90']:.2f} s, worst {value['worst']:.2f} s"
 
     parts = [f"{summary['passed']} of {summary['turns']} turns passed"]
+    if summary.get("expected_failures"):
+        parts.append(f"{summary['expected_failures']} with failures known today")
     parts += [p for p in (stat("first_word", "first word"), stat("voice_pipeline", "voice pipeline"),
                           stat("barge_in", "silent after being interrupted"), stat("stop", "silent after Stop"))
               if p]
     if summary["taken_early"]:
         parts.append(f"turns taken too early: {summary['taken_early']}")
-    return " · ".join(parts)
+    lines = [" · ".join(parts)]
+    lines += [f"now passes: {entry}" for entry in summary.get("now_passes", [])]
+    lines += [f"skipped: {entry}" for entry in summary.get("skipped", [])]
+    return "\n".join(lines)
 
 
 def main(argv=None) -> int:
@@ -157,13 +213,24 @@ def main(argv=None) -> int:
     parser.add_argument("--llm-model", default=os.environ.get("IRIS_VOICETEST_MODEL"),
                         help="the model (or IRIS_VOICETEST_MODEL)")
     parser.add_argument("--echo-gain", type=float, default=0.3, help="how loud a speaker is in its own microphone")
+    parser.add_argument("--echo-room", type=float, help="the speaker's echo rings in a room with this RT60 (seconds)")
+    parser.add_argument("--echo-drive", type=float, help="the speaker distorts at this drive (tanh)")
     parser.add_argument("--out", type=Path, default=Path("voicetest-output"))
     parser.add_argument("--voice-cache", type=Path, default=Path.home() / ".cache" / "iris-voicetest",
                         help="where the user's synthesized utterances are kept")
     commands = parser.add_subparsers(dest="command", required=True)
 
     talk = commands.add_parser("conversations", help="scripted conversations with one Iris")
-    talk.add_argument("--only", action="append", help="conversations whose name contains this")
+    talk.add_argument("--group", action="append", help="a group of conversations (basic by default; see --list)")
+    talk.add_argument("--only", action="append", help="conversations whose name contains this, or with this tag")
+    talk.add_argument("--tag", action="append", help="only conversations with this tag")
+    talk.add_argument("--list", action="store_true", help="list the groups and their conversations")
+    talk.add_argument("--run", action="append", choices=["calibrated-addition", "whisper-matrix"],
+                      help="a scenario built from a measurement on this computer")
+    talk.add_argument("--noise", help="a sound in the room for every conversation, as fan:15 (sound:SNR in dB)")
+    talk.add_argument("--web", choices=["fake", "real"], default="fake",
+                      help="search the scripted web, or the real one (or IRIS_VOICETEST_WEB=real)")
+    talk.add_argument("--transcribe", action="store_true", help="transcribe every reply's voice afterwards")
     talk.add_argument("--persona", default="iris")
     talk.add_argument("--repeat", type=int, default=1, help="hold the conversations this many times")
     talk.add_argument("--reply-timeout", type=float, help="seconds a reply may take")
