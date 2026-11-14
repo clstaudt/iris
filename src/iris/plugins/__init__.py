@@ -18,7 +18,7 @@ from pathlib import Path
 
 from iris import engines
 from iris.plugin import Plugin
-from iris.plugins import camera, memory, screen, web
+from iris.plugins import camera, memory, screen, sleep, web
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,13 @@ ENTRY_POINT_GROUP = "iris.plugins"
 USER_DIR = Path.home() / ".iris" / "plugins"
 
 # Shipped with Iris, in the order their tools are offered
-BUILT_IN: tuple[Plugin, ...] = (memory.plugin, camera.plugin, screen.plugin, web.plugin)
+BUILT_IN: tuple[Plugin, ...] = (
+    memory.plugin,
+    camera.plugin,
+    screen.plugin,
+    web.plugin,
+    sleep.plugin,
+)
 
 
 @dataclass

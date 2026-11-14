@@ -13,6 +13,7 @@
     capture_screen: { icon: "monitor", label: "Looked at your screen" },
     recall: { icon: "brain", label: "Recalled" },
     search_memory: { icon: "search", label: "Searched memory" },
+    end_conversation: { icon: "moon", label: "Went to sleep" },
   };
 
   // Whole emoji sequences (ZWJ families, flags, skin tones) plus the space

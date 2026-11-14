@@ -91,7 +91,15 @@ class Tools:
         return bool(self._tools.get(plugin_id))
 
     def _enabled_tools(self) -> list[Tool]:
-        return [tool for pid in self._plugins if pid in self._tools for tool in self._tools[pid]]
+        """The tools offered now: those of the plugins on, unless a tool is
+        held back for the moment (see Tool.offered)."""
+        return [
+            tool
+            for pid in self._plugins
+            if pid in self._tools
+            for tool in self._tools[pid]
+            if tool.offered is None or tool.offered()
+        ]
 
     def tool(self, name: str) -> Optional[Tool]:
         """The tool of this name, if it is on."""

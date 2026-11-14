@@ -65,7 +65,7 @@ def _load(folder, monkeypatch, entries=()):
 
 def test_the_shipped_plugins_come_first(tmp_path, monkeypatch):
     loaded = _load(tmp_path, monkeypatch)
-    assert [p.id for p in loaded.plugins] == ["memory", "camera", "screen", "web"]
+    assert [p.id for p in loaded.plugins] == ["memory", "camera", "screen", "web", "sleep"]
     assert loaded.failures == []
 
 

@@ -81,7 +81,7 @@ What Iris runs by default:
 | Language model | Ollama (e.g. `qwen3:1.7b`), or any OpenAI-compatible server |
 | Speech synthesis | Kyutai's Pocket TTS or Kokoro, chosen per persona |
 | Echo cancellation | WebRTC's AEC3 through LiveKit, so you can talk over Iris |
-| Tools | Camera, screen, web search and memory, as plugins |
+| Tools | Camera, screen, web search, memory and going to sleep, as plugins |
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -139,7 +139,7 @@ Iris starts listening as soon as the models are loaded. Speaking and typing shar
 - Speak while Iris is talking to interrupt it: the voice pauses as soon as you start, and stops if you go on. Iris keeps what it got to say, as far as you heard it, and answers what you said. An echo canceller takes Iris's own voice out of what the microphone hears; it first learns the room from a few seconds of the voice, and a single short word said over loud speakers may not get through. Should the voice pause too often with your speakers, switch **Interrupt by voice** off under Settings > Pipeline > Output; the microphone then closes while Iris speaks.
 - Typed and spoken messages are answered one at a time, in order. A message sent while Iris is still answering waits as a queued bubble. While you type, the microphone stays closed, and typing anywhere in the window goes to the message box.
 - **Pause** (or a click on the orb) holds the whole conversation: speech stops mid-sentence, the reply stops streaming, the microphone closes, and queued messages wait. **Resume** picks up where it stopped. **Mic** switches listening off while still answering typed messages; **Voice** switches spoken replies off for a text-only chat; **Stop** cancels the current reply.
-- **Wake word** (Settings): Iris sleeps until addressed by name. "Iris, what's the weather?" wakes it and is answered at once; a bare "Iris" plays a soft chime and waits for the request. Follow-ups need no name. Iris stays awake while you talk and for a while after each reply (**Stay awake**, 30 seconds by default); over the last 10 seconds the orb drifts toward its sleeping tone, then Iris goes back to sleep with a soft falling chime. Saying the **sleep word** ("That's all, Iris" by default) sends it to sleep right away. While asleep, only speech reaches the smallest Whisper model, and the wake word only counts at the start of an utterance, so "tell Iris I said hi" doesn't wake it.
+- **Wake word** (Settings): Iris sleeps until addressed by name. "Iris, what's the weather?" wakes it and is answered at once; a bare "Iris" plays a soft chime and waits for the request. Follow-ups need no name. Iris stays awake while you talk and for a while after each reply (**Stay awake**, 30 seconds by default); over the last 10 seconds the orb drifts toward its sleeping tone, then Iris goes back to sleep with a soft falling chime. Saying the **sleep word** ("That's all, Iris" by default) sends it to sleep right away. Iris also goes to sleep by itself once you are clearly done, when you say goodbye or ask it to stop listening: it says its goodbye, and falls asleep once the voice has died away, so its own words cannot wake it (the **Going to sleep** tool, offered only while a wake word is set). While asleep, only speech reaches the smallest Whisper model, and the wake word only counts at the start of an utterance, so "tell Iris I said hi" doesn't wake it.
 
 ### Presence mode
 
@@ -147,11 +147,12 @@ For using Iris by voice and vision alone, the shrink button beside Memory and Se
 
 ### Tools and files
 
-The camera, screen capture and web search are on by default and can be switched off under Settings > Pipeline > Tools; a tool whose optional dependencies are missing shows as not installed. Iris decides itself when to use them:
+The camera, screen capture, web search and going to sleep are on by default and can be switched off under Settings > Pipeline > Tools; a tool whose optional dependencies are missing shows as not installed. Iris decides itself when to use them:
 
 - **Camera:** "What am I holding?", "Read the text on this paper".
 - **Screen:** "What's on my screen right now?", "Can you read the code I have open?" On macOS, screen recording must be allowed for Iris (in development, for the app that started it) in **System Settings > Privacy & Security > Screen Recording**.
 - **Web search:** current facts, news, and pages it should read.
+- **Going to sleep:** "Thanks, that's all for now", "Good night". Iris says goodbye and sleeps until called by its wake word; it is offered only while a wake word is set.
 
 Images, from the camera, the screen or an attachment, go to a model that can see, such as `qwen3-vl:8b`, when the server has one.
 

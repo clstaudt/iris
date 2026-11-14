@@ -822,9 +822,15 @@ class ConversationManager:
             messages.append(
                 {"role": "assistant", "content": "".join(said), "tool_calls": tool_calls}
             )
-            uses_vision = self._run_tools(tool_calls, messages, on_tool_use)
-            if uses_vision is None:
+            ran = self._run_tools(tool_calls, messages, on_tool_use)
+            if ran is None:
                 return  # cancelled
+            uses_vision, ends = ran
+            # A call that ends the reply (going to sleep) came with what the
+            # reply had to say: asked again, the model would say it twice.
+            # Said nothing yet, it answers once more, without tools.
+            if ends and "".join(spoken).strip():
+                break
             # A tool that returned an image is answered by the vision model
             response_model = self.vision_model if (uses_vision and self.vision_model) else model
 
@@ -832,7 +838,7 @@ class ConversationManager:
             # a page: without them a model writes its next call out as
             # text. A separate vision model, and the last round, answer
             # without tools.
-            offer_tools = rounds < MAX_TOOL_ROUNDS and response_model == model
+            offer_tools = not ends and rounds < MAX_TOOL_ROUNDS and response_model == model
             schemas = self.tools.get_schemas() if offer_tools else None
             if not offer_tools:
                 messages.append({"role": "system", "content": NO_MORE_TOOLS_NOTE})
@@ -854,11 +860,13 @@ class ConversationManager:
             return None
         return [{"function": {"name": c.name, "arguments": c.arguments}} for c in runnable]
 
-    def _run_tools(self, tool_calls: list, messages: list, on_tool_use) -> Optional[bool]:
+    def _run_tools(self, tool_calls: list, messages: list, on_tool_use) -> Optional[tuple[bool, bool]]:
         """Run a round's tool calls, adding their results to the messages.
-        Returns whether one returned an image, or None if the reply was
-        cancelled before all had run."""
+        Returns whether one returned an image and whether every call ends
+        the reply (going to sleep), or None if the reply was cancelled
+        before all had run."""
         uses_vision = False
+        ends = True
         for tool_call in tool_calls:
             tool_name = tool_call["function"]["name"]
             tool_args = tool_call["function"].get("arguments", {})
@@ -870,6 +878,7 @@ class ConversationManager:
 
             # Execute the tool (it shows its activity meanwhile)
             result = self.tools.execute(tool_name, **tool_args)
+            ends = ends and bool(result.get("success") and result.get("ends_reply"))
             if result.get("success") and result.get("pin_topic") is not None:
                 self.pinned[result["pin_topic"]] = PIN_TURNS
 
@@ -886,4 +895,4 @@ class ConversationManager:
             else:
                 tool_msg["content"] = result.get("message", "Tool executed")
             messages.append(tool_msg)
-        return uses_vision
+        return uses_vision, ends

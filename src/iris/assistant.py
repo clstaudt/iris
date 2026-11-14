@@ -44,6 +44,11 @@ DEFAULT_SLEEP_WORD = "That's all"
 # While dormant an utterance ends after this much silence, so the wake word
 # is recognized promptly instead of after the conversational pause
 DORMANT_SILENCE = 0.8
+# Seconds the voice is given to die away in the room after Iris's parting
+# words, before it falls asleep and listens for the wake word. When the
+# voice leaves the speaker is not known exactly (Bluetooth adds its own
+# delay), so this is generous rather than measured.
+GOODBYE_SETTLE = 1.0
 
 
 # Seconds the microphone stays closed after a voice preview, for the room
@@ -140,6 +145,11 @@ class VoiceAssistant:
 
     # Where the current turn's time goes, reported once the reply is heard
     _timing: Optional[TurnTiming] = None
+    # The reply being given ends the conversation: the model called the
+    # sleep tool, and Iris goes to sleep once the reply has been heard
+    _ending = False
+    # Until then the microphone stays closed after parting words
+    _quiet_until = 0.0
 
     def __init__(
         self,
@@ -314,7 +324,7 @@ class VoiceAssistant:
         self.plugins = list(plugins) if plugins is not None else list(BUILT_IN)
         self.tools = Tools(
             self.plugins,
-            PluginContext(memory=self.memory.store if self.memory else None),
+            self._plugin_context(),
             status_manager=self.status_manager,
             choices=tools,
         )
@@ -334,6 +344,16 @@ class VoiceAssistant:
         )
         if self.memory:
             self.memory.start()
+
+    def _plugin_context(self) -> PluginContext:
+        """What the plugins get to make their tools: long-term memory, and
+        going to sleep, which is offered only while a wake word is set to
+        wake Iris again (as the sleep word only works with one)."""
+        return PluginContext(
+            memory=self.memory.store if self.memory else None,
+            sleep=self._end_conversation,
+            can_sleep=lambda: bool(self.wake_word),
+        )
 
     def config_info(self) -> dict:
         """Describe the loaded models and audio input for external UIs."""
@@ -467,6 +487,28 @@ class VoiceAssistant:
         """Waiting to be addressed by the wake word."""
         return bool(self.wake_word) and time.monotonic() >= self.awake_until
 
+    def _go_to_sleep(self):
+        """End the conversation at once, as the sleep word does: the run
+        loop then marks it (the sleep event, the falling chime) and listens
+        only for the wake word. The turn that did it does not wake Iris
+        again (awake_until is zero)."""
+        self.awake_until = 0.0
+
+    def _end_conversation(self):
+        """The sleep tool: Iris goes to sleep once the reply being given has
+        been heard to the end."""
+        self._ending = True
+
+    def _sleep_after_goodbye(self):
+        """Go to sleep after the parting words were heard. The voice is left
+        a moment to die away in the room first (see run_loop): the falling
+        chime must not cut its last words, and the microphone, listening for
+        the wake word, must not hear them, as they may well hold the wake
+        word itself."""
+        if self.speak_replies:
+            self._quiet_until = time.monotonic() + GOODBYE_SETTLE
+        self._go_to_sleep()
+
     def _stay_awake(self):
         """Start the awake window over and tell the UI how long it lasts."""
         self.awake_until = time.monotonic() + self.wake_window
@@ -520,7 +562,8 @@ class VoiceAssistant:
                 self._chime()
                 return
         self._run_voice_turn(audio_path)
-        # Unless the sleep word just put it to sleep (awake_until is zero)
+        # Unless the turn just put it to sleep: the sleep word, or the reply
+        # ending the conversation (awake_until is zero)
         if self.wake_word and self.awake_until > 0:
             self._stay_awake()
 
@@ -673,6 +716,9 @@ class VoiceAssistant:
     def _answer_typed(self, turn: dict):
         text = turn["text"]
         attachments = turn.get("attachments") or []
+        # A typed message wakes Iris, as its name does
+        if self.wake_word:
+            self._stay_awake()
         # The conversation goes on in the language typed, as if spoken
         self.conversation_language = language.language_of(
             text, self.conversation_language, self.tts_generator.languages()
@@ -703,7 +749,8 @@ class VoiceAssistant:
             source="text",
             attachments=attachments,
         )
-        if self.wake_word:
+        # Unless the reply ended the conversation (awake_until is zero)
+        if self.wake_word and self.awake_until > 0:
             self._stay_awake()
 
     def _run_voice_turn(self, audio_path: str):
@@ -753,7 +800,7 @@ class VoiceAssistant:
             and self.sleep_word
             and match_sleep_word(text, self.sleep_word, self.wake_word)
         ):
-            self.awake_until = 0.0
+            self._go_to_sleep()
             return
 
         # Determine response language: the one the user spoke, if the
@@ -842,6 +889,9 @@ class VoiceAssistant:
             LLM response text
         """
         try:
+            # Set by the sleep tool, should the model end the conversation
+            self._ending = False
+
             # Set thinking status
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = True
@@ -951,6 +1001,12 @@ class VoiceAssistant:
             # Stopped while streaming, or while speaking after the stream
             cut = interrupted or self.interrupt_event.is_set()
             self._keep_exchange(recorded_text(prompt, attachments or []), answer, source, cut)
+
+            # The model ended the conversation: Iris goes to sleep now that
+            # its parting words were heard to the end. Cut short, the user
+            # was not done after all.
+            if self._ending and not cut:
+                self._sleep_after_goodbye()
             return answer
 
         except Exception as e:
@@ -982,6 +1038,16 @@ class VoiceAssistant:
                 # External UI requested shutdown
                 if self.stop_event.is_set():
                     break
+
+                # After parting words Iris falls asleep once the voice has
+                # died away (see _sleep_after_goodbye): until then the
+                # microphone stays closed, and the orb is already asleep
+                if time.monotonic() < self._quiet_until:
+                    with self.status_manager.status_lock:
+                        self.status_manager.status_listening = False
+                        self.status_manager.status_dormant = self.dormant
+                    time.sleep(0.05)
+                    continue
 
                 # Notice falling asleep whatever the loop is doing, so the UI
                 # learns it even with the mic off
