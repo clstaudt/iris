@@ -14,6 +14,10 @@ its download without fetching, and "clones" every sample as one of Pocket
 TTS's own voices, which the open model reads. All the rest of cloning is
 Iris's own: the sample, the voice's folder, the persona that speaks with it.
 
+The test can break the room's speaker (in a file of the test's home): while
+it says so, opening the speaker fails as it does on macOS when its device has
+gone (AirPods disconnecting), so the test sees what Iris does then.
+
     python -m irisdev.e2e_core
 """
 
@@ -22,6 +26,7 @@ import time
 from pathlib import Path
 
 import httpx
+import sounddevice as sd
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
 from pocket_tts import TTSModel
 
@@ -33,6 +38,8 @@ from irisdev.voicetest.acoustics import Space
 TOKEN = "hf_e2e_test_token"
 STATE = Path.home() / ".e2e-huggingface.json"
 CLONED_AS = "anna"
+# Where the test says which of the room's devices it broke
+FAULTS = Path.home() / ".e2e-audio.json"
 
 
 def _refused(status: int, message: str, gated: bool = False):
@@ -107,10 +114,33 @@ class StandInKyutai(cloning.Kyutai):
         return model
 
 
+class Breakable:
+    """The room's microphone and speaker, as one audio device, with a
+    speaker the test can break: {"speaker": "broken"} in the faults file."""
+
+    def __init__(self, endpoint, faults: Path = FAULTS):
+        self._endpoint = endpoint
+        self._faults = faults
+
+    def __getattr__(self, name):
+        return getattr(self._endpoint, name)
+
+    def _broken(self, part: str) -> bool:
+        try:
+            return json.loads(self._faults.read_text()).get(part) == "broken"
+        except (OSError, ValueError):
+            return False
+
+    def play(self, data, sample_rate, **options) -> float:
+        if self._broken("speaker"):
+            raise sd.PortAudioError("Error opening OutputStream: Internal PortAudio error", -9986)
+        return self._endpoint.play(data, sample_rate, **options)
+
+
 def main():
     # The microphone and the speaker are taken from here when the assistant
     # is built, after the app has asked for it
-    audio.SYSTEM = Space().endpoint("Iris")
+    audio.SYSTEM = Breakable(Space().endpoint("Iris"))
     cloning.KYUTAI = StandInKyutai()
     rpc_server.main()
 
