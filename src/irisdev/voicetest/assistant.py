@@ -395,9 +395,12 @@ def busy(assistant: AssistantUnderTest) -> bool:
 
 
 def finished(assistant: AssistantUnderTest, quiet: float = QUIET) -> bool:
-    """The assistant is idle and its speaker has been silent for a while."""
+    """The assistant is idle, has nothing more to say, and its speaker has
+    been silent for a while. A reply written whole can still be on its way
+    to the speaker: Iris shows no state while its first clip is synthesized."""
     speaker = assistant.endpoint.speaker
-    if busy(assistant) or speaker.playing():
+    speaking = getattr(assistant, "speaking", None)
+    if busy(assistant) or speaker.playing() or (speaking is not None and speaking()):
         return False
     last = speaker.last_sound()
     return last is None or time.monotonic() - last >= quiet

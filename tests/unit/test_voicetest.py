@@ -1010,6 +1010,21 @@ def test_settings_wait_for_the_config_that_shows_them():
         iris.configure("volume", 3)
 
 
+def test_an_assistant_with_speech_on_its_way_has_not_finished():
+    """HAL's Portuguese reply was written whole, its first clip still being
+    synthesized, Iris idle and the speaker silent: the turn was taken as
+    answered before a word of it was heard."""
+    log = Log()
+    log("state", {"state": "idle"})
+    on_its_way = [True]
+    assistant = SimpleNamespace(log=log, endpoint=Space(noise=0).endpoint("a"), speaking=lambda: on_its_way[0])
+    assert not under_test.finished(assistant)
+    on_its_way[0] = False
+    assert under_test.finished(assistant)
+    # An assistant that cannot tell is judged by its speaker alone
+    assert under_test.finished(SimpleNamespace(log=log, endpoint=assistant.endpoint))
+
+
 def test_memory_starts_iris_again_with_a_memory_of_its_own(monkeypatch, tmp_path):
     """The app runs Iris with memory; the voice test, without it unless a
     conversation asks for it, and then in a new memory each time."""
