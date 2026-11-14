@@ -13,10 +13,10 @@ from iris.tts import (
     PocketGenerator,
     SpeechGenerator,
     SpeechPipeline,
-    engine_speaks,
     list_voices,
     pocket_sentences,
     voice_language,
+    voice_languages,
 )
 
 
@@ -48,14 +48,22 @@ def test_english_uses_the_voice(mock_tts_model):
     os.unlink(result)
 
 
-def test_another_language_loads_its_model_with_its_voice(mock_tts_model):
-    gen = PocketGenerator(voice="alba")
+def test_another_language_loads_its_model_with_the_same_voice(mock_tts_model):
+    """Spoken by Estelle, the French voice, Anna's French replies were
+    another woman's voice."""
+    gen = PocketGenerator(voice="anna")
     result = gen.generate("Bonjour.", language="fr")
 
     assert result is not None
     mock_tts_model.load_model.assert_called_with(language="french")
-    mock_tts_model.load_model.return_value.get_state_for_audio_prompt.assert_called_with("estelle")
+    mock_tts_model.load_model.return_value.get_state_for_audio_prompt.assert_called_with("anna")
     os.unlink(result)
+
+
+def test_a_language_without_a_model_is_not_spoken(mock_tts_model):
+    gen = PocketGenerator(voice="alba")
+    assert gen.generate("こんにちは", language="ja") is None
+    assert not mock_tts_model.load_model.return_value.generate_audio.called
 
 
 def test_models_and_voices_load_once(mock_tts_model):
@@ -114,13 +122,22 @@ def test_switching_engine_switches_voice(mock_tts_model, mock_kokoro):
     mock_tts_model.load_model.return_value.get_state_for_audio_prompt.assert_called_with("george")
 
 
-def test_kyutai_leaves_japanese_to_kokoro(mock_tts_model, mock_kokoro):
+def test_kyutai_leaves_japanese_to_no_other_engine(mock_tts_model, mock_kokoro):
+    """Kokoro's Japanese voice spoke a Kyutai persona's Japanese replies:
+    the voice changed in the middle of the conversation."""
     gen = SpeechGenerator("kyutai", "alba")
-    os.unlink(gen.generate("こんにちは", language="ja"))
+    assert gen.generate("こんにちは", language="ja") is None
 
-    kwargs = mock_kokoro.return_value.create.call_args.kwargs
-    assert kwargs["lang"] == "ja"
-    assert kwargs["voice"] == "jf_alpha"
+    assert not mock_kokoro.called
+    assert not mock_tts_model.load_model.return_value.generate_audio.called
+
+
+def test_kokoro_leaves_german_to_no_other_engine(mock_tts_model, mock_kokoro):
+    gen = SpeechGenerator("kokoro", "af_sarah")
+    assert gen.generate("Guten Tag.", language="de") is None
+
+    assert not mock_tts_model.load_model.called
+    assert not mock_kokoro.return_value.create.called
 
 
 def test_a_preview_voice_does_not_change_the_persona(mock_tts_model, mock_kokoro):
@@ -136,11 +153,29 @@ def test_a_preview_voice_does_not_change_the_persona(mock_tts_model, mock_kokoro
 # ---------------------------------------------------------------------------
 
 
+POCKET_SEVEN = ["en", "fr", "it", "de", "es", "pt", "nl"]
+
+
 def test_kyutai_voices_include_one_per_further_language():
     voices = {v["id"]: v for v in list_voices("kyutai")}
-    assert voices["alba"] == {"id": "alba", "name": "Alba", "language": "English"}
+    assert voices["anna"] == {
+        "id": "anna", "name": "Anna", "language": "English", "languages": POCKET_SEVEN,
+    }
     assert voices["bill_boerst"]["name"] == "Bill Boerst"
     assert voices["estelle"]["language"] == "French"
+
+
+def test_every_kyutai_voice_speaks_pocket_tts_languages_but_french_not_always():
+    """Not only the language it was made for: each language's model takes
+    the voice's own prompt. In French about half of the voices made for
+    another language keep too much of their accent (Alba's French was
+    heard as English or Czech one time in five). The language a voice was
+    made for is listed first."""
+    for voice in list_voices("kyutai"):
+        assert set(voice["languages"]) >= set(POCKET_SEVEN) - {"fr"}, voice["id"]
+        assert voice["languages"][0] == voice_language("kyutai", voice["id"])
+    assert voice_languages("kyutai", "juergen") == POCKET_SEVEN
+    assert "fr" not in voice_languages("kyutai", "alba")
 
 
 def test_kokoro_voices_come_from_its_voices_file(tmp_path):
@@ -148,10 +183,11 @@ def test_kokoro_voices_come_from_its_voices_file(tmp_path):
     (tmp_path / "voices.npz").rename(tmp_path / tts.KOKORO_VOICES_FILE)
 
     voices = list_voices("kokoro", tmp_path)
-    assert voices == [
-        {"id": "af_bella", "name": "Bella", "language": "American English"},
-        {"id": "bm_lewis", "name": "Lewis", "language": "British English"},
+    assert [(v["id"], v["name"], v["language"]) for v in voices] == [
+        ("af_bella", "Bella", "American English"),
+        ("bm_lewis", "Lewis", "British English"),
     ]
+    assert all(voice["languages"][0] == "en" for voice in voices)
 
 
 def test_no_kokoro_voices_before_it_is_downloaded(tmp_path):
@@ -215,13 +251,23 @@ def test_a_preview_without_effect_plays_unfiltered():
     assert player.calls == [{"audio_filter": None}]
 
 
-def test_which_languages_an_engine_speaks():
-    assert engine_speaks("kyutai", "de") and engine_speaks("kyutai", "nl")
-    assert engine_speaks("kyutai", "ja")  # through Kokoro
-    assert engine_speaks("kokoro", "de")  # through Kyutai
-    assert engine_speaks("kokoro", "fr")
-    assert not engine_speaks("kyutai", "ru")
-    assert not engine_speaks("kokoro", "ru")
+def test_which_languages_a_voice_speaks():
+    assert voice_languages("kyutai", "anna") == POCKET_SEVEN
+    assert voice_languages("kyutai", "juergen") == POCKET_SEVEN
+    # No other engine's voice lends a Kyutai voice Japanese, or a Kokoro one German
+    assert "ja" not in voice_languages("kyutai", "anna")
+    assert "de" not in voice_languages("kokoro", "af_sarah")
+    assert "fr" in voice_languages("kokoro", "ff_siwis")
+    assert voice_languages("nobody", "anna") == []
+
+
+def test_a_conversation_may_be_in_any_language_iris_has_a_voice_for():
+    """Also one the persona's voice does not speak: the reply is shown."""
+    for engine, voice in [("kyutai", "anna"), ("kokoro", "bm_lewis")]:
+        generator = SpeechGenerator(engine, voice, prepare=False)
+        assert generator.languages() == {"en", "fr", "it", "de", "es", "pt", "nl", "hi", "ja", "zh"}
+    assert not SpeechGenerator("kyutai", "anna", prepare=False).speaks("ja")
+    assert not SpeechGenerator("kokoro", "bm_lewis", prepare=False).speaks("de")
 
 
 # ---------------------------------------------------------------------------

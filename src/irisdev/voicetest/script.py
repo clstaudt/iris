@@ -34,8 +34,11 @@ Part = Union[str, float]
 # The user waits this long after the assistant has finished before speaking
 GAP = 0.6
 # What a turn may expect of Iris ("unanswered": heard, but no reply could be
-# had, and the error says why)
-EXPECTATIONS = ("answer", "silent", "continued", "either", "silenced", "wake", "sleep", "unanswered")
+# had, and the error says why; "shown": answered in writing only, in a
+# language the persona's voice does not speak, and told so)
+EXPECTATIONS = (
+    "answer", "silent", "continued", "either", "silenced", "wake", "sleep", "unanswered", "shown",
+)  # fmt: skip
 
 
 @dataclass(frozen=True)
@@ -367,6 +370,9 @@ class Conversation:
     # missing)
     stub_options: dict = field(default_factory=dict)
     persona: Optional[str] = None
+    # (engine, voice): held with Iris speaking in this voice instead, a
+    # persona of its own
+    persona_voice: Optional[tuple] = None
     turn_detection: Optional[str] = None
     stt_model: Optional[str] = None
     # {"window": seconds, "sleep_word": text}

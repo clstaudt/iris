@@ -12,9 +12,16 @@ A cloned voice lives in a folder of its own under ~/.iris/voices
 (IRIS_VOICES_DIR): its sample, trimmed and levelled (sample.wav), its name
 (voice.yaml), and the voice each language's model made of the sample
 (english.safetensors, french.safetensors...). English is made when the voice
-is cloned; another language the first time the voice speaks it, with that
-language's cloning model, fetched then. Personas name the voice
-"clone:<folder>". It is the same voice in every language.
+is cloned, and so is each language chosen then; another one when the voice
+is made ready for it (iris.readiness), with that language's cloning model,
+fetched first, with progress. Never while Iris speaks: a reply in a
+language the voice is not made for yet is shown, not spoken. Personas name
+the voice "clone:<folder>". It is the same voice in every language.
+
+A cloned voice stays until the user deletes it on the Voices page: one made
+in the persona editor and not saved with the persona, or made again before
+saving, stays in the library too, listed with the others. Nothing else
+removes a voice's folder, and every removal is logged.
 
 Cloning goes through KYUTAI: the Hugging Face login, the access to the gated
 repo, and the model loaded from it. Tests put a stand-in in its place.
@@ -43,7 +50,7 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 from pocket_tts import TTSModel, export_model_state
 from pocket_tts.utils.config import CONFIGS_DIR as POCKET_CONFIGS
 
-from iris import downloads
+from iris import downloads, names, pocket
 from iris.audio import Recording
 from iris.downloads import HubFile, Progress
 from iris.events import brief
@@ -71,6 +78,9 @@ SAMPLE_FILE = "sample.wav"
 INFO_FILE = "voice.yaml"
 # The language a cloned voice is listed under in the persona editor
 LISTED_AS = "Cloned"
+# The voice a persona speaks with once its cloned voice is deleted: Kyutai's
+# default, a new persona's
+FALLBACK_VOICE = "anna"
 
 # Where cloned voices are kept, unless IRIS_VOICES_DIR names another folder
 DEFAULT_DIR = Path.home() / ".iris" / "voices"
@@ -105,6 +115,11 @@ class SampleError(ValueError):
     """A sample no voice can be made from, with why, for the app."""
 
 
+class VoiceNotReadyError(RuntimeError):
+    """A cloned voice that is not made for a language yet, asked to speak
+    it. Speaking never makes it (make_language does, beforehand)."""
+
+
 # ---------------------------------------------------------------- the voices
 
 
@@ -127,18 +142,23 @@ def voice_folder(voice: str) -> Path | None:
     return None
 
 
-def is_cloned(voice: str) -> bool:
-    """Whether a voice is one cloned in the app."""
-    return voice_folder(voice) is not None
-
-
 def voice_name(folder: Path) -> str:
-    """A cloned voice's name, as the editor shows it."""
+    """A cloned voice's name, as the editor shows it; for a folder that
+    keeps none (or is not there), its name as words ("noam-2" is Noam 2)."""
+    fallback = folder.name.replace("-", " ").title()
     try:
         info = yaml.safe_load((folder / INFO_FILE).read_text()) or {}
-        return str(info.get("name") or "").strip() or folder.name.title()
+        return str(info.get("name") or "").strip() or fallback
     except (OSError, yaml.YAMLError, AttributeError):
-        return folder.name.title()
+        return fallback
+
+
+def voice_missing(voice: str) -> bool:
+    """Whether a voice is a cloned one that is not here: its folder, or the
+    sample in it, is not there (removed outside Iris, or by an Iris that
+    dropped voices not saved with a persona). Every other voice is here."""
+    folder = voice_folder(voice)
+    return folder is not None and not (folder / SAMPLE_FILE).is_file()
 
 
 def describe(folder: Path) -> dict:
@@ -159,37 +179,113 @@ def cloned_voices() -> list[dict]:
 
 
 def slug(name: str) -> str:
-    """A folder name for a voice named this (as personas are named)."""
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "voice"
+    """A folder name for a voice named this, as personas are named ("Der
+    Führer" is der-fuehrer). Folders named before under another spelling
+    (der-f-hrer) stay as they are, and personas name them as before."""
+    return names.slug(name, "voice")
 
 
-# Folders of voices forgotten while the core runs are not taken again: a
+def made_for(folder: Path) -> list[str]:
+    """The languages a cloned voice is made for so far, as Pocket TTS names
+    them, in its order."""
+    languages = pocket.LANGUAGES.values()
+    return [lang for lang in languages if (folder / f"{lang}.safetensors").is_file()]
+
+
+def _write_info(folder: Path, **info):
+    """Keep what is known of a voice (its name) in its folder."""
+    try:
+        kept = yaml.safe_load((folder / INFO_FILE).read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        kept = {}
+    if not isinstance(kept, dict):
+        kept = {}
+    (folder / INFO_FILE).write_text(yaml.safe_dump({**kept, **info}, allow_unicode=True))
+
+
+def _write_sample(folder: Path, sample: np.ndarray):
+    sf.write(folder / SAMPLE_FILE, sample, RATE, subtype="PCM_16")
+
+
+# Folders of voices deleted while the core runs are not taken again: a
 # voice loaded under that folder may still be kept in memory
 _forgotten: set[str] = set()
 
 
-def make_voice(sample: np.ndarray, name: str) -> Path:
+def make_voice(
+    sample: np.ndarray, name: str, taken: Callable[[str], bool] = lambda voice: False
+) -> Path:
     """A folder for a new voice, named for the persona, holding its sample
-    (at RATE) and its name. Another voice of that name gets a number."""
+    (at RATE) and its name. Another voice of that name gets a number, and
+    so does one whose folder a persona names (taken) though it is not
+    there: the persona would speak with the new voice unasked."""
     base = slug(name)
     shown = name.strip() or "Cloned voice"
     folder, n = voices_dir() / base, 2
-    while folder.exists() or folder.name in _forgotten:
+    while folder.exists() or folder.name in _forgotten or taken(PREFIX + folder.name):
         folder, n = voices_dir() / f"{base}-{n}", n + 1
     folder.mkdir(parents=True)
     if n > 2:
         shown = f"{shown} {n - 1}"
-    sf.write(folder / SAMPLE_FILE, sample, RATE, subtype="PCM_16")
-    (folder / INFO_FILE).write_text(yaml.safe_dump({"name": shown}, allow_unicode=True))
+    _write_sample(folder, sample)
+    _write_info(folder, name=shown)
     return folder
 
 
+def rename_voice(voice: str, name: str) -> Path:
+    """Give a cloned voice another name. Its folder, by which personas name
+    it, stays.
+
+    Raises:
+        ValueError: No such voice, no name, or one another cloned voice has
+            (its message is for the app)
+    """
+    name = " ".join((name or "").split())
+    folder = voice_folder(voice)
+    if folder is None or not (folder / SAMPLE_FILE).is_file():
+        raise ValueError("The voice is gone")
+    if not name:
+        raise ValueError("The voice needs a name")
+    others = (v for v in cloned_voices() if v["id"] != PREFIX + folder.name)
+    if any(v["name"].casefold() == name.casefold() for v in others):
+        raise ValueError(f"Another voice is called {name}")
+    _write_info(folder, name=name)
+    return folder
+
+
+def _take_over(made: Path, folder: Path):
+    """A voice made again (in made, a folder of its own) takes the place of
+    the one in folder, which keeps its name. What was made of the old sample
+    goes first, so the folder never holds a language of one sample beside
+    the other's: whatever stops this half way, the voice is one sample's."""
+    logger.info(
+        "Cloning %s%s again (%s): its sample and languages in %s are replaced",
+        PREFIX,
+        folder.name,
+        voice_name(folder),
+        folder,
+    )
+    for old in folder.glob("*.safetensors"):
+        old.unlink(missing_ok=True)
+    (made / SAMPLE_FILE).replace(folder / SAMPLE_FILE)
+    for new in made.glob("*.safetensors"):
+        new.replace(folder / new.name)
+    shutil.rmtree(made, ignore_errors=True)
+
+
+def _remove(folder: Path, why: str):
+    """Remove a voice's folder, and say so in the log."""
+    logger.info("%s: removing %s", why, folder)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def forget_voice(voice: str) -> bool:
-    """Remove a cloned voice's folder. Returns whether one was removed."""
+    """Remove a cloned voice's folder: the user deleted it on the Voices
+    page, the only place a voice is deleted. Returns whether one was."""
     folder = voice_folder(voice)
     if folder is None or not folder.is_dir():
         return False
-    shutil.rmtree(folder, ignore_errors=True)
+    _remove(folder, f"Deleting the cloned voice {voice} ({voice_name(folder)})")
     _forgotten.add(folder.name)
     return True
 
@@ -223,12 +319,15 @@ class Kyutai:
     def cached(self, file: HubFile) -> bool:
         return downloads.files_cached([file])
 
-    def fetch(self, file: HubFile, on_progress: Progress):
-        downloads.download_hub_files([file], on_progress)
+    def fetch(self, files: list[HubFile], on_progress: Progress):
+        """Download these files into the cache, with the bytes over all of
+        them; an interrupted file resumes where it stopped (iris.downloads)."""
+        downloads.download_hub_files(files, on_progress)
 
     def load_model(self, pocket_lang: str):
-        """The language's model; Pocket TTS loads the cloning form when its
-        weights are in the cache (or can be fetched), the open one if not."""
+        """The language's model, from the cache (iris.tts sees to it that
+        Pocket TTS fetches nothing): the cloning form when its weights are
+        there, the open one if not."""
         return TTSModel.load_model(language=pocket_lang)
 
 
@@ -240,6 +339,12 @@ def cloning_weights(pocket_lang: str) -> HubFile:
     names it, at a fixed revision)."""
     config = yaml.safe_load((POCKET_CONFIGS / f"{pocket_lang}.yaml").read_text())
     return HubFile.parse(config["weights_path"])
+
+
+def cloning_files(pocket_lang: str) -> list[HubFile]:
+    """All a language's cloning model loads: its weights from the gated
+    repo, and the tokenizer of the open one."""
+    return pocket.model_files(pocket_lang, clones=True)
 
 
 def weights_cached(pocket_lang: str = "english") -> bool:
@@ -323,16 +428,17 @@ def connect(token: str) -> dict:
 
 
 def fetch_weights(pocket_lang: str, on_progress: Progress | None = None):
-    """Download a language's cloning model unless it is in the cache.
+    """Download a language's cloning model, all it loads, unless it is in the
+    cache.
 
     Raises:
         CloneAccessError: Hugging Face does not hand it out to this account
     """
-    file = cloning_weights(pocket_lang)
-    if KYUTAI.cached(file):
+    missing = [file for file in cloning_files(pocket_lang) if not KYUTAI.cached(file)]
+    if not missing:
         return
     try:
-        KYUTAI.fetch(file, on_progress or (lambda done, total: None))
+        KYUTAI.fetch(missing, on_progress or (lambda done, total: None))
     except Exception as e:
         if _refused(e):
             raise CloneAccessError(
@@ -342,13 +448,13 @@ def fetch_weights(pocket_lang: str, on_progress: Progress | None = None):
         raise
 
 
-def cloning_model(pocket_lang: str):
+def cloning_model(pocket_lang: str, on_progress: Progress | None = None):
     """A language's model in the form that clones, fetched first if need be.
 
     Raises:
         CloneAccessError: It cannot be had with the access there is
     """
-    fetch_weights(pocket_lang)
+    fetch_weights(pocket_lang, on_progress)
     model = KYUTAI.load_model(pocket_lang)
     if not getattr(model, "has_voice_cloning", False):
         raise CloneAccessError(
@@ -366,40 +472,58 @@ def _save_state(state: dict, path: Path):
 
 
 def voice_state(models: dict, pocket_lang: str, folder: Path):
-    """A cloned voice for a language's model, as Pocket TTS speaks with it.
+    """A cloned voice for a language's model, as Pocket TTS speaks with it:
+    the voice made for the language (make_language), read with whichever
+    form of the model is loaded (models: the generator's, by language).
+    Never made here, while Iris speaks.
 
-    Made once per language, with the language's cloning model, and kept in
-    the voice's folder; from then on read from there, with whichever form of
-    the model is loaded. The cloning model then replaces the open one in
-    models (the generator's loaded models by language): both speak alike.
+    Raises:
+        VoiceNotReadyError: The voice is not made for the language yet
+    """
+    made = folder / f"{pocket_lang}.safetensors"
+    if not made.is_file():
+        raise VoiceNotReadyError(f"{voice_name(folder)} is not made for {pocket_lang.title()} yet")
+    model = models.get(pocket_lang)
+    if model is None:
+        model = models[pocket_lang] = KYUTAI.load_model(pocket_lang)
+    return model.get_state_for_audio_prompt(str(made))
+
+
+def make_language(
+    folder: Path,
+    pocket_lang: str,
+    on_progress: Progress | None = None,
+    on_making: Callable[[], None] | None = None,
+    model=None,
+):
+    """Make a cloned voice for a language: the language's cloning model,
+    fetched first if need be (on_progress has its bytes), reads the voice's
+    sample (on_making is told), and the voice it makes is kept in the
+    folder, for whichever form of the model speaks it.
+
+    Returns:
+        The cloning model, to make another voice for the language with
 
     Raises:
         FileNotFoundError: The voice's sample is gone
-        CloneAccessError: The voice is new to the language, and its cloning
-            model cannot be had
+        CloneAccessError: The cloning model cannot be had with the access
+            there is
     """
-    made = folder / f"{pocket_lang}.safetensors"
-    model = models.get(pocket_lang)
-    if made.is_file():
-        if model is None:
-            model = models[pocket_lang] = KYUTAI.load_model(pocket_lang)
-        return model.get_state_for_audio_prompt(str(made))
     sample = folder / SAMPLE_FILE
     if not sample.is_file():
         raise FileNotFoundError(f"The cloned voice {voice_name(folder)} is gone")
-    if model is None or not getattr(model, "has_voice_cloning", False):
+    if model is None:
         try:
-            model = cloning_model(pocket_lang)
+            model = cloning_model(pocket_lang, on_progress)
         except CloneAccessError as e:
             raise CloneAccessError(
-                f"{voice_name(folder)} is a cloned voice: speaking {pocket_lang.title()} needs "
-                "Kyutai's cloning model, and Hugging Face access to it. Connect again in the "
-                "persona's voice."
+                f"Making {voice_name(folder)} for {pocket_lang.title()} needs Kyutai's cloning "
+                "model, and Hugging Face access to it: connect under Settings, Voices"
             ) from e
-        models[pocket_lang] = model
-    state = model.get_state_for_audio_prompt(sample)
-    _save_state(state, made)
-    return state
+    if on_making is not None:
+        on_making()
+    _save_state(model.get_state_for_audio_prompt(sample), folder / f"{pocket_lang}.safetensors")
+    return model
 
 
 # ---------------------------------------------------------------- the sample
@@ -550,9 +674,10 @@ def _faded(piece: np.ndarray, seconds: float = 0.01) -> np.ndarray:
 class Cloning:
     """Voice cloning as the persona editor goes through it (the voice.*
     methods): access to the cloning model and a login for it, its download,
-    a sample recorded or chosen, the voice made of it, and a voice dropped
-    again. Pushes clone.progress {done, total} while the model downloads,
-    and clone.level {level, seconds} while a sample is recorded."""
+    a sample recorded or chosen, and the voice made of it, which stays in
+    the library whether or not a persona is saved with it. Pushes
+    clone.progress {done, total} while the model downloads, and
+    clone.level {level, seconds} while a sample is recorded."""
 
     def __init__(
         self,
@@ -560,6 +685,7 @@ class Cloning:
         assistant: Callable[[], object | None] = lambda: None,
         interrupt: Callable[[], object] = lambda: None,
         in_use: Callable[[str], bool] = lambda voice: False,
+        changed: Callable[[str], None] = lambda voice: None,
     ):
         """
         Args:
@@ -567,12 +693,16 @@ class Cloning:
             assistant: The running assistant, if any: its microphone is
                 recorded from, and it does not listen meanwhile
             interrupt: Stops what Iris says, before a recording
-            in_use: Whether a persona speaks with a voice
+            in_use: Whether a persona speaks with a voice: a new voice
+                takes no folder a persona names
+            changed: Told a voice made again from a new sample, so what was
+                loaded of it before is dropped
         """
         self._emit = emit
         self._assistant = assistant
         self._interrupt = interrupt
         self._in_use = in_use
+        self._changed = changed
         self._lock = threading.Lock()
         self._fetching = threading.Lock()
         self._recording: Recording | None = None
@@ -668,9 +798,13 @@ class Cloning:
         self._sample = sample
         return {"ok": True, "seconds": round(len(sample) / RATE, 1)}
 
-    def clone(self, name: str) -> dict:
+    def clone(self, name: str, replace: str = "") -> dict:
         """Make a voice of the sample prepared last, named for the persona:
-        its folder, and its English made with the cloning model.
+        its folder, and its English made with the cloning model (the other
+        languages chosen are made after, iris.readiness). With replace, a
+        cloned voice is made again of the sample instead (cloned again on
+        the Voices page): it keeps its name, and the personas that speak
+        with it go on with it; what was made of its old sample goes.
 
         Returns:
             {"ok", "voice": {id, name, language}}, or {"ok": False, "error",
@@ -679,29 +813,37 @@ class Cloning:
         with self._lock:
             if self._sample is None:
                 return {"ok": False, "error": "Record a sample or choose one first"}
-            folder = make_voice(self._sample, name)
-            try:
-                voice_state({"english": cloning_model("english")}, "english", folder)
-            except CloneAccessError as e:
+            target = None
+            if replace:
+                target = voice_folder(replace)
+                if target is None or not (target / SAMPLE_FILE).is_file():
+                    return {"ok": False, "error": "The voice to clone again is gone"}
+                folder = target.with_name(f".{target.name}.new")
                 shutil.rmtree(folder, ignore_errors=True)
+                folder.mkdir(parents=True)
+                _write_sample(folder, self._sample)
+                _write_info(folder, name=voice_name(target))
+            else:
+                folder = make_voice(self._sample, name, self._in_use)
+            try:
+                make_language(folder, "english")
+            except CloneAccessError as e:
+                _remove(folder, "The voice could not be made without the cloning model")
                 return {"ok": False, "error": str(e), "access": True}
             except Exception as e:
                 logger.exception("The voice could not be made")
-                shutil.rmtree(folder, ignore_errors=True)
+                _remove(folder, "The voice could not be made")
                 return {"ok": False, "error": f"The voice could not be made: {brief(e)}"}
+            if target is not None:
+                _take_over(folder, target)
+                folder = target
+                self._changed(PREFIX + target.name)
             self._sample = None
         return {"ok": True, "voice": describe(folder)}
 
-    def forget(self, voice: str) -> dict:
-        """Drop a cloned voice no persona speaks with (one made in the editor
-        and not kept). One a persona speaks with stays."""
-        if not is_cloned(voice) or self._in_use(voice):
-            return {"ok": True, "forgotten": False}
-        return {"ok": True, "forgotten": forget_voice(voice)}
-
-    def replaced(self, previous: str, voice: str):
-        """A persona saved with a new cloned voice in place of the one cloned
-        before (cloned again): the old one goes, unless a persona speaks
-        with it."""
-        if previous != voice and is_cloned(previous) and is_cloned(voice):
-            self.forget(previous)
+    def rename(self, voice: str, name: str) -> dict:
+        """Give a cloned voice another name (the Voices page)."""
+        try:
+            return {"ok": True, "voice": describe(rename_voice(voice, name))}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}

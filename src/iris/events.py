@@ -31,6 +31,11 @@ Event types:
     sleep        {}                                  it fell asleep (window over,
                                                      or the sleep word)
     error        {"message": str, "kind": str}         kind is optional
+    notice       {"message": str, "kind": str,       something to know, not a fault:
+                  "language": str}                   kind "unspoken", replies in
+                                                     the language are shown, not
+                                                     spoken (the voice does not
+                                                     speak it); once per voice
     turn.timing  {"source": "voice"|"text", "total": int,
                   "stages": {"turn_end", "recognition", "reply", "voice": int|None},
                   "components": {stage: str}}
@@ -49,6 +54,9 @@ Event types:
                   "silent": bool}                    level 0.0-1.0, a voice came
                                                      through, only exact zeros
     memory.updated {}                                topics were filed or forgotten
+    memory.forgotten {}                              everything was forgotten: the
+                                                     conversation shown goes too,
+                                                     and the messages waiting
 """
 
 import threading

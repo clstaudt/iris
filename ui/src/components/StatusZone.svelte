@@ -1,7 +1,11 @@
 <script lang="ts">
   import { STATE_LABELS, store } from "../lib/state.svelte";
+  import { percent } from "../lib/voices";
   import Circle from "./Circle.svelte";
   import Progress from "./Progress.svelte";
+
+  // A voice the conversation waits on, being made ready
+  const job = $derived(store.runningJobs.find((j) => j.origin === "conversation"));
 
   // The orb canvas is wider than its ring (the halo needs room to fade), so
   // the label is placed from the ring's edge rather than the canvas edge
@@ -30,6 +34,17 @@
       {#key store.setup.model}
         <Progress
           value={store.setup.total ? store.setup.done / store.setup.total : 0}
+          class="w-[180px]"
+        />
+      {/key}
+    {:else if job}
+      <span class="tabular-nums" data-job={job.id}>
+        {job.title}{percent(job) !== null && job.state === "downloading" ? ` ${percent(job)} %` : ""}
+      </span>
+      {#key job.id}
+        <Progress
+          value={job.total ? job.done / job.total : 0}
+          waiting={job.state === "making"}
           class="w-[180px]"
         />
       {/key}

@@ -23,6 +23,11 @@ speaks, types or a reply is underway: a call already in flight is cut off
 mid-generation (closing its connection makes Ollama stop at once), so a turn
 never waits behind filing. Every step is saved as it completes, so stopping
 loses nothing; the next quiet spell carries on.
+
+A thread can be forgotten with all it holds (forget_thread), and everything
+at once (forget_all): every thread, turn and topic and the search index, and
+the file is rebuilt so the words are gone from it too. A filing step that
+read the turns before writes nothing afterwards.
 """
 
 import json
@@ -126,6 +131,11 @@ def relative_day(ts: float, now: Optional[float] = None) -> str:
     return f"{days} days ago"
 
 
+class Forgotten(Exception):
+    """Everything was forgotten after a step read the memory: what it was
+    about is gone, so it writes nothing."""
+
+
 @dataclass
 class Exchange:
     """A user turn and the reply to it (plus any turns that followed)."""
@@ -157,6 +167,11 @@ class MemoryStore:
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        # How many times everything was forgotten. A step that writes what
+        # it read earlier (filing) names the count it read at, and writes
+        # nothing once it changed: turn and topic numbers start over after
+        # forgetting, so a stale write would land on new ones
+        self.generation = 0
         with self._lock:
             self._db.execute("PRAGMA foreign_keys = ON")
             self._db.executescript(SCHEMA)
@@ -200,8 +215,12 @@ class MemoryStore:
         with self._lock:
             return self._db.execute(sql, args).fetchall()
 
-    def _write(self, sql: str, args: tuple = ()) -> int:
+    def _write(self, sql: str, args: tuple = (), generation: Optional[int] = None) -> int:
+        """Run one write; with a generation, only if nothing was forgotten
+        since (else Forgotten)."""
         with self._lock:
+            if generation is not None and generation != self.generation:
+                raise Forgotten()
             cursor = self._db.execute(sql, args)
             self._db.commit()
             return cursor.lastrowid
@@ -275,6 +294,10 @@ class MemoryStore:
             self._db.commit()
             return cursor.lastrowid
 
+    def turn_count(self) -> int:
+        """How many turns are stored, in every thread, filed or not."""
+        return self._query("SELECT COUNT(*) FROM turns")[0][0]
+
     def recent_turns(self, thread: Optional[int], budget: Optional[int] = None) -> list[dict]:
         """The thread's newest turns that fit the token budget, oldest first."""
         budget = LIVE_TOKENS if budget is None else budget
@@ -313,7 +336,13 @@ class MemoryStore:
         )
         return [e for exchanges in self._exchanges(rows, "thread_id").values() for e in exchanges]
 
-    def mark_filed(self, thread: int, turn_ids: list[int], topic_id: Optional[int]):
+    def mark_filed(
+        self,
+        thread: int,
+        turn_ids: list[int],
+        topic_id: Optional[int],
+        generation: Optional[int] = None,
+    ):
         """File a thread's turns under a topic (None: kept, but under no
         topic). Turns filed under a topic wait for its summary to take them
         in. Turns of a thread forgotten meanwhile are gone, and so is the
@@ -325,6 +354,7 @@ class MemoryStore:
             "UPDATE turns SET filed = 1, topic_id = ?, summarized = ? "
             f"WHERE thread_id = ? AND id IN ({marks})",
             (topic_id, 0 if topic_id else 1, thread, *turn_ids),
+            generation,
         )
 
     def pending_summaries(self) -> dict[int, list[Exchange]]:
@@ -335,25 +365,35 @@ class MemoryStore:
         )
         return self._exchanges(rows, "topic_id")
 
-    def mark_summarized(self, thread: int, turn_ids: list[int]):
+    def mark_summarized(
+        self, thread: int, turn_ids: list[int], generation: Optional[int] = None
+    ):
         if not turn_ids:
             return
         marks = ",".join("?" * len(turn_ids))
         self._write(
             f"UPDATE turns SET summarized = 1 WHERE thread_id = ? AND id IN ({marks})",
             (thread, *turn_ids),
+            generation,
         )
 
-    def mark_notes_filed(self):
-        self._write("UPDATE turns SET filed = 1 WHERE role = 'system' AND filed = 0")
+    def mark_notes_filed(self, generation: Optional[int] = None):
+        self._write(
+            "UPDATE turns SET filed = 1 WHERE role = 'system' AND filed = 0", (), generation
+        )
 
     # -- topics -------------------------------------------------------------
 
-    def create_topic(self, thread: int, title: str, gist: str, summary: str) -> Optional[int]:
+    def create_topic(
+        self, thread: int, title: str, gist: str, summary: str, generation: Optional[int] = None
+    ) -> Optional[int]:
         """A new topic of the thread (its id), or None when the thread was
-        forgotten meanwhile."""
+        forgotten meanwhile; with a generation, only if nothing was forgotten
+        since (else Forgotten)."""
         now = time.time()
         with self._lock:
+            if generation is not None and generation != self.generation:
+                raise Forgotten()
             cursor = self._db.execute(
                 "INSERT INTO topics (title, gist, summary, created, updated, thread_id) "
                 "SELECT ?, ?, ?, ?, ?, id FROM threads WHERE id = ?",
@@ -362,10 +402,18 @@ class MemoryStore:
             self._db.commit()
             return cursor.lastrowid if cursor.rowcount else None
 
-    def update_topic(self, thread: int, topic_id: int, gist: str, summary: str):
+    def update_topic(
+        self,
+        thread: int,
+        topic_id: int,
+        gist: str,
+        summary: str,
+        generation: Optional[int] = None,
+    ):
         self._write(
             "UPDATE topics SET gist = ?, summary = ?, updated = ? WHERE id = ? AND thread_id = ?",
             (gist, summary, time.time(), topic_id, thread),
+            generation,
         )
 
     def topics(self, thread: Optional[int]) -> list[Topic]:
@@ -409,6 +457,20 @@ class MemoryStore:
             self._db.execute("DELETE FROM turns WHERE topic_id = ?", (topic_id,))
             self._db.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
             self._db.commit()
+
+    def forget_all(self):
+        """Forget everything: every thread, with its turns and topics, and the
+        search index. The file is rebuilt afterwards, so the words are gone
+        from it, not just unlisted: deleted rows stay in its free pages, and
+        the index keeps the words of deleted turns until it is cleared."""
+        with self._lock:
+            self.generation += 1
+            self._db.execute("DELETE FROM turns")
+            self._db.execute("DELETE FROM topics")
+            self._db.execute("DELETE FROM threads")
+            self._db.execute("INSERT INTO turns_fts(turns_fts) VALUES ('delete-all')")
+            self._db.commit()
+            self._db.execute("VACUUM")
 
     def index_lines(self, thread: Optional[int], budget: Optional[int] = None) -> list[str]:
         """One line per topic of the thread for the prompt, newest first,
@@ -482,6 +544,8 @@ class Filer:
     should_yield is asked before every call; when it says the conversation
     needs the LLM, filing stops. Each decision and each summary is saved as
     it completes, so the next run picks up exactly where this one stopped.
+    Once everything is forgotten, filing stops too, a call underway is cut
+    off, and nothing it read is written back (see MemoryStore.generation).
     """
 
     def __init__(self, store: MemoryStore, chat: ChatFn):
@@ -489,6 +553,7 @@ class Filer:
         self.chat = chat
         self._abort: Callable[[], bool] = lambda: False
         self._changed = False
+        self._generation = store.generation
 
     def file(self, should_yield: Callable[[], bool] = lambda: False) -> bool:
         """File unfiled exchanges, then update the summaries they touched,
@@ -496,16 +561,21 @@ class Filer:
 
         Returns whether anything changed.
         """
-        self._abort = should_yield
+        # Taken before anything is read, so all this run writes is of it
+        self._generation = generation = self.store.generation
+        self._abort = lambda: should_yield() or self.store.generation != generation
         self._changed = False
         try:
-            self._file(should_yield)
-        except FilingInterruptedError:
-            pass  # the interrupted step saved nothing; the next run redoes it
+            self._file(self._abort)
+        except (FilingInterruptedError, Forgotten):
+            # The interrupted step saved nothing; the next run redoes it,
+            # unless what it was about was forgotten
+            pass
         return self._changed
 
     def _file(self, should_yield: Callable[[], bool]):
-        self.store.mark_notes_filed()
+        generation = self._generation
+        self.store.mark_notes_filed(generation)
         # Per thread, the exchange said just before: each is filed into
         # topics of its own thread
         before: dict[Optional[int], str] = {}
@@ -520,11 +590,11 @@ class Filer:
                 topic_id = decision.get("topic_id") or 0
                 if self.store.topic(topic_id, thread) is None:
                     title = (decision.get("title") or "").strip() or exchange.text[6:46]
-                    topic_id = self.store.create_topic(thread, title, title, "")
+                    topic_id = self.store.create_topic(thread, title, title, "", generation)
                     if topic_id is None:  # the thread was forgotten meanwhile
                         continue
             # Small talk is kept and searchable too, just under no topic
-            self.store.mark_filed(thread, exchange.turn_ids, topic_id)
+            self.store.mark_filed(thread, exchange.turn_ids, topic_id, generation)
             self._changed = True
 
         for topic_id, exchanges in self.store.pending_summaries().items():
@@ -532,7 +602,8 @@ class Filer:
                 return
             self._summarize(topic_id, exchanges)
             thread = exchanges[0].thread_id
-            self.store.mark_summarized(thread, [t for e in exchanges for t in e.turn_ids])
+            turn_ids = [t for e in exchanges for t in e.turn_ids]
+            self.store.mark_summarized(thread, turn_ids, generation)
             self._changed = True
 
     def _decide(self, exchange: Exchange, before: str) -> dict:
@@ -576,7 +647,7 @@ class Filer:
         )
         summary = result.get("summary", "").strip() or topic.summary or text[:400]
         gist = result.get("gist", "").strip() or topic.gist
-        self.store.update_topic(topic.thread_id, topic_id, gist, summary)
+        self.store.update_topic(topic.thread_id, topic_id, gist, summary, self._generation)
 
 
 class MemoryKeeper:
