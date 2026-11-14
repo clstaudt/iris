@@ -61,6 +61,17 @@
       .map((t) => t.name ?? "")
   );
 
+  /** The persona of the thread governs the words and the voice */
+  const personaTag = $derived({
+    persona: config?.persona ?? "",
+    open: () => store.editPersona(store.persona),
+  });
+
+  /** The thread governs the persona: it is shown in the conversation */
+  function toConversation() {
+    store.openSettings(null);
+  }
+
   const sections = $derived.by(() => {
     if (!config) return [];
     return [
@@ -72,6 +83,7 @@
           label: "Wake word",
           value: config.wake_word || "Off",
           off: !config.wake_word,
+          tag: personaTag,
         },
         {
           id: "turn",
@@ -101,7 +113,14 @@
           meta: server,
           timed: "reply",
         },
-        { id: "persona", icon: "user", label: "Persona", value: config.persona, branch: true },
+        {
+          id: "persona",
+          icon: "user",
+          label: "Persona",
+          value: config.persona,
+          branch: true,
+          tag: { thread: store.thread?.title || "New thread", open: toConversation },
+        },
         {
           id: "tools",
           icon: "wrench",
@@ -126,7 +145,7 @@
           label: "Voice",
           timed: "voice",
           value: `${speechEngine} · ${voiceName}`,
-          meta: config.persona,
+          tag: personaTag,
         },
         {
           id: "output",
@@ -173,6 +192,7 @@
   );
 
   function open(id: string) {
+    if (id === "persona") return toConversation();
     store.stage = store.stage === id ? null : id;
   }
 </script>

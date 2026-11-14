@@ -4,6 +4,24 @@
 
   let openId = $state<number | null>(null);
   let detail = $state<MemoryTopicDetail | null>(null);
+  /** Forgetting the thread is asked, to be confirmed */
+  let confirming = $state(false);
+
+  // Another thread: its own topics, none of them open
+  $effect(() => {
+    void store.openThread;
+    openId = null;
+    detail = null;
+    confirming = false;
+  });
+
+  async function forgetThread() {
+    if (store.openThread === null) return;
+    confirming = false;
+    openId = null;
+    detail = null;
+    await store.forgetThread(store.openThread);
+  }
 
   function relativeDay(ts: number): string {
     const days = Math.floor((Date.now() / 1000 - ts) / 86400);
@@ -32,9 +50,15 @@
 
 <aside
   class="flex w-[340px] shrink-0 flex-col overflow-hidden rounded-[14px] border border-line bg-panel"
+  aria-label="Memory"
 >
   <div class="flex h-12 shrink-0 items-center justify-between pl-5 pr-2.5">
-    <h2 class="text-[13px] font-semibold text-ink">Memory</h2>
+    <h2 class="flex min-w-0 items-baseline gap-2 text-[13px] font-semibold text-ink">
+      Memory
+      {#if store.thread}
+        <span class="truncate text-[12px] font-normal text-ink-3">{store.thread.title}</span>
+      {/if}
+    </h2>
     <button
       onclick={() => (store.panel = null)}
       class="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-hover hover:text-ink"
@@ -100,4 +124,49 @@
       </div>
     {/each}
   </div>
+
+  {#if store.openThread !== null}
+    {#if confirming}
+      <div class="confirm">
+        <p>Forget this thread and everything Iris remembers of it?</p>
+        <div class="flex justify-end gap-2">
+          <button class="s-btn" onclick={() => (confirming = false)}>Cancel</button>
+          <button class="s-btn forget" onclick={forgetThread}>Forget this thread</button>
+        </div>
+      </div>
+    {:else}
+      <div class="flex shrink-0 gap-2 border-t border-line px-3.5 py-3">
+        <button class="s-btn" onclick={() => (confirming = true)}>
+          <Icon name="trash" size={13} />
+          Forget this thread
+        </button>
+      </div>
+    {/if}
+  {/if}
 </aside>
+
+<style>
+  .confirm {
+    display: flex;
+    flex-shrink: 0;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+    border-top: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 5%, transparent);
+  }
+  .confirm p {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--color-ink);
+  }
+  .forget {
+    border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 16%, transparent);
+    color: #f0b3b9;
+  }
+  .forget:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-danger) 24%, transparent);
+    color: #f0b3b9;
+  }
+</style>
