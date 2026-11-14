@@ -16,9 +16,12 @@ and "slow" and "network" for the long runs and the real web.
 import json
 import re
 import sys
+from typing import Optional
 
 from iris.llm import NO_TOOLS_NOTE
 from iris.llm_client import READ_TIMEOUT
+from iris.personas import BUILTIN_DIR, Persona
+from iris.tts import voice_languages
 from irisdev.voicetest import checks as c
 from irisdev.voicetest.fakesight import color_of
 from irisdev.voicetest.fakeweb import Each
@@ -2170,17 +2173,24 @@ SAID_WITH_NUMBERS = {
 }
 
 
-def numbers_in_languages(persona: str, label: str, languages: list[str]) -> Conversation:
-    """A persona says replies with numbers in each language; the voice is to
-    be heard saying the numbers."""
+def numbers_in_languages(label: str, languages: list[str], persona_voice: Optional[tuple] = None) -> Conversation:
+    """Iris says replies with numbers in each language, in its own voice or
+    the one given, which speaks them all; the voice is to be heard saying
+    the numbers."""
     turns = [Turn([SAID_WITH_NUMBERS[language][0]], typed=True, reply_language=language,
                   spoken_numbers=SAID_WITH_NUMBERS[language][2]) for language in languages]
     rules = [Rule(re.escape(asked), reply=reply) for asked, reply, _ in SAID_WITH_NUMBERS.values()]
     return Conversation(f"numbers said in other languages ({label})", turns, stub_rules=rules,
-                        persona=persona if persona != "iris" else None, tags=["hearing", "languages", "numbers"])
+                        persona_voice=persona_voice, tags=["hearing", "languages", "numbers"])
 
 
-# A short exchange in the language first: the long reply is not the first in it
+# Kokoro voices that speak these languages, in which their replies are tested
+KOKORO_FOUR = ("kokoro", "bm_george")  # French, Italian, Spanish and Portuguese
+KOKORO_JAPANESE = ("kokoro", "jf_tebukuro")
+KOKORO_CHINESE = ("kokoro", "zf_xiaoxiao")
+
+# A short exchange in the language first: the long reply is not the first in
+# it. Spoken by a voice made for the language: Iris's speaks neither
 LONG_IN_LANGUAGES = [
     Conversation(
         "a long Japanese reply spoken from its first sentence",
@@ -2188,7 +2198,7 @@ LONG_IN_LANGUAGES = [
          Turn(["明日の東京の天気を詳しく教えてください。"], typed=True, reply_language="ja",
               first_word=LONG_FIRST_WORD, checks=[asks_for("Japanese"), spoken_while_written()])],
         stub_rules=[Rule(r"詳しく", reply=LONG_JAPANESE, chunk=2), Rule(r".", reply=in_language)],
-        stub_options=LONG_STREAM, tags=["hearing", "languages", "ja", "first_word"],
+        stub_options=LONG_STREAM, persona_voice=KOKORO_JAPANESE, tags=["hearing", "languages", "ja", "first_word"],
     ),
     Conversation(
         "a long Chinese reply spoken from its first sentence",
@@ -2196,7 +2206,7 @@ LONG_IN_LANGUAGES = [
          Turn(["请帮我搜索北京明天的天气。"], voice="zh", reply_language="zh", first_word=LONG_FIRST_WORD,
               checks=[asks_for("Chinese (Mandarin)"), spoken_while_written()])],
         stub_rules=[Rule(r"明天", reply=LONG_CHINESE, chunk=2), Rule(r".", reply=in_language)],
-        stub_options=LONG_STREAM, tags=["hearing", "languages", "zh", "first_word"],
+        stub_options=LONG_STREAM, persona_voice=KOKORO_CHINESE, tags=["hearing", "languages", "zh", "first_word"],
     ),
 ]
 
@@ -2226,15 +2236,16 @@ LANGUAGES = [
             Turn(["Grazie mille!"], voice="it", reply_language="it"),
             Turn(["Busca cuánto cuesta un billete de tren de Madrid a Sevilla."], voice="es",
                  search_mentions=["madrid", "sevilla|seville"], reply_language="es"),
-            # Typed: the user's Japanese voice is understood too poorly (see SPOKEN_SHARE)
+            # Typed: the user's Japanese voice is understood too poorly (see
+            # SPOKEN_SHARE). Iris's voice speaks no Japanese: the reply is shown
             Turn(["明日の東京の天気を調べてください。"], typed=True, search_mentions=["東京|tokyo"],
-                 reply_language="ja", checks=[asks_for("Japanese")], **heard_as("ja")),
+                 reply_language="ja", expect="shown", checks=[asks_for("Japanese")]),
             Turn(["Pesquisa quando abre o Museu do Azulejo em Lisboa."], voice="pt", search_mentions=["azulejo"],
                  reply_language="pt", checks=[asks_for("Portuguese")]),
             Turn(["Zoek op wanneer het Rijksmuseum morgen opengaat."], voice="nl", search_mentions=["rijksmuseum"],
                  reply_language="nl", checks=[asks_for("Dutch")]),
             Turn(["请帮我搜索北京明天的天气。"], voice="zh", search_mentions=["北京|beijing"], reply_language="zh",
-                 checks=[asks_for("Chinese (Mandarin)")]),
+                 expect="shown", checks=[asks_for("Chinese (Mandarin)")]),
             Turn(["Okay, back to English. What time is it in New York now?"], reply_language="en",
                  checks=[asks_for_english()]),
         ],
@@ -2242,9 +2253,10 @@ LANGUAGES = [
         tags=["hearing", "languages", "mixed"],
     ),
 ] + LONG_IN_LANGUAGES + [
-    # Kyutai's Spanish needs Pocket TTS's Spanish model; Kokoro's is with HAL
-    numbers_in_languages("iris", "Kyutai", ["en", "de", "pt", "fr", "nl", "it"]),
-    numbers_in_languages("hal", "Kokoro", ["en", "fr", "pt", "es", "it"]),
+    # Kyutai's Spanish needs Pocket TTS's Spanish model. Kokoro's numbers
+    # are said by a voice that speaks the four languages they are read for
+    numbers_in_languages("Kyutai", ["en", "de", "pt", "fr", "nl", "it"]),
+    numbers_in_languages("Kokoro", ["en", "fr", "pt", "es", "it"], persona_voice=KOKORO_FOUR),
 ]
 
 HEARING = NOISE + DISTANCE + VOICES_GROUP + LANGUAGES
@@ -2328,8 +2340,9 @@ TYPED_AND_SPOKEN = [
                  checks=[asks_for("German")]),
             Turn(["What is the capital of Canada?"], typed=True, reply_language="en",
                  checks=[asks_for_english()], spoken_share=SPOKEN_SHARE),
-            Turn(["明日の東京の天気を教えてください。"], typed=True, reply_language="ja",
-                 checks=[asks_for("Japanese")], **heard_as("ja")),
+            # Iris's voice speaks no Japanese: the reply is shown
+            Turn(["明日の東京の天気を教えてください。"], typed=True, reply_language="ja", expect="shown",
+                 checks=[asks_for("Japanese")]),
             Turn(["Qual é a capital do Brasil?"], typed=True, reply_language="pt",
                  checks=[asks_for("Portuguese")], spoken_share=SPOKEN_SHARE),
             Turn(["Thanks. How many legs does a spider have?"], reply_language="en", checks=[asks_for_english()]),
@@ -2577,13 +2590,19 @@ NAME_OF = {code: name for name, code in LANGUAGE_NAMES.items()}
 
 
 def persona_across_languages(persona: str, label: str, languages: list[str]) -> Conversation:
-    """A persona answers each language in it, told so, and its voice is heard
-    saying the reply in it; then the user goes back to English."""
+    """A persona answers each language in it, told so. Its voice is heard
+    saying the reply in each language the voice speaks, as the persona
+    editor tells them; in any other the reply is shown, not spoken by
+    another voice, and the user is told so. Then the user goes back to
+    English."""
+    shipped = Persona.from_file(BUILTIN_DIR / f"{persona}.yaml")
+    spoken = voice_languages(shipped.engine, shipped.voice)
     turns = []
     for language in languages:
         note = asks_for(NAME_OF[language]) if language != "en" else asks_for_nothing()
-        turns.append(Turn(**SAID_IN[language], reply_language=language, checks=[note],
-                          **heard_as(language)))
+        heard = heard_as(language) if language in spoken else {"expect": "shown"}
+        turns.append(Turn(**SAID_IN[language], reply_language=language, checks=[note, voice_is(
+            f"{shipped.engine}:{shipped.voice}")], **heard))
     turns.append(Turn(["Thank you. Back to English: what day comes after Monday?"], reply_language="en",
                       checks=[asks_for_english()], spoken_share=SPOKEN_SHARE))
     return Conversation(
@@ -2593,9 +2612,9 @@ def persona_across_languages(persona: str, label: str, languages: list[str]) -> 
     )
 
 
-# HAL and Computer speak with Kokoro, which borrows Pocket TTS's voices for
-# German and Dutch; Iris speaks with Pocket TTS, which borrows Kokoro's for
-# Hindi, Japanese and Chinese (Spanish, which needs Pocket TTS's Spanish
+# HAL and Computer speak with Kokoro, whose voices speak no German or Dutch;
+# Iris speaks with Pocket TTS, which speaks no Hindi, Japanese or Chinese.
+# No other voice speaks for them (Spanish, which needs Pocket TTS's Spanish
 # model, is in "across languages")
 PERSONAS += [
     persona_across_languages("hal", "Kokoro", ["en", "fr", "pt", "es", "it", "hi", "ja", "zh", "de", "nl"]),
