@@ -489,6 +489,39 @@ async function checkSilent(since) {
   check(seconds === 0, `the speaker played ${seconds.toFixed(2)} s of sound after Stop`);
 }
 
+/** The model's streamed replies begun since a moment, its reasoning included,
+ *  which the app is never shown: when their first and last lines came. */
+async function modelOutput(since) {
+  const streams = (await rpc("e2e.model")).streams.filter((s) => s.first >= since);
+  if (!streams.length) return null;
+  return {
+    first: Math.min(...streams.map((s) => s.first)),
+    last: Math.max(...streams.map((s) => s.last)),
+    lines: streams.reduce((sum, s) => sum + s.lines, 0),
+  };
+}
+
+// The longest the model may stream nothing before the reply is given up on,
+// as the core gives up on a server silent for longer
+const MODEL_SILENCE = 60_000;
+
+/** Wait for something a reply asked for at `since` brings (its first words,
+ *  a tool), however long the model thinks before: a reasoning model streams
+ *  minutes of reasoning first against a slow server. It is waited for while
+ *  the model streams; a model that says nothing at all, or goes silent
+ *  before it, fails. */
+async function afterThinking(what, since, found) {
+  await until("the model's first output", () => modelOutput(since), 180_000);
+  return until(what, async () => {
+    const got = await found();
+    if (got) return got;
+    const output = await modelOutput(since);
+    const silent = Date.now() - output.last;
+    check(silent < MODEL_SILENCE, `the model streamed ${output.lines} lines, then nothing for ${Math.round(silent / 1000)} s`);
+    return null;
+  }, 900_000);
+}
+
 // Hugging Face as the core's stand-in has it (irisdev/e2e_core.py): the
 // token it takes, and what the account did on the website
 const CLONE_TOKEN = "hf_e2e_test_token";
@@ -1593,7 +1626,8 @@ try {
 
   await step("Stop silences a reply being spoken, and Iris stays silent", async () => {
     const since = await ask("Count from one to forty in words, one number per sentence.");
-    await eventAfter("audio.output", since, (data) => data.rms > 0.001, 180_000);
+    await afterThinking("the voice", since, () =>
+      events.find((e) => e.at >= since && e.type === "audio.output" && e.data.rms > 0.001));
     await quiet(2500);
     const pressed = Date.now();
     await stopButton.click();
@@ -1609,7 +1643,8 @@ try {
 
   await step("after Stop the next message is answered and spoken", async () => {
     const since = await ask("Reply with exactly: ready when you are.");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await afterThinking("the reply", since, () =>
+      events.find((e) => e.at >= since && e.type === "chat.done"));
     check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
     await eventAfter("audio.output", since, (data) => data.rms > 0.001, 60_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
@@ -1618,7 +1653,8 @@ try {
 
   await step("Stop while the reply is still being written silences it too", async () => {
     const since = await ask("Tell a story about a lighthouse keeper in about three hundred words.");
-    await eventAfter("chat.chunk", since, () => true, 180_000);
+    await afterThinking("the reply's first words", since, () =>
+      events.find((e) => e.at >= since && e.type === "chat.chunk"));
     await quiet(1200);
     const pressed = Date.now();
     await stopButton.click();
@@ -1633,7 +1669,7 @@ try {
 
   await step("Stop during a tool ends the turn", async () => {
     const since = await ask("Search the web for the population of Reykjavik and tell me.");
-    await until("a tool to run", () => events.find((e) => e.at >= since && e.type === "tool.use"), 180_000);
+    await afterThinking("a tool to run", since, () => events.find((e) => e.at >= since && e.type === "tool.use"));
     const pressed = Date.now();
     await stopButton.click();
     await quiet(10_000);

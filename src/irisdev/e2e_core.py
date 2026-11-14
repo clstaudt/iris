@@ -14,16 +14,24 @@ its download without fetching, and "clones" every sample as one of Pocket
 TTS's own voices, which the open model reads. All the rest of cloning is
 Iris's own: the sample, the voice's folder, the persona that speaks with it.
 
-The test looks into the core through a method of its own, e2e.speaker
-{since, until}: how much sound the virtual speaker played between two
-moments of the test's clock (milliseconds since the epoch), so the test
-knows a voice was heard, not only that the core reported its level.
+The test looks into the core through methods of its own:
+
+- e2e.speaker {since, until}: how much sound the virtual speaker played
+  between two moments, so the test knows a voice was heard, not only that
+  the core reported its level;
+- e2e.model: when the model's streamed replies came in, its reasoning
+  included, which the app is never shown: a reasoning model may think for
+  minutes before it writes a word.
+
+Their moments are the test's: milliseconds since the epoch.
 
     python -m irisdev.e2e_core
 """
 
 import json
+import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import httpx
@@ -38,6 +46,10 @@ from irisdev.voicetest.acoustics import Space
 TOKEN = "hf_e2e_test_token"
 STATE = Path.home() / ".e2e-huggingface.json"
 CLONED_AS = "anna"
+# Requests whose reply the model streams: OpenAI-compatible servers', Ollama's
+CHAT_PATHS = ("/chat/completions", "/api/chat")
+# Streamed replies kept, the latest
+STREAMS_KEPT = 50
 
 # The room, and Iris's laptop in it
 SPACE = Space()
@@ -134,12 +146,56 @@ def speaker(params: dict) -> dict:
     }
 
 
+class ModelWatch:
+    """When the lines of each reply the model streams come in, whatever they
+    hold: words, reasoning or tool calls."""
+
+    def __init__(self):
+        self._streams: deque = deque(maxlen=STREAMS_KEPT)
+        self._lock = threading.Lock()
+
+    def watch(self, response: httpx.Response, lines):
+        """The lines of a response, noted as they pass when it is a reply."""
+        try:
+            chat = response.request.url.path.endswith(CHAT_PATHS)
+        except RuntimeError:  # a response without its request
+            chat = False
+        stream = None
+        for line in lines:
+            if chat and line.strip():
+                now = time.time() * 1000
+                with self._lock:
+                    if stream is None:
+                        stream = {"first": now, "last": now, "lines": 0}
+                        self._streams.append(stream)
+                    stream["last"] = now
+                    stream["lines"] += 1
+            yield line
+
+    def report(self, params: dict) -> dict:
+        """The replies streamed lately: when their first and last lines came
+        (milliseconds since the epoch), and how many lines they had."""
+        with self._lock:
+            return {"streams": [dict(stream) for stream in self._streams]}
+
+
+MODEL = ModelWatch()
+_iter_lines = httpx.Response.iter_lines
+
+
+def _watched_lines(self, *args, **kwargs):
+    return MODEL.watch(self, _iter_lines(self, *args, **kwargs))
+
+
 def main():
     # The microphone and the speaker are taken from here when the assistant
     # is built, after the app has asked for it
     audio.SYSTEM = LAPTOP
     cloning.KYUTAI = StandInKyutai()
-    rpc_server.main({"e2e.speaker": speaker})
+    # Both Ollama's client and Iris's own for other servers read a streamed
+    # reply line by line
+    httpx.Response.iter_lines = _watched_lines
+    rpc_server.main({"e2e.speaker": speaker, "e2e.model": MODEL.report})
 
 
 if __name__ == "__main__":
