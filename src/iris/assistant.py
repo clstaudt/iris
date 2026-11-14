@@ -3,6 +3,7 @@
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import warnings
@@ -10,11 +11,12 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import soundfile as sf
 from faster_whisper.audio import decode_audio
 
 from iris import engines
 from iris.attachments import Attachment, recorded_text
-from iris.audio import AudioPlayer, AudioRecorder, get_filter, play_sound
+from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus
 from iris.llm import ConversationManager, effective_host, split_speech
@@ -27,7 +29,7 @@ from iris.timing import TurnTiming
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
 from iris.tts import SpeechGenerator, SpeechPipeline
-from iris.turns import SmartTurn
+from iris.turns import PRE_SPEECH, SmartTurn
 from iris.wakeword import WakeWordDetector, match_sleep_word
 
 warnings.filterwarnings("ignore")
@@ -79,6 +81,60 @@ def _echo_canceller() -> Optional[EchoCanceller]:
         return None
 
 
+# A turn that begins while the voice speaks, or this long after its stream
+# ended (its last syllables may still arrive, through the room), may be its
+# echo
+ECHO_AFTER = 0.3
+# A turn of four words or more is the voice's echo when this share of its
+# words come, in order, from what the voice said
+ECHO_SHARE = 0.85
+
+
+# Numbers as speech recognition writes them, and as a reply may
+_NUMBERS = {
+    word: str(n)
+    for n, word in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+        "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+    )
+}
+
+
+def _words(text: str) -> list[str]:
+    """The words of a text, lower case, numbers as digits."""
+    found = re.findall(r"[a-z0-9']+", (text or "").lower().replace("\u2019", "'"))
+    return [_NUMBERS.get(word, word) for word in found]
+
+
+def echo_of(heard: str, spoken: str) -> bool:
+    """Whether a turn heard is the voice's own words coming back: two or
+    three words the voice said just so, one after the other, or for a
+    longer turn (which comes back garbled), most of its words in the order
+    the voice said them. A single word ("yes", "tea") could be the user's."""
+    heard_words, spoken_words = _words(heard), _words(spoken)
+    if len(heard_words) < 2 or not spoken_words:
+        return False
+    if len(heard_words) < 4:
+        n = len(heard_words)
+        return any(spoken_words[k : k + n] == heard_words for k in range(len(spoken_words) - n + 1))
+    # How many of the heard words the voice said in the same order
+    previous = [0] * (len(spoken_words) + 1)
+    for word in heard_words:
+        current = [0] * (len(spoken_words) + 1)
+        for k, said in enumerate(spoken_words, 1):
+            current[k] = previous[k - 1] + 1 if word == said else max(previous[k], current[k - 1])
+        previous = current
+    return previous[-1] >= ECHO_SHARE * len(heard_words)
+
+
+def _seconds_of(path: str) -> float:
+    """How long a recording is (0 if it cannot be read)."""
+    try:
+        return sf.info(path).duration
+    except Exception:
+        return 0.0
+
+
 class VoiceAssistant:
     """Voice assistant with speech-to-text, LLM, and text-to-speech."""
 
@@ -110,6 +166,7 @@ class VoiceAssistant:
         tts_models_dir: Optional[str] = None,
         barge_in: bool = True,
         turn_detection: str = "smart_turn",
+        audio: Optional[SoundDevice] = None,
     ):
         """
         Initialize the voice assistant.
@@ -150,6 +207,8 @@ class VoiceAssistant:
                 echo cancellation, which takes the voice out of the microphone)
             turn_detection: "smart_turn" to hear when the user has finished,
                 or "silence" to end a turn after silence_duration of silence
+            audio: The microphone and speaker; the computer's if None (a
+                test gives it a virtual room)
         """
         # Where activity is pushed to the app (None in tests)
         self.event_bus = event_bus
@@ -203,11 +262,12 @@ class VoiceAssistant:
             silence_duration,
             turn_end=SmartTurn.load() if turn_detection == "smart_turn" else None,
             echo=self.echo,
+            audio=audio,
         )
 
         # Initialize audio player with filter from persona
         audio_filter = get_filter(self.persona.audio_filter) if self.persona.audio_filter else None
-        self.player = AudioPlayer(audio_filter=audio_filter)
+        self.player = AudioPlayer(audio_filter=audio_filter, audio=audio)
         self.player.echo = self.echo
 
         self.recognition_engine = recognition_engine
@@ -430,13 +490,13 @@ class VoiceAssistant:
             # Only audible when it was actually listening for follow-ups
             listening = not (self.pause_event.is_set() or self.suspend_event.is_set())
             if self.speak_replies and listening:
-                play_sound(_sleep_chime(), 24000)
+                self.player.audio.play(_sleep_chime(), 24000)
         self._was_dormant = dormant
 
     def _chime(self):
         """Acknowledge the wake word when no request came with it."""
         if self.speak_replies:
-            play_sound(_wake_chime(), 24000)
+            self.player.audio.play(_wake_chime(), 24000)
 
     def _handle_heard(self, audio_path: str, dormant: bool):
         """Answer an utterance, or while dormant, check it for the wake word.
@@ -482,6 +542,10 @@ class VoiceAssistant:
         voice starts, which it would hear.
         """
         while audio_path:
+            # Nothing of this turn's answer has been said yet: what the voice
+            # said of the previous one must not count as heard, or a user who
+            # pauses and goes on loses what they said before the pause
+            self.speech_pipeline.begin_reply()
             answered = threading.Event()
             went_on = threading.Event()
             whole_turn: list[Optional[str]] = [None]
@@ -511,8 +575,16 @@ class VoiceAssistant:
 
             def speaking() -> bool:
                 """Whether the voice is speaking the answer (between two of
-                its clips too), and not paused by the user."""
+                its clips too, and until its stream has played out: when
+                the voice comes out of the speaker cannot be told more
+                closely), and not paused by the user."""
                 return self.speech_pipeline.is_active and not self.suspend_event.is_set()
+
+            def release():
+                """Let the voice go on after a hold, unless the user paused
+                the conversation meanwhile."""
+                if not self.suspend_event.is_set():
+                    self.speech_pipeline.resume()
 
             def listen_on(turn=audio_path):
                 whole_turn[0] = self.recorder.listen_on(
@@ -523,7 +595,7 @@ class VoiceAssistant:
                     on_level=on_level,
                     speaking=speaking if through_voice else None,
                     hold=self.speech_pipeline.pause,
-                    release=self.speech_pipeline.resume,
+                    release=release,
                 )
 
             listener = threading.Thread(target=listen_on, daemon=True)
@@ -627,6 +699,9 @@ class VoiceAssistant:
 
         turn_wait = getattr(getattr(self, "recorder", None), "last_turn_wait", None)
         recognizing = time.monotonic()
+        # Its first syllable: the recording ends as the turn is taken (with
+        # the silence waited for), and begins PRE_SPEECH before it
+        turn_began = recognizing - _seconds_of(audio_path) + PRE_SPEECH
         text, detected_language = self.transcriber.transcribe(audio_path)
         self._timing = TurnTiming(
             "voice",
@@ -640,6 +715,15 @@ class VoiceAssistant:
 
         # The user went on meanwhile: the whole turn is answered instead
         if not text or self.interrupt_event.is_set():
+            return
+
+        # The microphone heard Iris's own voice (an echo the canceller let
+        # through, for instance while the computer was too busy to play on
+        # time): answering it would have Iris talk to itself, turn after turn
+        pipeline = getattr(self, "speech_pipeline", None)
+        spoken_since = getattr(pipeline, "spoken_since", None)
+        if spoken_since and echo_of(text, spoken_since(turn_began - ECHO_AFTER)):
+            logger.info("Took no turn of the voice's own words: %r", text)
             return
 
         # "That's all, Iris": back to sleep, nothing to answer
@@ -853,7 +937,7 @@ class VoiceAssistant:
 
     def run_loop(self):
         """Listen and answer until stop_event is set."""
-        devices_ok, device_msg = AudioRecorder.check_audio_devices()
+        devices_ok, device_msg = self.recorder.check_audio_devices()
         if not devices_ok:
             self._error(f"No microphone: {device_msg}")
             return
@@ -875,6 +959,7 @@ class VoiceAssistant:
 
                 # Paused conversation: nothing starts until it is resumed
                 if self.suspend_event.is_set():
+                    self.recorder.close_microphone()
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
                     time.sleep(0.05)
@@ -907,6 +992,7 @@ class VoiceAssistant:
                 # Paused, or the user is typing: keep the microphone closed
                 # (models stay loaded) and keep watching for typed turns
                 if self.pause_event.is_set() or self.hold_event.is_set():
+                    self.recorder.close_microphone()
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
                     time.sleep(0.05)
@@ -979,6 +1065,7 @@ class VoiceAssistant:
                     logger.exception("Listening failed")
         finally:
             self.speech_pipeline.stop()
+            self.recorder.close_microphone()
             if self.tools:
                 self.tools.cleanup()
             if self.memory:

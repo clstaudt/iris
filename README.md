@@ -343,6 +343,29 @@ The app icon is the fully open iris of the startup animation, drawn by the same 
 
 A working microphone reports a non-zero value (a quiet room still has a noise floor); exactly `0.0` means capture is being denied. Enable the microphone for the launching app under **System Settings > Privacy & Security > Microphone**, then quit and reopen that app (a reload is not enough). The app says so itself: a red line appears in the conversation when the microphone delivers only silence for a few seconds.
 
+### Testing the voice
+
+`irisdev.voicetest` tests Iris by talking to it. Iris runs as in the app, with its real recognition, Smart Turn, echo canceller, language model and voice, but its microphone and speaker belong to a virtual acoustic space: what the microphone hears is scripted, the speaker records what it plays, and each speaker comes back into its own microphone as an echo and is heard by the others. Nothing is played on the computer's speakers, and nothing in the room reaches the test. Iris keeps its personas, memory and plugins in a folder of its own, so yours are left alone.
+
+```bash
+# Scripted conversations: a synthesized user talks to Iris, turn by turn
+uv run python -m irisdev.voicetest conversations
+uv run python -m irisdev.voicetest --llm-host <server URL> --llm-model <model> conversations --only "follow-up"
+
+# Self-talk: two Irises (Iris and HAL) talk to each other, unscripted
+uv run python -m irisdev.voicetest --llm-host <server URL> --llm-model <model> selftalk --minutes 5
+
+# The same conversations as pytest tests
+uv run pytest -m voice
+```
+
+- **Conversations** are held in turns: a question and a follow-up, a pause in the middle of a sentence, thinking aloud, interrupting a long answer, listening to one to its end, Stop, the wake word, quick questions. Each turn is checked (heard as said, as one turn, answered aloud, a reply that fits when a real model answers) and timed from the end of the user's speech: to the first word heard, without the model's time (the voice pipeline), to silence when interrupted or stopped.
+- Without a server a scripted model answers (`StubModel`, Ollama's API on a local port), which tests the voice without a model's time; replies are then not checked.
+- **Self-talk** reports how much of each reply the other heard, whether it took a turn in the pauses between sentences, how long each took to answer, how long both spoke at once, and whether a voice cut itself off.
+- Each run writes `report.json` and, per conversation, what each microphone heard and each speaker played, as WAV files to listen to.
+- Budgets (`voice_pipeline`, `barge_in`, `stop`) are set with `--budgets voice_pipeline=3.5,barge_in=1` or `IRIS_VOICETEST_BUDGETS`.
+- The parts are reusable: `Space` and its endpoints are audio devices as Iris takes them (`iris.audio.SoundDevice`), `ScriptedConversations` and `SelfTalk` talk to any `AssistantUnderTest`, and `IrisUnderTest` is Iris's.
+
 ### Building the macOS app
 
 ```bash

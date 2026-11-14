@@ -91,3 +91,4 @@ def test_a_stop_racing_the_start_of_a_clip_silences_it():
     pipeline = SpeechPipeline(generator, Player())
     pipeline.queue_speech("Hello.")
     assert _wait(lambda: seen == [True])
+

@@ -32,6 +32,8 @@ VAD_CONTEXT = 64
 SPEECH_THRESHOLD = 0.5
 SILENCE_THRESHOLD = 0.35
 # Speech this long starts a turn (shorter sounds are clicks and coughs), and a
+# Seconds without speech before a turn after which the VAD starts afresh
+VAD_REFRESH = 4.0
 # pause this long has Smart Turn judge whether it ends the turn
 SPEECH_START = 0.2
 SPEECH_PAUSE = 0.2
@@ -47,11 +49,21 @@ HOLD_TRIGGER = 0.13
 HOLD = 0.55
 HOLD_SETTLE = 0.25
 HOLD_SPEECH = 0.5
-# A short "Stop" is over before the voice has died away. Speech this certain
-# and this long is the user's all the same: the echo canceller, once settled,
-# leaves nothing of the voice that sure.
+# Speech this certain and this long over the voice needs to go on for only
+# HOLD_CERTAIN_GOES_ON frames while the voice is held to be the user's: a
+# "Stop" said once is nearly over by then. Something must go on all the
+# same, as an echo canceller that lets the voice through (one that has lost
+# the voice's timing does) makes the voice itself certain speech, and that
+# stops with the voice.
 HOLD_CERTAIN = 0.9
 HOLD_CERTAIN_TIME = 0.1
+HOLD_CERTAIN_GOES_ON = 2
+# While the echo canceller measurably lets the voice through, or after a
+# second hold within HOLD_AGAIN seconds that heard only the voice's echo,
+# the voice is not held again this long (seconds): held at every leak, it
+# would stutter
+HOLD_BACKOFF = 2.0
+HOLD_AGAIN = 4.0
 # Audio kept from before speech was recognized, so a turn starts with its
 # first syllable
 PRE_SPEECH = 0.5
@@ -184,6 +196,11 @@ class TurnTracker:
         # was clear, the silence listened to and Smart Turn's verdict
         self.end_wait = 0.0
         self._frame_seconds = frame_seconds
+        # Frames in a row without speech before the turn started: after a
+        # long quiet stretch the VAD starts afresh, as it rates the first
+        # syllables after many seconds of noise floor too low
+        self._quiet_run = 0
+        self._refresh_frames = max(1, round(VAD_REFRESH / frame_seconds))
 
     @property
     def started(self) -> bool:
@@ -206,6 +223,10 @@ class TurnTracker:
         """Take the next 512 samples; True once the turn is over."""
         probability = self.probability = self.speech(frame)
         if not self._frames:
+            self._quiet_run = self._quiet_run + 1 if probability < SILENCE_THRESHOLD else 0
+            if self._quiet_run >= self._refresh_frames and hasattr(self.speech, "reset"):
+                self.speech.reset()
+                self._quiet_run = 0
             self._before.append(frame)
             self._speech_run = self._speech_run + 1 if probability >= SPEECH_THRESHOLD else 0
             if self._speech_run >= self._start_frames:

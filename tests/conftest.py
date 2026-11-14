@@ -8,6 +8,8 @@ import pytest
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from iris import personas  # noqa: E402  (found through the path above)
+
 
 def pytest_configure(config):
     config.addinivalue_line(
@@ -25,8 +27,6 @@ def no_user_plugins(tmp_path_factory, monkeypatch):
 def no_user_personas(tmp_path_factory, monkeypatch):
     """The user's own personas, which may replace the shipped ones, stay out
     of the tests: only those shipped with Iris are loaded."""
-    from iris import personas
-
     monkeypatch.setattr(personas, "USER_DIR", tmp_path_factory.mktemp("personas"))
     monkeypatch.delenv("IRIS_PERSONAS_DIR", raising=False)
     personas.reload_personas()

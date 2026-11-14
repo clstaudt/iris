@@ -2,6 +2,7 @@
 
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -231,7 +232,7 @@ def test_speaking_keeps_iris_awake(monkeypatch):
 def test_falling_asleep_chimes_once(monkeypatch):
     a = _bare_assistant(monkeypatch, (False, ""))
     played, events = [], []
-    monkeypatch.setattr(assistant_module, "play_sound", lambda data, rate: played.append(len(data)))
+    a.player = SimpleNamespace(audio=SimpleNamespace(play=lambda data, rate: played.append(len(data))))
     a.event_bus.subscribe(lambda t, d: events.append(t))
 
     a._note_dormancy(False)  # awake

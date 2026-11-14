@@ -3,6 +3,9 @@
 import threading
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+from ddgs.exceptions import DDGSException
+
 from iris.plugins import web
 from iris.tools import Tools
 
@@ -67,6 +70,12 @@ class TestEnableWebSearch:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    """Searches are tried again without the pauses between tries."""
+    monkeypatch.setattr("iris.plugins.web.time.sleep", lambda seconds: None)
+
+
 class TestSearch:
     @patch("iris.plugins.web.DDGS")
     def test_returns_formatted_results(self, mock_ddgs_cls):
@@ -82,7 +91,9 @@ class TestSearch:
         assert "Result 1" in result["result"]
         assert "Result 2" in result["result"]
         assert "https://one.com" in result["result"]
-        mock_ddgs_cls.return_value.text.assert_called_once_with("test query", max_results=5)
+        mock_ddgs_cls.return_value.text.assert_called_once_with(
+            "test query", max_results=5, backend="auto"
+        )
 
     @patch("iris.plugins.web.DDGS")
     def test_empty_results(self, mock_ddgs_cls):
@@ -282,3 +293,34 @@ class TestLLMSearchPrompt:
 
         assert "'search' function" not in system
         assert "'browse' function" not in system
+
+
+class TestSearchTriedAgain:
+    @patch("iris.plugins.web.DDGS")
+    def test_engines_that_refused_are_asked_again(self, mock_ddgs_cls):
+        """ddgs says "No results found." when the engines it asked refused;
+        a moment later they answer."""
+        mock_ddgs_cls.return_value.text.side_effect = [
+            DDGSException("No results found."),
+            [{"title": "Ali G Indahouse - Quotes", "body": "Keep it real", "href": "https://q.example"}],
+        ]
+        result = _web().execute("search", query="Ali G Indahouse quotes")
+        assert result["success"] is True
+        assert "Keep it real" in result["result"]
+
+    @patch("iris.plugins.web.DDGS")
+    def test_duckduckgo_alone_last(self, mock_ddgs_cls):
+        mock_ddgs_cls.return_value.text.side_effect = DDGSException("No results found.")
+        result = _web().execute("search", query="something nobody wrote")
+        backends = [call.kwargs["backend"] for call in mock_ddgs_cls.return_value.text.call_args_list]
+        assert backends == ["auto", "auto", "duckduckgo"]
+        # Nothing found is said as such, not as a broken service
+        assert result["success"] is True
+        assert "No results found" in result["result"]
+
+    @patch("iris.plugins.web.DDGS")
+    def test_a_network_failure_is_tried_again_then_reported(self, mock_ddgs_cls):
+        mock_ddgs_cls.return_value.text.side_effect = [RuntimeError("network down")] * 2 + [
+            [{"title": "Back", "body": "up", "href": "https://b.example"}]
+        ]
+        assert _web().execute("search", query="anything")["success"] is True

@@ -6,6 +6,7 @@ import threading
 import time
 import warnings
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,7 +21,10 @@ from iris.echo import STEP, EchoCanceller
 from iris.turns import (
     FRAME,
     HOLD,
+    HOLD_AGAIN,
+    HOLD_BACKOFF,
     HOLD_CERTAIN,
+    HOLD_CERTAIN_GOES_ON,
     HOLD_CERTAIN_TIME,
     HOLD_SETTLE,
     HOLD_SPEECH,
@@ -181,6 +185,62 @@ OWN_FILTER = object()
 # ============================================================================
 
 
+class SoundDevice:
+    """The computer's microphone and speaker, through sounddevice.
+
+    All of Iris's audio goes through a device: the microphone as an input
+    stream, the speaker as one output stream that plays a clip at a time. A
+    test gives Iris a device of its own instead, such as a virtual room, and
+    two assistants in one process can each have one.
+    """
+
+    def __init__(self):
+        # sounddevice's play() and stop() act on one shared output stream,
+        # and PortAudio crashes the process when two threads close it at
+        # once. Stop reaches it from several threads (the app's command, the
+        # reply's thread, the playback thread), so every use goes through
+        # this lock.
+        self._output = threading.RLock()
+
+    def input_stream(self, **options):
+        """An input stream, as sounddevice.InputStream takes its options."""
+        return sd.InputStream(**options)
+
+    def query_devices(self, *args, **kwargs):
+        """The audio devices, as sounddevice.query_devices lists them."""
+        return sd.query_devices(*args, **kwargs)
+
+    def play(self, audio: np.ndarray, sample_rate: int, **options) -> float:
+        """Start playing a clip, ending the one before.
+
+        Returns:
+            The output's latency in seconds (0 if it cannot be told)
+        """
+        with self._output:
+            sd.play(audio, sample_rate, **options)
+            try:
+                return float(sd.get_stream().latency)
+            except Exception:
+                return 0.0
+
+    def stop(self):
+        """Stop what plays."""
+        with self._output:
+            sd.stop()
+
+    def playing(self) -> bool:
+        """Whether the clip played last still has audio to play."""
+        with self._output:
+            try:
+                return bool(sd.get_stream().active)
+            except Exception:
+                return False
+
+
+# The computer's own audio, which Iris uses unless given another device
+SYSTEM = SoundDevice()
+
+
 class AudioRecorder:
     """Records the user's turns from the microphone: from the first syllable
     to where Smart Turn hears the end of what they had to say."""
@@ -194,6 +254,7 @@ class AudioRecorder:
         device: int | None = None,
         turn_end: SmartTurn | None = None,
         echo: EchoCanceller | None = None,
+        audio: SoundDevice | None = None,
     ):
         """
         Initialize audio recorder.
@@ -208,6 +269,7 @@ class AudioRecorder:
             device: Input device index (None = system default)
             turn_end: Smart Turn, which hears when a turn is finished
             echo: Takes the voice out of what listen_on() hears while it speaks
+            audio: The device recorded from; the computer's microphone if None
         """
         self.sample_rate = sample_rate
         self.silence_threshold = silence_threshold
@@ -216,14 +278,19 @@ class AudioRecorder:
         self.device = device
         self.turn_end = turn_end
         self.echo = echo
+        self.audio = audio or SYSTEM
         self._speech: SpeechDetector | None = None  # loaded on first listen()
         self._device_error = False  # Track if we've had a device error
         # Of the last turn heard: seconds from the end of speech until it was
         # clear the turn was over
         self.last_turn_wait: float | None = None
+        # The microphone, open from one listen to the next, and how far its
+        # audio was listened to (the end of the last block taken)
+        self._capture: _Capture | None = None
+        self._capture_lock = threading.Lock()
+        self._heard_until: float | None = None
 
-    @staticmethod
-    def check_audio_devices() -> tuple[bool, str]:
+    def check_audio_devices(self) -> tuple[bool, str]:
         """
         Check if audio input devices are available.
 
@@ -231,7 +298,7 @@ class AudioRecorder:
             Tuple of (devices_available: bool, message: str)
         """
         try:
-            devices = sd.query_devices()
+            devices = self.audio.query_devices()
             input_devices = [d for d in devices if d["max_input_channels"] > 0]
 
             if not input_devices:
@@ -239,7 +306,7 @@ class AudioRecorder:
 
             # Check if default input device is valid
             try:
-                default_input = sd.query_devices(kind="input")
+                default_input = self.audio.query_devices(kind="input")
                 if default_input["max_input_channels"] == 0:
                     return False, "Default input device has no input channels."
             except Exception:
@@ -275,13 +342,23 @@ class AudioRecorder:
 
         Takes effect on the next listen() call."""
         self.device = index
+        self.close_microphone()
+
+    def close_microphone(self):
+        """Close the microphone (the mic switched off, the user typing, the
+        conversation paused or over); the next listen opens it again."""
+        with self._capture_lock:
+            capture, self._capture = self._capture, None
+            self._heard_until = None
+        if capture is not None:
+            capture.close()
 
     def current_device_name(self) -> str:
         """Return the name of the currently selected input device."""
         try:
             if self.device is not None:
-                return sd.query_devices()[self.device]["name"]
-            return sd.query_devices(kind="input")["name"]
+                return self.audio.query_devices()[self.device]["name"]
+            return self.audio.query_devices(kind="input")["name"]
         except Exception:
             return "Unknown microphone"
 
@@ -314,7 +391,7 @@ class AudioRecorder:
 
         # Start recording immediately
         try:
-            with self._microphone() as frames:
+            with self._microphone(go_on=False) as frames:
                 while True:
                     if should_stop and should_stop():
                         return None
@@ -377,11 +454,12 @@ class AudioRecorder:
         canceller taking it out of the microphone. What it leaves of the
         voice can still sound like speech, so speech over the voice holds it
         (hold() pauses it), and the microphone listens in the quiet: the user
-        goes on speaking, the voice's echo dies away with it. Speech more
-        certain than any echo the settled canceller leaves is the user's too.
-        Echo lets the voice go on (release()). Until the canceller has
-        learned the room, it lets too much of the voice through for that:
-        speech over the voice is not listened to then.
+        goes on speaking, the voice's echo dies away with it; speech the VAD
+        is certain of needs to go on for a moment only. Echo lets the voice
+        go on (release()). Until the canceller has learned the room, it lets
+        too much of the voice through for that: speech over the voice is not
+        listened to then. Listening ends with the voice going on, however it
+        ends.
 
         Args:
             turn: Path to the turn recorded by listen()
@@ -412,12 +490,28 @@ class AudioRecorder:
         frame_seconds = FRAME / self.sample_rate
         trigger = round(HOLD_TRIGGER / frame_seconds)
         certain_frames = round(HOLD_CERTAIN_TIME / frame_seconds)
+        backoff = round(HOLD_BACKOFF / frame_seconds)
+        again = round(HOLD_AGAIN / frame_seconds)
+        died_away = HOLD_SETTLE - frame_seconds / 2
+        # Frames the voice must not be speaking for to count as done: between
+        # two of its clips it may seem not to for a moment
+        done_frames = round(HOLD_SETTLE / frame_seconds)
+
         # Frames in a row sure, and certain, to be speech, and whether speech
-        # was certain since listening began anew; while the voice is held,
-        # frames left to listen to, and how many after it died away were speech
-        sure, certain, was_certain, held, heard = 0, 0, False, 0, 0
+        # was certain since listening began anew
+        sure, certain, was_certain = 0, 0, False
+        # While speech over the voice is judged: frames left to judge it in,
+        # when that began (the voice held, or seen to have ended), whether the
+        # voice was held for it, and how many frames after the voice died
+        # away were speech
+        held, held_at, paused, heard = 0, 0.0, False, 0
+        # Frames until the voice may be held again, whether speech heard
+        # meanwhile waits to be judged, and when a hold last heard only echo
+        calm, waiting, echoed = 0, False, -again
+        # Frames in a row the voice was not speaking, and frames taken
+        quiet, taken = 0, 0
         try:
-            with self._microphone(echo) as frames:
+            with self._microphone(echo, go_on=True) as frames:
                 while True:
                     if should_stop and should_stop():
                         return None
@@ -427,32 +521,65 @@ class AudioRecorder:
                         frame = frames.get(timeout=0.05)
                     except queue.Empty:
                         continue
+                    # When the frame was captured (time.monotonic())
+                    at = frames.first + taken * frame_seconds
+                    taken += 1
                     spoke = tracker.started
                     ended = tracker.feed(frame)
+                    speech = tracker.probability >= SPEECH_THRESHOLD
                     sure = sure + 1 if tracker.probability >= HOLD_THRESHOLD else 0
                     certain = certain + 1 if tracker.probability >= HOLD_CERTAIN else 0
                     if certain >= certain_frames and echo is not None and echo.settled:
                         was_certain = True
+                    calm = max(0, calm - 1)
+                    if echo is not None:
+                        quiet = 0 if speaking() else quiet + 1
+                    over_voice = echo is not None and quiet < done_frames
                     if held:
                         held -= 1
-                        settled = HOLD - held * frame_seconds > HOLD_SETTLE
-                        heard += settled and tracker.probability >= SPEECH_THRESHOLD
+                        heard += speech and at - held_at >= died_away
                         if held:
                             continue
                         enough = heard * frame_seconds >= HOLD_SPEECH * (HOLD - HOLD_SETTLE)
-                        if not ((enough or was_certain) and tracker.started):
+                        # Speech the VAD was certain of needs to go on for
+                        # a moment only. The canceller's own measure cannot
+                        # spare it that: the moment it starts letting the
+                        # voice through looks to it like the user starting
+                        # to speak
+                        sure_users = was_certain and heard >= HOLD_CERTAIN_GOES_ON
+                        if not ((enough or sure_users) and tracker.started):
                             # The voice's echo: it goes on, and so does listening
-                            release()
+                            if paused:
+                                release()
+                                if not getattr(echo, "cancelling", True) or taken - echoed < again:
+                                    calm = backoff
+                                echoed = taken
                             tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
                             continue
                         spoke = False  # the user's: taken up below
-                    elif echo is not None and not spoke and (sure >= trigger or tracker.started):
-                        if speaking():
-                            if echo.settled:
-                                hold()
-                                held, heard = round(HOLD / frame_seconds), 0
-                            else:
+                    elif echo is not None and (not spoke or waiting) and (sure >= trigger or tracker.started):
+                        if over_voice:
+                            if not echo.settled:
                                 tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
+                                waiting = False
+                            elif calm:
+                                # Kept, to be judged once the voice may be
+                                # held again or has ended; over while the
+                                # voice speaks on, it cannot be told from
+                                # its echo
+                                if ended:
+                                    tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
+                                    waiting = False
+                                    continue
+                                waiting = True
+                            else:
+                                hold()
+                                held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, True, 0, False
+                            continue
+                        if waiting:
+                            # The voice ended meanwhile: what was heard is
+                            # judged as in a hold, with nothing to hold
+                            held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, False, 0, False
                             continue
                     if tracker.started:
                         if not spoke and not on_speech():
@@ -464,6 +591,9 @@ class AudioRecorder:
         except Exception as e:
             print(f"Recording error: {e}")
             return None
+        finally:
+            if held and paused and release is not None:
+                release()
 
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         sf.write(temp_file.name, tracker.audio(), self.sample_rate)
@@ -479,32 +609,32 @@ class AudioRecorder:
         return self._speech
 
     @contextmanager
-    def _microphone(self, echo: EchoCanceller | None = None) -> Iterator["_Frames"]:
-        """The microphone open, its audio arriving in 32 ms frames; without
-        what the speaker plays, given an echo canceller."""
-        frames = _Frames(echo)
+    def _microphone(self, echo: EchoCanceller | None = None, go_on: bool = False) -> Iterator["_Frames"]:
+        """The microphone's audio, in 32 ms frames; without what the speaker
+        plays, given an echo canceller.
 
-        def audio_callback(indata, frame_count, time_info, status):
-            """Callback for audio stream."""
-            # When the block was captured, on the time.monotonic() clock
-            try:
-                lag = time_info.currentTime - time_info.inputBufferAdcTime
-            except AttributeError:
-                lag = 0.0
-            if not 0.0 < lag < 1.0:  # not reported
-                lag = frame_count / self.sample_rate
-            frames.put(indata[:, 0].copy(), time.monotonic() - lag)
+        The microphone stays open when this ends. go_on takes up its audio
+        where the last listener stopped, so a turn the user goes on with
+        loses nothing said in between; otherwise listening starts now, unless
+        the last listener stopped only a moment ago.
+        """
+        with self._capture_lock:
+            if self._capture is None:
+                # Just opened: everything it has captured is new
+                self._capture = _Capture(self.audio, self.sample_rate, self.device)
+                self._heard_until = None
+            else:
+                now = time.monotonic()
+                since = self._heard_until
+                if since is None or (not go_on and now - since > TAKE_UP_WITHIN):
+                    since = now
+                self._capture.skip_before(since)
+            capture = self._capture
 
-        with sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-            callback=audio_callback,
-            # The echo canceller works in 10 ms steps
-            blocksize=3 * STEP if echo is not None else FRAME,
-            device=self.device,
-        ):
-            yield frames
+        def heard_until(moment: float):
+            self._heard_until = moment
+
+        yield _Frames(echo, capture, on_block=heard_until)
 
     @staticmethod
     def _level_meter(on_level: Callable[[float], None] | None) -> Callable[[np.ndarray], None]:
@@ -553,7 +683,7 @@ class AudioRecorder:
 
         # Start recording immediately
         try:
-            with sd.InputStream(
+            with self.audio.input_stream(
                 samplerate=self.sample_rate,
                 channels=1,
                 callback=audio_callback,
@@ -625,28 +755,105 @@ class AudioRecorder:
         return temp_file.name
 
 
+class _Capture:
+    """The microphone kept open from one listen to the next.
+
+    Its audio waits in a queue for whoever listens next, so what is said
+    while nobody listens (the moment between two listens, while a turn is
+    being recognized) is heard by the next listener instead of being lost.
+    Audio older than KEEP_CAPTURED is dropped.
+    """
+
+    def __init__(self, audio: SoundDevice, sample_rate: int, device: int | None):
+        self.sample_rate = sample_rate
+        self._blocks: deque[tuple[np.ndarray, float]] = deque()
+        self._ready = threading.Condition()
+        self._closed = False
+        self._stream = audio.input_stream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            callback=self._callback,
+            # The echo canceller works in 10 ms steps
+            blocksize=3 * STEP,
+            device=device,
+        )
+        self._stream.__enter__()
+
+    def _callback(self, indata, frame_count, time_info, status):
+        # When the block was captured, on the time.monotonic() clock
+        try:
+            lag = time_info.currentTime - time_info.inputBufferAdcTime
+        except AttributeError:
+            lag = 0.0
+        if not 0.0 < lag < 1.0:  # not reported
+            lag = frame_count / self.sample_rate
+        captured = time.monotonic() - lag
+        with self._ready:
+            self._blocks.append((indata[:, 0].copy(), captured))
+            while self._blocks and self._blocks[0][1] < captured - KEEP_CAPTURED:
+                self._blocks.popleft()
+            self._ready.notify()
+
+    def take(self, timeout: float) -> tuple[np.ndarray, float]:
+        """The next block and when it was captured; raises queue.Empty if
+        none came within timeout, or the microphone was closed."""
+        with self._ready:
+            if not self._blocks and not self._closed:
+                self._ready.wait(timeout)
+            if not self._blocks:
+                raise queue.Empty
+            return self._blocks.popleft()
+
+    def skip_before(self, moment: float):
+        """Drop what was captured before this moment."""
+        with self._ready:
+            while self._blocks and self._blocks[0][1] < moment:
+                self._blocks.popleft()
+
+    def close(self):
+        with self._ready:
+            self._closed = True
+            self._blocks.clear()
+            self._ready.notify_all()
+        self._stream.__exit__(None, None, None)
+
+
 class _Frames:
     """The microphone's audio in 32 ms frames, as the VAD takes it: cleaned
     of the voice, given an echo canceller, outside the audio callback."""
 
-    def __init__(self, echo: EchoCanceller | None):
+    def __init__(self, echo: EchoCanceller | None, capture: _Capture, on_block=None):
         self._echo = echo
-        self._blocks: queue.Queue[tuple[np.ndarray, float]] = queue.Queue()
+        self._capture = capture
+        self._on_block = on_block
         self._pending = np.zeros(0, dtype=np.float32)
-
-    def put(self, block: np.ndarray, captured: float):
-        self._blocks.put((block, captured))
+        # When the first frame was captured (time.monotonic()); the frames
+        # follow one another from there
+        self.first = 0.0
+        self._started = False
 
     def get(self, timeout: float) -> np.ndarray:
         """The next frame; raises queue.Empty if none came within timeout."""
         while len(self._pending) < FRAME:
-            block, captured = self._blocks.get(timeout=timeout)
+            block, captured = self._capture.take(timeout)
+            if not self._started:
+                self.first, self._started = captured, True
+            if self._on_block:
+                self._on_block(captured + len(block) / self._capture.sample_rate)
             if self._echo is not None:
                 block = self._echo.clean(block, captured)
             self._pending = np.concatenate([self._pending, block])
         frame, self._pending = self._pending[:FRAME], self._pending[FRAME:]
         return frame
 
+
+# Seconds of the microphone's audio kept for the next listener
+KEEP_CAPTURED = 30.0
+# A new listen takes up the microphone's audio where the last one stopped if
+# that was at most this long ago (a turn following the answer at once);
+# after longer, what came in between is not for it (it may be Iris's voice)
+TAKE_UP_WITHIN = 0.5
 
 # Frames per playback buffer: large, so generation never starves playback
 PLAYBACK_BLOCK = 32768
@@ -656,53 +863,34 @@ PLAYBACK_BLOCK = 32768
 RESUME_REWIND = 0.35
 
 
-# sounddevice's play() and stop() act on one shared output stream, and
-# PortAudio crashes the process when two threads close it at once. Stop
-# reaches it from several threads (the app's command, the reply's thread, the
-# playback thread), so every use of that stream goes through this lock.
-_OUTPUT = threading.RLock()
-
-
 def play_sound(audio: np.ndarray, sample_rate: int, **options) -> float:
-    """Start playing on the shared output stream, ending what played before.
-
-    Returns:
-        The stream's output latency in seconds (0 if it cannot be told)
-    """
-    with _OUTPUT:
-        sd.play(audio, sample_rate, **options)
-        try:
-            return float(sd.get_stream().latency)
-        except Exception:
-            return 0.0
+    """Play on the computer's speaker (see SoundDevice.play)."""
+    return SYSTEM.play(audio, sample_rate, **options)
 
 
 def stop_sound():
-    """Stop whatever plays on the shared output stream."""
-    with _OUTPUT:
-        sd.stop()
+    """Stop what plays on the computer's speaker."""
+    SYSTEM.stop()
 
 
 def sound_playing() -> bool:
-    """Whether the shared output stream still has audio to play."""
-    with _OUTPUT:
-        try:
-            return bool(sd.get_stream().active)
-        except Exception:
-            return False
+    """Whether the computer's speaker still has audio to play."""
+    return SYSTEM.playing()
 
 
 class AudioPlayer:
     """Plays audio files with normalization and fade effects."""
 
-    def __init__(self, audio_filter: Optional[AudioFilter] = None):
+    def __init__(self, audio_filter: Optional[AudioFilter] = None, audio: SoundDevice | None = None):
         """
         Initialize audio player.
 
         Args:
             audio_filter: Optional AudioFilter instance to apply to audio
+            audio: The device played on; the computer's speaker if None
         """
         self.audio_filter = audio_filter
+        self.audio = audio or SYSTEM
         # Told what is played, so the microphone can hear the user over it
         self.echo: EchoCanceller | None = None
         self._paused = threading.Event()
@@ -712,12 +900,16 @@ class AudioPlayer:
         # started being heard, None while paused)
         self._place: tuple[int, int, int, float | None] | None = None
 
+    def _cut(self):
+        """What plays stopped being heard now."""
+        if self.echo is not None:
+            self.echo.cut(time.monotonic())
+
     def stop(self):
         """Stop any currently playing audio."""
         self._stopped.set()
-        stop_sound()
-        if self.echo is not None:
-            self.echo.cut(time.monotonic())
+        self.audio.stop()
+        self._cut()
 
     def pause(self):
         """Pause playback; play() holds its place until resume()."""
@@ -814,7 +1006,7 @@ class AudioPlayer:
             # Play with maximum buffer size and latency for ultra-smooth playback
             # Extra large buffer (32768 samples = ~740ms) prevents any underruns
             started = time.monotonic()
-            latency = play_sound(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
+            latency = self.audio.play(segment, sample_rate, blocksize=PLAYBACK_BLOCK, latency="high")
             self._place = (len(audio), sample_rate, position, started + latency)
             if self.echo is not None:
                 self.echo.played(started + latency, segment, sample_rate)
@@ -839,15 +1031,14 @@ class AudioPlayer:
             while time.monotonic() - started < deadline:
                 if self._paused.is_set() or stopped():
                     break
-                if not sound_playing():
+                if not self.audio.playing():
                     break
                 time.sleep(0.02)
             elapsed = time.monotonic() - started
             cut_by_pause = self._paused.is_set() and not stopped()
             if cut_by_pause or stopped():
-                stop_sound()
-                if self.echo is not None:
-                    self.echo.cut(time.monotonic())
+                self.audio.stop()
+                self._cut()
 
             if level_thread:
                 level_stop.set()

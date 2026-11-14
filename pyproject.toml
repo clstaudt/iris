@@ -36,6 +36,7 @@ dependencies = [
 
 [project.scripts]
 iris-benchmark = "irisdev.benchmark:main"
+iris-voicetest = "irisdev.voicetest.__main__:main"
 iris-gui = "iris.rpc_server:main"
 
 [project.optional-dependencies]
@@ -52,8 +53,11 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-markers = ["integration: tests requiring external services (ollama, kokoro, whisper)"]
-addopts = "-m 'not integration'"
+markers = [
+    "integration: tests requiring external services (ollama, kokoro, whisper)",
+    "voice: conversations with Iris in a virtual room (speech models, minutes)",
+]
+addopts = "-m 'not integration and not voice'"
 
 [tool.ruff]
 line-length = 100
