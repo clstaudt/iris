@@ -29,13 +29,10 @@ class SpeechEngine:
     id = ""
     #: Shown in the app, e.g. "Kyutai"
     name = ""
-    #: Whisper language codes it speaks
+    #: Whisper language codes it speaks, with one voice or another
     languages: frozenset[str] = frozenset()
     #: Whether its voices take a speed
     takes_speed = False
-    #: Engines whose voices it borrows for languages it lacks: a reply in
-    #: such a language is spoken by the first of them that speaks it
-    borrows: tuple[str, ...] = ()
 
     voice = ""
     speed = 1.0
@@ -54,7 +51,9 @@ class SpeechEngine:
 
     @classmethod
     def voices(cls, models_dir: str | Path | None = None) -> list[dict]:
-        """Its voices, as {"id", "name", "language"} (the language as shown)."""
+        """Its voices, as {"id", "name", "language"} (the language a voice
+        was made for, as shown). "languages", those it speaks, may be left
+        out: voice_languages() tells them."""
         return []
 
     @classmethod
@@ -63,15 +62,18 @@ class SpeechEngine:
         return "en"
 
     @classmethod
-    def default_voice(cls, language: str) -> Optional[str]:
-        """Its voice for a language, used when another engine borrows it."""
-        return None
+    def voice_languages(cls, voice: str) -> frozenset[str]:
+        """The languages a voice speaks properly: natively, correctly
+        pronounced. A persona's replies in any other language are shown and
+        not spoken; no other voice speaks them in its place. Every voice
+        speaks all of the engine's languages, unless the engine says
+        otherwise."""
+        return cls.languages
 
     def prepare(self):
         """Load what its first reply needs, when it is the persona's engine.
 
-        An engine only borrowed for a language loads what that language
-        needs when it is first spoken, and nothing else.
+        What another language needs may load when it is first spoken.
         """
 
     def generate(self, text: str, language: str = "en") -> Optional[str]:
@@ -132,40 +134,17 @@ def speech_engine(engine_id: str) -> type[SpeechEngine]:
         raise ValueError(f"No speech engine '{engine_id}'") from None
 
 
-def speaking_engine(engine_id: str, language: str) -> Optional[tuple[str, Optional[str]]]:
-    """Who speaks a reply in this language for a persona on this engine.
+def speech_languages() -> frozenset[str]:
+    """The languages Iris talks in, as Whisper codes: those any of its voices
+    speaks. A conversation follows the user into each of them, whatever the
+    persona's voice speaks."""
+    return frozenset().union(*(engine.languages for engine in _speech.values()))
 
-    Returns:
-        (engine_id, None) when the engine speaks the language itself,
-        (other_id, voice) when it borrows another engine's voice for it, or
-        None when neither can
-    """
+
+def voice_speaks(engine_id: str, voice: str, language: str) -> bool:
+    """Whether a voice of this engine speaks a language properly."""
     engine = _speech.get(engine_id)
-    if engine is None:
-        return None
-    if language in engine.languages:
-        return engine_id, None
-    for other_id in engine.borrows:
-        other = _speech.get(other_id)
-        if other is not None and language in other.languages:
-            voice = other.default_voice(language)
-            if voice:
-                return other_id, voice
-    return None
-
-
-def spoken_languages(engine_id: str) -> frozenset[str]:
-    """The languages a persona on this engine speaks, with its own voice or
-    one it borrows."""
-    engine = _speech.get(engine_id)
-    if engine is None:
-        return frozenset()
-    candidates = set(engine.languages)
-    for other_id in engine.borrows:
-        other = _speech.get(other_id)
-        if other is not None:
-            candidates |= other.languages
-    return frozenset(lang for lang in candidates if speaking_engine(engine_id, lang))
+    return engine is not None and language in engine.voice_languages(voice)
 
 
 def register_recognition_engine(engine: RecognitionEngine):

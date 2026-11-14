@@ -440,7 +440,7 @@ def test_a_languages_voice_that_cannot_be_loaded_is_told_once(monkeypatch):
 
     monkeypatch.setattr(tts.TTSModel, "load_model", staticmethod(load_model))
     told = []
-    generator = SpeechGenerator("kyutai", "alba")
+    generator = SpeechGenerator("kyutai", "anna")
     generator.on_failure = told.append
     assert generator.generate("Hello there.", language="en")
     assert generator.generate("Bonjour.", language="fr") is None

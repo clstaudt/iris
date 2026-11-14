@@ -4,7 +4,7 @@
 
 Speech recognition and speech synthesis are slots, kept in `iris.engines`. An engine registers under an id, and the rest of Iris names it by that id: a persona's `engine`, the Voice and Recognition stages in Settings.
 
-- **Speech synthesis:** `kyutai` (Pocket TTS) and `kokoro`. An engine is a `SpeechEngine` subclass with an `id`, a `name`, the `languages` it speaks, whether it `takes_speed`, the engines it `borrows` voices from for languages it lacks (Kyutai borrows Kokoro), and `voices()`, `voice_language()`, `default_voice()` and `generate(text, language)`.
+- **Speech synthesis:** `kyutai` (Pocket TTS) and `kokoro`. An engine is a `SpeechEngine` subclass with an `id`, a `name`, the `languages` it speaks, whether it `takes_speed`, and `voices()`, `voice_language()` (the language a voice was made for), `voice_languages()` (those a voice speaks properly; all of the engine's unless it says otherwise) and `generate(text, language)`. No engine speaks for another: a persona's replies in a language its voice does not speak are shown only.
 - **Speech recognition:** `whisper`. An engine is a `RecognitionEngine(id, name, create)`, where `create(options)` returns an object whose `transcribe(audio_path)` gives the text and its language. A recognition engine other than Whisper is chosen with the `recognition_engine` option of `assistant.start`; the app has no menu for it yet.
 
 Plugins register engines of their own (see below). Turn detection (Silero and Smart Turn) and echo cancellation are fixed parts of the audio pipeline for now.
