@@ -26,6 +26,8 @@ ENGINES = {
     "speech synthesis (Pocket TTS)": "pocket_tts",
     "speech synthesis (Kokoro)": "kokoro_onnx",
     "the voice (both engines)": "iris.tts",
+    "voice cloning (Hugging Face login, the sample)": "iris.cloning",
+    "audio files to clone a voice from (M4A, AAC)": "av",
     "OpenAI-compatible model servers": "iris.llm_client",
     "web search": "ddgs",
     "web pages": "trafilatura",

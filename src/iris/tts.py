@@ -31,6 +31,7 @@ from pocket_tts.utils.utils import get_predefined_voice
 from pykakasi import kakasi
 
 from iris.audio import get_filter
+from iris.cloning import cloned_voices, voice_folder, voice_state
 from iris.engines import (
     SpeechEngine,
     register_speech_engine,
@@ -568,7 +569,8 @@ class PocketGenerator(SpeechEngine):
     def __init__(self, voice: str = "anna", models_dir: str | Path | None = None):
         """
         Args:
-            voice: A Pocket TTS voice, or an audio file of a voice to clone
+            voice: A Pocket TTS voice, an audio file of a voice to clone, or
+                a voice cloned in the app ("clone:<name>")
             models_dir: Unused: Pocket TTS fetches its models itself
         """
         self.voice = voice
@@ -589,9 +591,27 @@ class PocketGenerator(SpeechEngine):
     def _voice_state(self, pocket_lang: str, voice: str):
         key = (pocket_lang, voice)
         if key not in self._voice_states:
-            model = self._model(pocket_lang)
-            self._voice_states[key] = model.get_state_for_audio_prompt(voice)
+            folder = voice_folder(voice)
+            if folder is not None:
+                # Made by the language's cloning model the first time, kept
+                self._voice_states[key] = voice_state(self._models, pocket_lang, folder)
+            else:
+                model = self._model(pocket_lang)
+                self._voice_states[key] = model.get_state_for_audio_prompt(voice)
         return self._voice_states[key]
+
+    @property
+    def voice(self) -> str:
+        """The voice it speaks with: one of Pocket TTS's own, an audio file
+        to clone, or the folder of a voice cloned in the app, which personas
+        name "clone:<name>" (iris.cloning). Like an audio file, a cloned
+        voice speaks every language as itself."""
+        return self._voice
+
+    @voice.setter
+    def voice(self, voice: str):
+        folder = voice_folder(voice)
+        self._voice = str(folder) if folder is not None else voice
 
     @classmethod
     def voices(cls, models_dir: str | Path | None = None) -> list[dict]:
@@ -607,7 +627,7 @@ class PocketGenerator(SpeechEngine):
                 "language": LANGUAGE_NAMES[cls.voice_language(name)],
             }
             for name in names
-        ]
+        ] + cloned_voices()
 
     @classmethod
     def voice_language(cls, voice: str) -> str:
