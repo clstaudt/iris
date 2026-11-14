@@ -14,6 +14,10 @@ its download without fetching, and "clones" every sample as one of Pocket
 TTS's own voices, which the open model reads. All the rest of cloning is
 Iris's own: the sample, the voice's folder, the persona that speaks with it.
 
+The test can break the room's speaker (in a file of the test's home): while
+it says so, opening the speaker fails as it does on macOS when its device has
+gone (AirPods disconnecting), so the test sees what Iris does then.
+
 The test looks into the core through methods of its own:
 
 - e2e.speaker {since, until}: how much sound the virtual speaker played
@@ -41,6 +45,7 @@ from collections import deque
 from pathlib import Path
 
 import httpx
+import sounddevice as sd
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
 from pocket_tts import TTSModel
 
@@ -52,6 +57,8 @@ from irisdev.voicetest.acoustics import Space
 TOKEN = "hf_e2e_test_token"
 STATE = Path.home() / ".e2e-huggingface.json"
 CLONED_AS = "anna"
+# Where the test says which of the room's devices it broke
+FAULTS = Path.home() / ".e2e-audio.json"
 # Requests whose reply the model streams: OpenAI-compatible servers', Ollama's
 CHAT_PATHS = ("/chat/completions", "/api/chat")
 # Streamed replies kept, the latest
@@ -166,6 +173,29 @@ class StandInKyutai(cloning.Kyutai):
         return model
 
 
+class Breakable:
+    """The room's microphone and speaker, as one audio device, with a
+    speaker the test can break: {"speaker": "broken"} in the faults file."""
+
+    def __init__(self, endpoint, faults: Path = FAULTS):
+        self._endpoint = endpoint
+        self._faults = faults
+
+    def __getattr__(self, name):
+        return getattr(self._endpoint, name)
+
+    def _broken(self, part: str) -> bool:
+        try:
+            return json.loads(self._faults.read_text()).get(part) == "broken"
+        except (OSError, ValueError):
+            return False
+
+    def play(self, data, sample_rate, **options) -> float:
+        if self._broken("speaker"):
+            raise sd.PortAudioError("Error opening OutputStream: Internal PortAudio error", -9986)
+        return self._endpoint.play(data, sample_rate, **options)
+
+
 def _monotonic(moment_ms: float) -> float:
     """A moment of the test's clock on time.monotonic()'s."""
     return time.monotonic() - (time.time() - moment_ms / 1000)
@@ -259,7 +289,7 @@ def _built_without_reasoning(self, method, url, *args, **kwargs):
 def main():
     # The microphone and the speaker are taken from here when the assistant
     # is built, after the app has asked for it
-    audio.SYSTEM = LAPTOP
+    audio.SYSTEM = Breakable(LAPTOP)
     cloning.KYUTAI = StandInKyutai()
     # Both Ollama's client and Iris's own for other servers read a streamed
     # reply line by line, and build each request through httpx
