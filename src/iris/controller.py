@@ -103,7 +103,7 @@ VISION_MODEL = "qwen3-vl:8b"
 # Events that make up the visible conversation. Kept here so a UI that
 # reloads (or attaches late) can rebuild its transcript; streaming chunks are
 # left out because chat.done carries the full reply.
-TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "chat.continued", "tool.use", "error")
+TRANSCRIPT_EVENTS = ("chat.user", "chat.done", "chat.continued", "tool.use", "error", "notice")
 TRANSCRIPT_LIMIT = 500
 # Turn timings kept for the app
 TIMINGS_KEPT = 20

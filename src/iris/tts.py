@@ -27,7 +27,7 @@ from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 from pykakasi import kakasi
 
-from iris.audio import get_filter
+from iris.audio import SpeakerError, get_filter
 from iris.engines import (
     SpeechEngine,
     register_speech_engine,
@@ -813,6 +813,12 @@ class SpeechPipeline:
         self.on_output_level = None
         # Optional callback for the moment the voice starts saying a reply
         self.on_reply_audio = None
+        # Optional callback told when the speaker could not be opened (the
+        # SpeakerError): once, until a clip plays again
+        self.on_speaker_error = None
+        self._speaker_failed = False
+        # The speaker failed during this reply: the rest of it is not spoken
+        self._muted = False
         self._reply_heard = False
         # What the voice said lately, as (when it stopped being heard, text),
         # so a turn the microphone made of it can be told from the user's
@@ -919,20 +925,30 @@ class SpeechPipeline:
                     if sound and "audio_filter" in sound:
                         name = sound["audio_filter"]
                         effect["audio_filter"] = get_filter(name) if name else None
-                    self.player.play(
-                        audio_file,
-                        on_level=self.on_output_level,
-                        cancelled=lambda: epoch != self._epoch,
-                        **effect,
-                    )
+                    played = True
+                    try:
+                        self.player.play(
+                            audio_file,
+                            on_level=self.on_output_level,
+                            cancelled=lambda: epoch != self._epoch,
+                            **effect,
+                        )
+                    except SpeakerError as error:
+                        played = False
+                        self._speaker_lost(error)
+                    except Exception:
+                        played = False
+                        logger.exception("Playback failed")
+                    else:
+                        self._speaker_failed = False
                     self.is_speaking_flag.clear()
                     with self._status_lock:
                         # Played to its end, unless stop() came first and
                         # kept the part that was heard
-                        if self._playing is not None and epoch == self._epoch:
+                        if played and self._playing is not None and epoch == self._epoch:
                             self._said.append(text)
                         self._playing = None
-                        if not sound:
+                        if played and not sound:
                             self._spoken.append((time.monotonic(), text))
 
                 # Cleanup
@@ -965,6 +981,19 @@ class SpeechPipeline:
                 or self.is_speaking_flag.is_set()
             )
 
+    def _speaker_lost(self, error: SpeakerError):
+        """The speaker could not be opened, even with the devices read anew:
+        the rest of the reply is not spoken (it is shown all the same), and
+        the user is told, once until a clip plays again. The next reply, or
+        a preview, tries the speaker again."""
+        logger.warning("The speaker could not be opened: %s", error)
+        self.stop()
+        with self._status_lock:
+            self._muted = True
+            told, self._speaker_failed = self._speaker_failed, True
+        if not told and self.on_speaker_error:
+            self.on_speaker_error(error)
+
     def queue_speech(self, text: str, language: str | None = None, sound: dict | None = None):
         """
         Add text to speech pipeline (non-blocking).
@@ -975,6 +1004,8 @@ class SpeechPipeline:
             sound: Voice to speak in instead of the persona's, e.g. for a
                 preview: engine, voice, speed and audio_filter, each optional
         """
+        if self._muted:
+            return
         language = language or self.current_language
         self.text_queue.put((text, language, self._epoch, sound))
 
@@ -983,6 +1014,7 @@ class SpeechPipeline:
         with self._status_lock:
             self._said = []
             self._reply_heard = False
+            self._muted = False
 
     def spoken_since(self, moment: float) -> str:
         """What the voice was saying at or after this moment (time.monotonic()):
@@ -1017,6 +1049,8 @@ class SpeechPipeline:
         what is still being generated."""
         with self._status_lock:
             self._epoch += 1
+            # What comes next is spoken again, should the speaker have failed
+            self._muted = False
             # Of the clip playing now, the words heard before the stop count
             # as said
             if self._playing is not None:
