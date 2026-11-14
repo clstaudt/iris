@@ -528,7 +528,7 @@ def _hub_paths(node) -> list[str]:
     return [node] if isinstance(node, str) and node.startswith("hf://") else []
 
 
-def pocket_files(voices=("alba",), language: str = "english") -> list[str]:
+def pocket_files(voices=("anna",), language: str = "english") -> list[str]:
     """The files Pocket TTS loads for a language and these voices of it, as
     hf:// paths, so they can be fetched with progress before it loads them.
 
@@ -565,7 +565,7 @@ class PocketGenerator(SpeechEngine):
     # Hindi, Japanese and Chinese are left to Kokoro
     borrows = ("kokoro",)
 
-    def __init__(self, voice: str = "alba", models_dir: str | Path | None = None):
+    def __init__(self, voice: str = "anna", models_dir: str | Path | None = None):
         """
         Args:
             voice: A Pocket TTS voice, or an audio file of a voice to clone
@@ -620,7 +620,7 @@ class PocketGenerator(SpeechEngine):
     @classmethod
     def default_voice(cls, language: str) -> str | None:
         if language == "en":
-            return "alba"
+            return "anna"
         pocket_lang = POCKET_LANGUAGES.get(language)
         return DEFAULT_VOICE_FOR_LANGUAGE.get(pocket_lang) if pocket_lang else None
 
@@ -690,7 +690,7 @@ class SpeechGenerator:
     def __init__(
         self,
         engine: str = "kyutai",
-        voice: str = "alba",
+        voice: str = "anna",
         speed: float = 1.0,
         models_dir: str | Path | None = None,
         prepare: bool = True,

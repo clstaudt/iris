@@ -310,7 +310,7 @@ def test_an_offline_first_start_reports_each_download_and_starts(stub, offline, 
         assert tried == [
             "model.safetensors",
             "tokenizer.json",
-            "alba.safetensors",
+            "anna.safetensors",
             tts.KOKORO_MODEL_FILE,
             tts.KOKORO_VOICES_FILE,
             SMART_TURN_FILE,
