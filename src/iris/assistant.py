@@ -618,6 +618,11 @@ class VoiceAssistant:
             self.sleep_word = sleep_word.strip() or None
 
     @property
+    def replying(self) -> bool:
+        """A turn is being answered, or its reply is still heard."""
+        return self._turn_active.is_set() or self.speech_pipeline.is_active
+
+    @property
     def dormant(self) -> bool:
         """Waiting to be addressed by the wake word."""
         if self._asleep_until_called:

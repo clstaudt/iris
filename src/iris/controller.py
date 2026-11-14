@@ -4,6 +4,7 @@ state stream for external UIs such as the Electron shell."""
 
 import importlib.metadata
 import itertools
+import logging
 import queue
 import sys
 import threading
@@ -22,6 +23,7 @@ from iris.personas import (
     find_persona,
     get_persona,
     list_personas,
+    persona_stamp,
     reload_personas,
     save_persona,
     shipped,
@@ -50,6 +52,8 @@ from iris.tts import (
     list_voices,
     voice_language,
 )
+
+logger = logging.getLogger(__name__)
 
 # What a voice says when previewed, in its own language
 PREVIEW_LINES = {
@@ -82,6 +86,9 @@ FLAG_STATE_PRIORITY = (
 
 # How long "speaking" survives a gap in playback, in seconds.
 SPEAKING_HOLD = 0.6
+# Seconds between looks at the file of the persona in use, which may change
+# on disk while Iris runs
+PERSONA_CHECK = 1.0
 
 # Seconds a voice preview before Iris runs is followed at most: its engine
 # loading, then the line said
@@ -162,6 +169,10 @@ class AssistantController:
         self._last_state = "idle"
         self._speaking_until = 0.0
         self._poller_stop = threading.Event()
+        # The file of the persona in use as it was taken on, and when it
+        # was last looked at
+        self._persona_stamp: tuple | None = None
+        self._persona_checked = 0.0
 
         # Silent-mic watchdog: a real microphone always has a noise floor, so
         # a stream of exact zeros means the OS is denying mic access (on macOS,
@@ -262,7 +273,30 @@ class AssistantController:
                     elif self.assistant.hold_event.is_set():
                         state = "typing"
                 self._publish_state(state)
+                if now - self._persona_checked >= PERSONA_CHECK:
+                    self._persona_checked = now
+                    self._follow_persona_file()
             self._poller_stop.wait(0.1)
+
+    def _follow_persona_file(self):
+        """The file of the persona in use changed on disk while Iris ran
+        (edited by hand, or replaced by the user's own copy): Iris takes it
+        on, voice, personality and words, so it never speaks with another
+        voice than the editor shows. Not while a reply is given: that one
+        is heard to its end in its own voice, and the next takes the new."""
+        assistant = self.assistant
+        try:
+            stamp = persona_stamp(assistant.persona.id)
+            if stamp == self._persona_stamp or assistant.replying:
+                return
+            reload_personas()
+            if find_persona(assistant.persona.id) is None:
+                # Gone without a file to fall back to: Iris goes on as it is
+                self._persona_stamp = stamp
+                return
+            self.set_persona(assistant.persona.id)
+        except Exception:
+            logger.exception("The persona's file could not be taken on")
 
     # ------------------------------------------------------------------
     # Commands
@@ -338,6 +372,8 @@ class AssistantController:
             self.bus.emit("error", {"message": f"Could not download the speech models: {e}"})
 
         try:
+            # The persona's file as taken on, before Iris runs to compare it
+            self._persona_stamp = persona_stamp(persona.id)
             self.assistant = VoiceAssistant(
                 persona=persona,
                 event_bus=self.bus,
@@ -1134,6 +1170,7 @@ class AssistantController:
                 self.bus.emit("error", {"message": f"Could not load the voice: {e}"})
 
         threading.Thread(target=prepare, daemon=True).start()
+        self._persona_stamp = persona_stamp(persona.id)
         self.bus.emit("config", assistant.config_info())
         return {"ok": True, "persona": name}
 
