@@ -28,6 +28,7 @@ from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 from pocket_tts.utils.config import CONFIGS_DIR as POCKET_CONFIGS
 from pocket_tts.utils.utils import get_predefined_voice
+from pykakasi import kakasi
 
 from iris.audio import get_filter
 from iris.engines import (

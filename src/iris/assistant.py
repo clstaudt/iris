@@ -18,8 +18,15 @@ from iris import engines, language
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
-from iris.events import EventBus
-from iris.llm import OPENING, ConversationManager, effective_host, failure_message, split_speech
+from iris.events import EventBus, brief
+from iris.llm import (
+    OPENING,
+    ConversationManager,
+    effective_host,
+    failure_message,
+    model_missing,
+    split_speech,
+)
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.plugin import Plugin, PluginContext
@@ -62,6 +69,14 @@ GREETING = (
     "the way you would greet someone in person, in your own manner, and let them "
     "know they can simply talk to you.)"
 )
+
+# Told the user when an image (attached, or from the camera or the screen)
+# has no model to see it
+NO_VISION = (
+    "None of the installed models can see images. Install one with vision, "
+    "such as qwen3-vl, to talk about pictures."
+)
+
 
 def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
     """Soft tones in sequence, each swelling in and out."""

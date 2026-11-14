@@ -15,7 +15,7 @@ from iris import downloads, engines, servers, speech_models
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AUDIO_FILTERS, AudioPlayer, AudioRecorder, SoundCheck, get_filter
-from iris.events import EventBus
+from iris.events import EventBus, brief
 from iris.llm import ConversationManager, effective_host, normalize_host, ollama_client
 from iris.personas import (
     delete_persona,
@@ -698,7 +698,9 @@ class AssistantController:
         walkthrough has fetched them already; while it still is, this waits
         for it, then fetches whatever failed there.
         """
-        failed = []
+        # Each is tried whatever became of the others (offline, all fail):
+        # Iris starts with what it has and says what it could not fetch.
+        # Without Smart Turn a silence ends a turn, which needs no word.
         try:
             for model in speech_models.needed(
                 whisper_model=kwargs.get("whisper_model", "auto"),
@@ -712,11 +714,10 @@ class AssistantController:
                     self._fetch(model)
                 except Exception as e:
                     if not model.optional:
-                        failed.append(f"{model.label}: {speech_models.failure(e)}")
+                        message = f"Could not download the {model.what}: {brief(e)}"
+                        self.bus.emit("error", {"message": message})
         finally:
             self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
-        if failed:
-            raise RuntimeError("; ".join(failed))
 
     def setup_info(self) -> dict:
         """For the first-launch walkthrough: what would be downloaded, roughly

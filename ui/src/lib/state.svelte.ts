@@ -396,6 +396,8 @@ class IrisStore {
   needsSetup = $state(!loadSettings().setup_done);
   /** How far the walkthrough's flower had opened, so the orb's bloom carries on */
   bloomFrom = 0;
+  /** Iris has been started in this window (not yet on a first launch) */
+  private started = false;
   /** A model download at first start, shown under the orb */
   setup = $state<{ model: string; label: string; done: number; total: number } | null>(null);
   /** When Iris falls asleep (performance.now() ms), or null when it isn't awake */
@@ -1093,6 +1095,7 @@ class IrisStore {
     if (micStatus === "not-determined" && !this.needsSetup) {
       micStatus = await window.iris.askMicrophone();
     }
+    let micNotice: ChatMessage | null = null;
     if (micStatus !== "granted" && !this.needsSetup) {
       const packaged = await window.iris.isPackaged();
       micNotice = {
@@ -1136,7 +1139,10 @@ class IrisStore {
 
       // First launch: nothing starts until the walkthrough is done; it
       // fetches the speech models while the user makes the other choices
-      if (info.running) this.needsSetup = false;
+      if (info.running) {
+        this.needsSetup = false;
+        this.started = true;
+      }
       if (this.needsSetup) {
         this.setPresence(false);
         return;
@@ -1166,12 +1172,10 @@ class IrisStore {
     // The microphone chosen is chosen again in the new core
     this.micRestored = false;
     try {
-      if (this.needsSetup && !this.installing) {
-        this.setupInfo = await rpc<SetupInfo>("setup.info");
-        return;
-      }
+      // The walkthrough of a first launch goes on with the new core
+      if (this.needsSetup && !this.started) return;
       const info = await rpc<AppInfo>("app.info");
-      if (!info.running) await this.startAssistant(false);
+      if (!info.running) await this.startAssistant({ restore: false });
     } catch (err) {
       this.messages.push({ role: "error", text: `Iris could not be started again: ${err}`, streaming: false });
     }
@@ -1201,7 +1205,7 @@ class IrisStore {
     if (host) this.keepServer(host);
     this.persona = choices.persona;
     this.needsSetup = false;
-    await this.startAssistant(greet);
+    await this.startAssistant({ greet });
     this.loadLists();
   }
 
@@ -1241,9 +1245,15 @@ class IrisStore {
     if (greet) await rpc("assistant.greet");
   }
 
-  private async startAssistant(greet = false) {
+  /** Start the assistant with the saved settings; restore shows the recent
+   *  part of the conversation the core remembers (not when it is shown
+   *  already), and greet has Iris say hello once it listens (the end of the
+   *  walkthrough). */
+  private async startAssistant({ restore = true, greet = false } = {}) {
+    this.started = true;
     const saved = loadSettings();
     const options: Record<string, unknown> = greet ? { greet: true } : {};
+    if (!restore) options.restore_thread = false;
     if (saved.llm_model) options.llm_model = saved.llm_model;
     if (saved.persona) options.persona = saved.persona;
     if (saved.speak_replies !== undefined) options.speak_replies = saved.speak_replies;

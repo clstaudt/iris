@@ -57,6 +57,8 @@ class SpeechModel:
     progress_label: str
     is_cached: Callable[[], bool]
     fetch: Callable[[Progress], object]
+    #: What it is in a sentence, e.g. "speech recognition model"
+    what: str = "speech model"
     #: Iris starts without it (without Smart Turn a silence ends a turn)
     optional: bool = False
 
@@ -77,6 +79,7 @@ def whisper(model: str = "auto", engine: str = "auto", device: str = "auto") -> 
         "Downloading speech recognition model",
         lambda: downloads.is_cached(repo),
         lambda progress: downloads.download(repo, progress),
+        what="speech recognition model",
     )
 
 
@@ -91,6 +94,7 @@ def wake(engine: str = "auto") -> SpeechModel:
         "Downloading wake word model",
         lambda: downloads.is_cached(repo),
         lambda progress: downloads.download(repo, progress),
+        what="wake word model",
     )
 
 
@@ -104,6 +108,7 @@ def turn() -> SpeechModel:
         "Downloading turn detection model",
         lambda: downloads.is_cached(SMART_TURN_REPO, SMART_TURN_FILE),
         lambda progress: downloads.download(SMART_TURN_REPO, progress, filename=SMART_TURN_FILE),
+        what="turn detection model",
         optional=True,
     )
 
@@ -126,6 +131,7 @@ def kokoro(folder: str | None = None) -> SpeechModel | None:
             ],
             progress,
         ),
+        what="Kokoro voice model",
     )
 
 
@@ -150,6 +156,7 @@ def kyutai(voices: list[str] | None = None) -> SpeechModel:
         "Downloading voice model",
         lambda: downloads.files_cached(files()),
         lambda progress: downloads.download_hub_files(files(), progress),
+        what="Kyutai voice model",
     )
 
 
