@@ -1,8 +1,23 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { loadSettings, store } from "../../lib/state.svelte";
   import { walkthrough as w, type SpeechDownload } from "../../lib/walkthrough.svelte";
   import Icon from "../Icon.svelte";
   import Progress from "../Progress.svelte";
+  import LanguageChoice from "../settings/LanguageChoice.svelte";
   import Step from "./Step.svelte";
+
+  /** Iris's languages, English and the computer's own until others are
+   *  chosen: what they need downloads with the speech models */
+  const IRIS_LANGUAGES = ["en", "fr", "it", "de", "es", "pt", "nl", "hi", "ja", "zh"];
+  onMount(() => {
+    if (loadSettings().languages) {
+      store.setLanguages(store.languages).catch(() => {});
+      return;
+    }
+    const own = (navigator.language || "en").slice(0, 2).toLowerCase();
+    store.setLanguages(IRIS_LANGUAGES.includes(own) ? ["en", own] : ["en"]).catch(() => {});
+  });
 
   const size = (mb: number) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`);
 
@@ -102,6 +117,11 @@
   {#if w.folderError}
     <p class="s-status error mt-2">{w.folderError}</p>
   {/if}
+
+  <section class="mt-5 flex flex-col gap-2" aria-label="Languages">
+    <h3 class="s-section">Languages</h3>
+    <LanguageChoice />
+  </section>
 </Step>
 
 <style>
