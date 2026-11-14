@@ -1102,35 +1102,6 @@ try {
     await offered(false, "Cancel");
   });
 
-  await step("voice cloning: a voice cloned and not kept is offered no more, at once or when the editor closes", async () => {
-    const pick = (name) => page.locator(".voice button.pick", { hasText: exactly(name) });
-    const listed = async () => (await page.locator(".voice button.pick").allInnerTexts()).filter((v) => v.startsWith("Iris"));
-    const kept = async () => (await rpc("persona.voices")).engines.kyutai.filter((v) => v.id.startsWith("clone:")).map((v) => v.name);
-    // Cloned again in place of the voice made before, that one goes at once
-    await pick("Iris 2").click();
-    await page.getByRole("button", { name: "Clone again" }).click();
-    await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
-    const made = Date.now();
-    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: speechSample() });
-    await until("the voice cloned once more", () => page.locator(".voice.active .pick", { hasText: exactly("Iris 3") }).count(), 120_000);
-    await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
-    await voiceDone();
-    await until("the voice it replaces to go", async () => !(await listed()).includes("Iris 2"));
-    check(!(await kept()).includes("Iris 2"), "the voice replaced is kept");
-    // Not saved, the last one goes when the editor closes
-    await page.locator("button.s-btn", { hasText: "Cancel" }).click();
-    await openSettings();
-    await until("the voice not kept to go", async () => !(await kept()).includes("Iris 3"));
-    check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "her voice changed");
-    // And is not offered when the editor opens again
-    await openSettings("Personas");
-    await page.locator("button.card", { hasText: "Iris" }).first().click();
-    await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
-    await until("her cloned voice alone to be offered", async () => JSON.stringify(await listed()) === '["Iris"]', 5000)
-      .catch(async () => check(false, `the cloned voices offered are ${JSON.stringify(await listed())}`));
-    await openSettings();
-  });
-
   await step("setups: a new one, renamed, switched and deleted", async () => {
     await openSettings();
     const current = page.locator(".switcher .current");
@@ -2276,6 +2247,88 @@ try {
     await card(voice).waitFor({ state: "detached", timeout: 10_000 });
     await until("Iris on Anna", () => config().tts_voice === "anna", 15_000);
     check((await rpc("persona.get", { id: "iris" })).voice === "anna", "Iris was not saved with Anna");
+  });
+
+  await step("voices: a voice cloned in the persona editor stays, saved or not, until it is deleted here", async () => {
+    // Iris removed a voice cloned and not saved once the editor closed, and
+    // the one cloned before when it cloned again: every voice now stays
+    huggingFace({ token: CLONE_TOKEN, terms: true });
+    sample = sample ?? speechSample();
+    const clones = async () => (await library()).kyutai.filter((v) => v.cloned);
+    const folderOf = (voice) => path.join(coreHome, ".iris", "voices", voice.split(":")[1]);
+    const offered = () => page.locator(".voice .pick .name").allInnerTexts();
+    const pickVoice = (name) => page.locator(".voice button.pick", { has: page.locator(".name", { hasText: exactly(name) }) });
+    const editIris = async () => {
+      await openSettings("Personas");
+      await page.locator("button.card", { hasText: "Iris" }).first().click();
+      await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
+    };
+    /** Clone a voice in the editor: the new one, chosen, says the preview */
+    const cloneHere = async (button) => {
+      const before = new Set((await clones()).map((v) => v.id));
+      await page.getByRole("button", { name: button }).click();
+      await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+      const since = Date.now();
+      await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+      await page.locator(".clone").waitFor({ state: "detached", timeout: 180_000 });
+      const made = (await clones()).find((v) => !before.has(v.id));
+      check(made, "no voice was cloned");
+      await until(`${made.name} to be chosen`, async () => (await page.locator(".voice.active .pick .name").allInnerTexts()).includes(made.name));
+      await heard(since);
+      return made;
+    };
+    const kept = async (voice, when) => {
+      check((await clones()).some((v) => v.id === voice.id), `${voice.name} is not listed ${when}`);
+      check(fs.existsSync(folderOf(voice.id)), `the folder of ${voice.name} is gone ${when}`);
+    };
+    check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
+
+    // Cloned, and the editor left without saving
+    await editIris();
+    const first = await cloneHere("Clone a voice");
+    await openSettings();
+    await quiet(1000);
+    check((await rpc("persona.get", { id: "iris" })).voice === "anna", "Iris was saved with the voice");
+    await kept(first, "once the editor is left");
+    // Opened again, the editor offers it, and so does the Voices page
+    await editIris();
+    await until(`${first.name} to be offered`, async () => (await offered()).includes(first.name));
+    await voicesPage();
+    await card(first.id).waitFor({ timeout: 5000 });
+
+    // Chosen, and cloned again before saving: both stay
+    await editIris();
+    await pickVoice(first.name).click();
+    const second = await cloneHere("Clone again");
+    await kept(first, "once another is cloned in its place");
+    await kept(second, "once it is cloned");
+    const both = await offered();
+    check(both.includes(first.name) && both.includes(second.name), `the editor offers ${JSON.stringify(both)}`);
+
+    // Saved with the newer one: the older one stays
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until(`Iris on ${second.name}`, () => config().tts_voice === second.id, 15_000);
+    check((await rpc("persona.get", { id: "iris" })).voice === second.id, "Iris was not saved with the newer voice");
+    await quiet(1000);
+    await kept(first, "once Iris is saved with another");
+
+    // Deleted on the Voices page, it is gone from both lists
+    await voicesPage();
+    await card(first.id).getByRole("button", { name: "Delete" }).click();
+    await card(first.id).getByRole("button", { name: "Confirm delete" }).click();
+    await card(first.id).waitFor({ state: "detached", timeout: 10_000 });
+    check(!(await clones()).some((v) => v.id === first.id), `${first.name} is still listed`);
+    check(!fs.existsSync(folderOf(first.id)), `the folder of ${first.name} is still there`);
+    await kept(second, "once the other is deleted");
+    await editIris();
+    await until(`${second.name} to be offered`, async () => (await offered()).includes(second.name));
+    check(!(await offered()).includes(first.name), `the editor still offers ${first.name}`);
+
+    // Iris speaks with Anna again, as the next step has her
+    await pickVoice("Anna").click();
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("Iris on Anna", () => config().tts_voice === "anna", 15_000);
+    await toConversation();
   });
 
   await step("voices: a reply its voice is not ready for is shown with its download, and spoken once the voice is ready", async () => {

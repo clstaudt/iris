@@ -1364,10 +1364,16 @@ class AssistantController:
         if settings.get("engine") not in engines.speech_engines() or not settings.get("voice"):
             return {"ok": False, "error": "The persona needs a voice"}
         before = find_persona(settings.get("id") or "")
+        # A cloned voice that is not here is not given to a persona. One
+        # that speaks with it already (its voice removed outside Iris, or by
+        # an Iris that dropped voices) still saves its other changes, its
+        # wake word say; the conversation tells to choose another voice
+        voice = settings["voice"]
+        if cloning.voice_missing(voice) and (before is None or before.voice != voice):
+            name = cloning.voice_name(cloning.voice_folder(voice))
+            error = f"The voice {name} cannot be found: choose another voice"
+            return {"ok": False, "error": error}
         persona_id = save_persona(settings, settings.get("id") or None)
-        # A voice cloned again replaces the one cloned before
-        if before is not None:
-            self.cloning.replaced(before.voice, settings["voice"])
         if self.assistant is not None and self.assistant.persona.id == persona_id:
             self.set_persona(persona_id)
         else:
@@ -1615,6 +1621,9 @@ class AssistantController:
         engine, voice = settings.get("engine"), settings.get("voice")
         if engine not in engines.speech_engines() or not voice:
             return {"ok": False, "error": "No voice chosen"}
+        if cloning.voice_missing(voice):
+            name = cloning.voice_name(cloning.voice_folder(voice))
+            return {"ok": False, "error": f"The voice {name} cannot be found"}
         # In the voice's own language, or the first it speaks
         language = voice_language(engine, voice)
         spoken = voice_languages(engine, voice)

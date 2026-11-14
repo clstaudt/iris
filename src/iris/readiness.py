@@ -215,10 +215,15 @@ class Readier:
         """Make a voice ready for a language, unless it is.
 
         Returns:
-            The job (as describe() gives it), or None when it is ready
+            The job (as describe() gives it), or None when it is ready, or
+            cannot be made ready
         """
         engine_class = engines.speech_engines().get(engine)
         if engine_class is None or not engines.voice_speaks(engine, voice, language):
+            return None
+        # A cloned voice that is not here cannot be made ready: its persona
+        # is told to choose another
+        if cloning.voice_missing(voice):
             return None
         if self.ready(engine, voice, language):
             return None
