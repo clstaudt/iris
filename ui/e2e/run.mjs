@@ -522,6 +522,11 @@ async function afterThinking(what, since, found) {
   }, 900_000);
 }
 
+/** An event of a reply asked for at `since` (its end, its timing), waited for
+ *  as long as the model streams (see afterThinking). */
+const replyEvent = (type, since) =>
+  afterThinking(`the ${type} event`, since, () => events.find((e) => e.at >= since && e.type === type));
+
 // Hugging Face as the core's stand-in has it (irisdev/e2e_core.py): the
 // token it takes, and what the account did on the website
 const CLONE_TOKEN = "hf_e2e_test_token";
@@ -690,7 +695,7 @@ try {
     check(started.data.llm_model === model, `the model is ${started.data.llm_model}`);
     check(started.data.persona === "Iris", `the persona is ${started.data.persona}`);
     if (serverHost) check(started.data.ollama_host === serverHost, `the server is ${started.data.ollama_host}`);
-    const greeting = await eventAfter("chat.done", since, () => true, 180_000);
+    const greeting = await replyEvent("chat.done", since);
     const errors = events.filter((e) => e.at >= since && e.type === "error").map((e) => e.data.message);
     check(!errors.length, `the greeting failed: ${errors.join(" | ")}`);
     check(greeting.data.text.trim().length > 0, "the greeting is empty");
@@ -959,7 +964,7 @@ try {
     const voice = `${config().tts_engine}:${config().tts_voice}`;
     // The next reply is spoken in it
     const since = await ask("Reply with one word: yes.");
-    const timing = await eventAfter("turn.timing", since, () => true, 180_000);
+    const timing = await replyEvent("turn.timing", since);
     check(timing.data.components.voice === voice, `the reply was spoken by ${timing.data.components.voice}, not ${voice}`);
     await voiceDone();
     // Reset brings her shipped voice back, at once too
@@ -1030,7 +1035,7 @@ try {
     await until("the cloned voice", () => config().tts_voice === "clone:iris", 10_000);
     check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "Iris was not saved with the cloned voice");
     const sent = await ask("Reply with one word: yes.");
-    const timing = await eventAfter("turn.timing", sent, () => true, 180_000);
+    const timing = await replyEvent("turn.timing", sent);
     check(timing.data.components.voice === "kyutai:clone:iris", `the reply was spoken by ${timing.data.components.voice}`);
     await voiceDone();
   });
@@ -1271,7 +1276,7 @@ try {
     const since = Date.now();
     await page.locator("textarea").fill("Say hello in five words.");
     await page.locator("textarea").press("Enter");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     const error = events.find((e) => e.at >= since && e.type === "error");
     check(!error, `the reply failed: ${error?.data.message}`);
     check(done.data.text.trim().length > 0, "the reply is empty");
@@ -1307,7 +1312,7 @@ try {
     check(!events.find((e) => e.at >= since && e.type === "chat.user"), "a message was taken while paused");
     await boxButton("Resume the conversation").click();
     await until("the core to resume", () => config().paused === false);
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     check(done.data.text.trim(), "no reply after Resume");
     await page.locator(".bubble.pending").waitFor({ state: "detached", timeout: 5000 });
     const sent = page.locator(".row", { has: page.locator(".bubble.user", { hasText: "Reply with one word: ready." }) });
@@ -1345,7 +1350,7 @@ try {
     await until("the voice off", () => config().speak_replies === false);
     check((await boxButton("Speak replies").innerText()).trim() === "Voice off", "the button does not say Voice off");
     const since = await ask("Reply with exactly: text only today.");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     check(done.data.text.trim(), "the reply is empty");
     await until("the reply in the conversation", () => page.getByText(done.data.text.trim().slice(0, 12)).count());
     const timing = await eventAfter("turn.timing", since, () => true, 10_000);
@@ -1515,7 +1520,7 @@ try {
     const user = await eventAfter("chat.user", since, (data) => data.source === "text", 30_000);
     check(described(user.data) === "notes.txt:document,leaflet.pdf:document", `the files arrived as ${described(user.data)}`);
     check(!(await drafts.count()), "the files are still in the message box");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     check(/saffron/i.test(done.data.text) && /marigold/i.test(done.data.text),
       `the reply does not answer from the files: ${done.data.text}`);
     // The core keeps the files with the message, for an app that reloads
@@ -1542,7 +1547,7 @@ try {
     const user = await eventAfter("chat.user", since, (data) => data.source === "text", 30_000);
     check(described(user.data) === "first.png:image,second.jpg:image", `the files arrived as ${described(user.data)}`);
     check(user.data.attachments.every((f) => f.preview?.startsWith("data:image/jpeg;base64,")), "a picture has no preview");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     if (sees) {
       check(/lemon/i.test(done.data.text) && /orbit/i.test(done.data.text), `the model did not read the pictures: ${done.data.text}`);
     } else {
@@ -1882,7 +1887,7 @@ try {
     // The conversation stays shown, once
     check((await messages.count()) === shown + 1, `${shown} messages before, ${await messages.count()} after`);
     const typed = await ask("Reply with exactly: back again.");
-    const done = await eventAfter("chat.done", typed, () => true, 180_000);
+    const done = await replyEvent("chat.done", typed);
     check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
   });
 
@@ -2045,7 +2050,7 @@ try {
     const since = Date.now();
     await footerButton("Done").click();
     await until("the conversation", () => page.locator("textarea").count(), 10_000);
-    const greeting = await eventAfter("chat.done", since, () => true, 180_000);
+    const greeting = await replyEvent("chat.done", since);
     check(greeting.data.text.trim().length > 0, "the greeting is empty");
     const after = config();
     for (const key of ["llm_model", "ollama_host", "wake_word", "sleep_word", "wake_window", "persona"]) {
