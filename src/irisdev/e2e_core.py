@@ -14,6 +14,11 @@ its download without fetching, and "clones" every sample as one of Pocket
 TTS's own voices, which the open model reads. All the rest of cloning is
 Iris's own: the sample, the voice's folder, the persona that speaks with it.
 
+The test looks into the core through a method of its own, e2e.speaker
+{since, until}: how much sound the virtual speaker played between two
+moments of the test's clock (milliseconds since the epoch), so the test
+knows a voice was heard, not only that the core reported its level.
+
     python -m irisdev.e2e_core
 """
 
@@ -33,6 +38,10 @@ from irisdev.voicetest.acoustics import Space
 TOKEN = "hf_e2e_test_token"
 STATE = Path.home() / ".e2e-huggingface.json"
 CLONED_AS = "anna"
+
+# The room, and Iris's laptop in it
+SPACE = Space()
+LAPTOP = SPACE.endpoint("Iris")
 
 
 def _refused(status: int, message: str, gated: bool = False):
@@ -107,12 +116,30 @@ class StandInKyutai(cloning.Kyutai):
         return model
 
 
+def _monotonic(moment_ms: float) -> float:
+    """A moment of the test's clock on time.monotonic()'s."""
+    return time.monotonic() - (time.time() - moment_ms / 1000)
+
+
+def speaker(params: dict) -> dict:
+    """How much sound the laptop's speaker played between two moments
+    (since, and until or now): the seconds it was audible, and the clips it
+    was given."""
+    start = _monotonic(float(params.get("since") or 0))
+    end = _monotonic(float(params["until"])) if params.get("until") else time.monotonic()
+    played = LAPTOP.speaker
+    return {
+        "seconds": round(played.sound_heard(start, end), 3),
+        "clips": len(played.clips_between(start, end)),
+    }
+
+
 def main():
     # The microphone and the speaker are taken from here when the assistant
     # is built, after the app has asked for it
-    audio.SYSTEM = Space().endpoint("Iris")
+    audio.SYSTEM = LAPTOP
     cloning.KYUTAI = StandInKyutai()
-    rpc_server.main()
+    rpc_server.main({"e2e.speaker": speaker})
 
 
 if __name__ == "__main__":
