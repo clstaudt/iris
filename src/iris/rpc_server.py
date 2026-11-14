@@ -223,6 +223,7 @@ def main():
         "memory.topics": lambda params: controller.memory_topics(),
         "memory.topic": lambda params: controller.memory_topic(params.get("id", -1)),
         "memory.forget": lambda params: controller.memory_forget(params.get("id", -1)),
+        "memory.forget_all": lambda params: controller.memory_forget_all(),
         "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),

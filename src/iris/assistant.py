@@ -61,6 +61,10 @@ GOODBYE_SETTLE = 1.0
 # to fall quiet
 PREVIEW_SETTLE = 0.4
 
+# Seconds forgetting everything waits for the turn underway to end once it
+# is stopped; it takes a moment, unless the user is still speaking
+FORGET_WAIT = 10.0
+
 # Told the user when an image (attached, or from the camera or the screen)
 # has no model to see it
 NO_VISION = (
@@ -250,6 +254,9 @@ class VoiceAssistant:
         # Conversation activity, so background work can give way to it
         self._turn_active = threading.Event()
         self._last_voice = 0.0
+        # Held while a turn is taken and answered, and while everything is
+        # forgotten, so that happens between turns
+        self._turn_lock = threading.Lock()
 
         # Turns submitted by an external UI: {"text": str, "id": str} for typed
         # messages, {"audio": path} for recorded speech
@@ -796,6 +803,38 @@ class VoiceAssistant:
             or time.monotonic() - self._last_voice < 2.0
         )
 
+    def forget_everything(self):
+        """Forget the conversation and all that is remembered, as if Iris
+        had never been spoken to: every turn and topic in memory, what the
+        next reply would be given of the conversation, and the messages
+        waiting to be answered. A reply underway is stopped first, as Stop
+        stops it, and no turn starts until all is forgotten. The app is told
+        (memory.forgotten) so its conversation goes too: one shown that the
+        model no longer knows would mislead. Amnesia mode stays as it is."""
+        self.interrupt_event.set()
+        self.speech_pipeline.stop()
+        # The turn underway ends once stopped. One that does not end in
+        # time cannot keep its exchange either (ConversationManager.forget)
+        took = self._turn_lock.acquire(timeout=FORGET_WAIT)
+        try:
+            if took:
+                # The stop was for the turn underway, not for the next one
+                self.interrupt_event.clear()
+            while True:
+                try:
+                    self.turn_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.conversation.forget()
+            if self.memory:
+                self.memory.store.forget_all()
+            self.conversation_language = "en"
+            if self.event_bus:
+                self.event_bus.emit("memory.forgotten", {})
+        finally:
+            if took:
+                self._turn_lock.release()
+
     def _run_text_turn(self, turn: dict):
         """Answer a typed message, exactly as if it had been spoken."""
         self._turn_active.set()
@@ -1182,15 +1221,17 @@ class VoiceAssistant:
 
                 # Turns from an external UI come first, whether or not the mic
                 # is live, so a typed message never waits for the user to speak
-                turn = self._take_turn()
+                with self._turn_lock:
+                    turn = self._take_turn()
+                    if turn is not None:
+                        try:
+                            if "audio" in turn:
+                                self._handle_heard(turn["audio"], self.dormant)
+                            else:
+                                self._run_text_turn(turn)
+                        except Exception:
+                            logger.exception("Turn failed")
                 if turn is not None:
-                    try:
-                        if "audio" in turn:
-                            self._handle_heard(turn["audio"], self.dormant)
-                        else:
-                            self._run_text_turn(turn)
-                    except Exception:
-                        logger.exception("Turn failed")
                     continue
 
                 # A voice is being previewed: the microphone would hear it as
@@ -1279,7 +1320,8 @@ class VoiceAssistant:
 
                     # 2. Transcribe, then 3. answer (streams and speaks the
                     # reply), listening on in case the user was not finished
-                    self._answer_listening(audio_path, dormant)
+                    with self._turn_lock:
+                        self._answer_listening(audio_path, dormant)
 
                 except Exception:
                     logger.exception("Listening failed")

@@ -40,6 +40,9 @@ Event types:
                     "done": int, "total": int}       (model: stt, wake, turn or tts);
                                                      an empty label when done
     memory.updated {}                                topics were filed or forgotten
+    memory.forgotten {}                              everything was forgotten: the
+                                                     conversation shown goes too,
+                                                     and the messages waiting
 """
 
 import threading
