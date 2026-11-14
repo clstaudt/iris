@@ -7,6 +7,13 @@ fresh machine the first launch would sit at "Loading models" for minutes while
 Progress is in bytes over everything a download fetches. The total is asked
 of the server before the first byte (a dry run), so a bar never runs
 backwards when the next file of a model starts.
+
+Hugging Face's files come over plain HTTP, not Xet: an interrupted file
+resumes where it stopped (huggingface_hub keeps its .incomplete part and
+asks for the rest), and a connection that sends nothing for
+HF_HUB_DOWNLOAD_TIMEOUT (10 s) gives up, so a stalled download fails and is
+tried again rather than hanging. Xet starts a file over from its first byte
+and has no such timeout.
 """
 
 import threading
@@ -15,9 +22,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import huggingface_hub.constants as hf_constants
 import requests
 from huggingface_hub import hf_hub_download, snapshot_download
 from tqdm.auto import tqdm
+
+hf_constants.HF_HUB_DISABLE_XET = True
 
 # on_progress(done_bytes, total_bytes)
 Progress = Callable[[int, int], None]

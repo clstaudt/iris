@@ -77,8 +77,9 @@ IMMEDIATE = frozenset(
 # walkthrough also looks for servers and asks one for its models. So are
 # voice cloning's: asking Hugging Face, downloading its model, reading a
 # sample, making a voice, and the recording (stopped while the rest waits).
-# Dropping a cloned voice is not: it comes in order, after a persona saved
-# with it
+# Renaming or deleting a cloned voice is not: it comes in order, after a
+# persona saved with it. Making voices ready for a language only starts
+# its jobs, which run on a thread of their own (iris.readiness)
 CONCURRENT = frozenset(
     {
         "llm.check_hosts",
@@ -180,7 +181,13 @@ def log_the_voice():
     log.propagate = False
 
 
-def main():
+def main(extra: dict | None = None):
+    """Serve the app on stdin and stdout.
+
+    Args:
+        extra: Methods beside Iris's own, by name, answered in order with
+            the rest (a test's, to look into the core)
+    """
     # Stdout purity: RPC frames get a private copy of the real stdout, and
     # file descriptor 1 is pointed at stderr. That catches native libraries
     # writing to fd 1 as well as Python prints, so nothing splits a frame.
@@ -242,6 +249,7 @@ def main():
         "memory.topics": lambda params: controller.memory_topics(),
         "memory.topic": lambda params: controller.memory_topic(params.get("id", -1)),
         "memory.forget": lambda params: controller.memory_forget(params.get("id", -1)),
+        "memory.forget_all": lambda params: controller.memory_forget_all(),
         "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
         # Threads: each a conversation with one persona and its own memory
         "threads.list": lambda params: controller.threads_list(),
@@ -314,11 +322,27 @@ def main():
         "voice.sample": lambda params: controller.cloning.use_file(
             params.get("data", ""), params.get("name", "")
         ),
-        "voice.clone": lambda params: controller.cloning.clone(params.get("name", "")),
-        "voice.forget": lambda params: controller.cloning.forget(params.get("voice", "")),
+        "voice.clone": lambda params: controller.voice_clone(params),
+        # The Voices page: every voice, the cloned ones managed, and each
+        # made ready for Iris's languages
+        "voice.list": lambda params: controller.voice_list(),
+        "voice.rename": lambda params: controller.cloning.rename(
+            params.get("voice", ""), params.get("name", "")
+        ),
+        "voice.delete": lambda params: controller.voice_delete(
+            params.get("voice", ""), bool(params.get("reassign"))
+        ),
+        "voice.ready": lambda params: controller.voice_make_ready(
+            params.get("engine", ""), params.get("voice", ""), params.get("languages")
+        ),
+        "voice.retry": lambda params: controller.voice_retry(params.get("id", "")),
+        "voice.jobs": lambda params: {"jobs": controller.readier.jobs()},
+        "languages.set": lambda params: controller.set_languages(params.get("languages")),
         "debug.emit": debug_emit,
         "debug.inject_audio": lambda params: controller.inject_audio(params.get("path", "")),
     }
+
+    methods.update(extra or {})
 
     _start_parent_watchdog()
     serve(sys.stdin.readline, methods, write_frame)

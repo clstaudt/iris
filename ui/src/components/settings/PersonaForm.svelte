@@ -6,8 +6,11 @@
     type SpeechEngine,
     type VoiceInfo,
   } from "../../lib/state.svelte";
+  import { byLanguages, byOrigin, speakAlike, spokenBy, toggled } from "../../lib/voices";
   import Icon from "../Icon.svelte";
+  import LanguageFilter from "./LanguageFilter.svelte";
   import VoiceClone from "./VoiceClone.svelte";
+  import VoiceLanguages from "./VoiceLanguages.svelte";
 
   // A persona is who Iris is: a name, a personality, the words that wake it
   // and send it to sleep, and a voice. Models, tools, turn-taking and
@@ -51,17 +54,20 @@
     });
   }
 
-  onMount(async () => {
-    const id = store.editingPersona;
+  /** Show a persona as it is saved, with nothing to save. False when it is
+   *  gone. */
+  async function load(id: string) {
     const loaded = id ? await store.loadPersona(id) : { ...NEW_PERSONA };
-    if (!loaded) {
-      store.editingPersona = store.persona;
-      return;
-    }
+    if (!loaded) return false;
     loaded.wake_word ||= loaded.name;
     loaded.sleep_word ??= "";
     draft = loaded;
     saved = editable(loaded);
+    return true;
+  }
+
+  onMount(async () => {
+    if (!(await load(store.editingPersona))) store.editingPersona = store.persona;
   });
 
   const isNew = $derived(!draft?.id);
@@ -79,14 +85,32 @@
       draft?.engine === "kokoro"
   );
 
-  /** Voices by language, in the order the engine lists them. */
-  const groups = $derived.by(() => {
-    const byLanguage = new Map<string, VoiceInfo[]>();
-    for (const voice of voices) {
-      byLanguage.set(voice.language, [...(byLanguage.get(voice.language) ?? []), voice]);
-    }
-    return [...byLanguage];
-  });
+  // The languages Iris talks in, and those a voice speaks properly: a reply
+  // in any other is shown, not spoken
+  const languages = $derived(store.voices?.languages ?? []);
+  const nameOf = (code: string) => languages.find((l) => l.code === code)?.name ?? code;
+  /** The languages the voices shown must speak; none shows them all. Of
+   *  those, the ones a voice of this engine speaks (asked), the voices that
+   *  speak them all, and the languages one of those also speaks */
+  let wanted = $state<string[]>([]);
+  const filtered = $derived(byLanguages(voices, wanted));
+  const asked = $derived(filtered.asked);
+  const shown = $derived(filtered.shown);
+
+  function want(code: string) {
+    wanted = toggled(asked, code);
+  }
+
+  /** Whether the engine's voices all speak the same languages: the
+   *  persona's languages above then tell them for every voice */
+  const alike = $derived(speakAlike(voices));
+  /** Voices by the language they were made for, in the order the engine
+   *  lists them, each with the languages it speaks */
+  const groups = $derived(byOrigin(shown, alike));
+
+  // What the persona's voice speaks of Iris's languages, is not ready for
+  // yet, and does not speak
+  const chosen = $derived(voices.find((v) => v.id === draft?.voice));
 
   function setEngine(engine: SpeechEngine) {
     if (!draft || draft.engine === engine) return;
@@ -137,12 +161,7 @@
       store.editingPersona = store.persona;
       return;
     }
-    const loaded = await store.loadPersona(draft.id!);
-    if (loaded) {
-      loaded.wake_word ||= loaded.name;
-      loaded.sleep_word ??= "";
-      draft = loaded;
-    }
+    await load(draft.id!);
   }
 
   async function remove() {
@@ -151,7 +170,13 @@
       confirmDelete = true;
       return;
     }
-    await store.deletePersona(draft.id);
+    const id = draft.id;
+    const shipped = draft.shipped;
+    await store.deletePersona(id);
+    confirmDelete = false;
+    // A persona that ships with Iris is shown as it ships once reset: the
+    // editor stays on it, so nothing else would show it anew
+    if (shipped && (await load(id))) return;
     store.editingPersona = store.persona;
   }
 </script>
@@ -213,7 +238,10 @@
     </div>
 
     <section class="flex flex-col gap-3">
-      <h3 class="s-section">Voice</h3>
+      <div class="flex items-center justify-between gap-2">
+        <h3 class="s-section">Voice</h3>
+        <button class="manage" onclick={() => store.openSettings("voices")}>Manage voices</button>
+      </div>
       {#if engines.length > 1}
         <div class="s-seg self-start" role="radiogroup" aria-label="Speech engine">
           {#each engines as engine}
@@ -229,14 +257,32 @@
           {/each}
         </div>
       {/if}
+      {#if chosen && languages.length}
+        <VoiceLanguages
+          engine={draft.engine}
+          voice={chosen}
+          label="Languages of {draft.name || 'the persona'}"
+        />
+      {/if}
+      {#if languages.length}
+        <LanguageFilter {languages} {asked} addable={filtered.addable} onwant={want} />
+      {/if}
+      {#if !shown.length && asked.length}
+        <p class="text-[12px] text-ink-3">
+          No voice here speaks {asked.map(nameOf).join(" and ")}
+        </p>
+      {/if}
       {#each groups as [language, list]}
         <div class="flex flex-col gap-1.5">
-          {#if groups.length > 1}
+          {#if language}
             <span class="text-[11.5px] text-ink-3">{language}</span>
           {/if}
           <div class="voices">
             {#each list as voice}
-              <div class="voice {draft.voice === voice.id ? 'active' : ''}">
+              <div
+                class="voice {draft.voice === voice.id ? 'active' : ''}"
+                title={spokenBy(voice).map(nameOf).join(", ")}
+              >
                 <button
                   class="play {store.previewing === `${draft.engine}:${voice.id}` ? 'playing' : ''}"
                   onclick={() => preview(voice.id)}
@@ -250,7 +296,10 @@
                   aria-checked={draft.voice === voice.id}
                   onclick={() => (draft!.voice = voice.id)}
                 >
-                  {voice.name}
+                  <span class="name">{voice.name}</span>
+                  {#if !alike}
+                    <span class="codes">{spokenBy(voice).join(" ")}</span>
+                  {/if}
                 </button>
               </div>
             {/each}
@@ -337,9 +386,17 @@
     border-color: var(--color-line-strong);
     background: var(--color-raised);
   }
+  /* To the Voices page, where voices are managed */
+  .manage {
+    font-size: 11.5px;
+    color: var(--color-ink-3);
+  }
+  .manage:hover {
+    color: var(--color-ink);
+  }
   .voices {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(146px, 1fr));
     gap: 6px;
   }
   .voice {
@@ -380,14 +437,27 @@
     color: var(--color-petal-warm);
   }
   .pick {
+    display: flex;
     min-width: 0;
     flex: 1;
-    overflow: hidden;
-    font-size: 12.5px;
-    color: var(--color-ink);
+    flex-direction: column;
     text-align: left;
+  }
+  .pick > span {
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .name {
+    font-size: 12.5px;
+    color: var(--color-ink);
+  }
+  /* The languages a voice speaks, the one it was made for first */
+  .codes {
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--color-ink-3);
   }
   .toggle {
     height: 1.75rem;

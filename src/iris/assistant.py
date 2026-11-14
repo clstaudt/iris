@@ -8,6 +8,7 @@ import re
 import threading
 import time
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +16,7 @@ import numpy as np
 import soundfile as sf
 from faster_whisper.audio import decode_audio
 
-from iris import engines, language
+from iris import cloning, engines, language
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
@@ -37,7 +38,7 @@ from iris.status import StatusManager
 from iris.timing import TurnTiming
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
-from iris.tts import SpeechGenerator, SpeechPipeline
+from iris.tts import LANGUAGE_NAMES, SpeechGenerator, SpeechPipeline
 from iris.turns import PRE_SPEECH, SmartTurn
 from iris.wakeword import WakeWordDetector, match_sleep_word
 
@@ -76,6 +77,10 @@ GREETING = (
 
 # Seconds the loop waits after a round of it failed, before the next
 LOOP_RETRY = 0.2
+
+# Seconds forgetting everything waits for the turn underway to end once it
+# is stopped; it takes a moment, unless the user is still speaking
+FORGET_WAIT = 10.0
 
 # Told the user when an image (attached, or from the camera or the screen)
 # has no model to see it
@@ -190,6 +195,10 @@ class VoiceAssistant:
     _ending = False
     # Until then the microphone stays closed after parting words
     _quiet_until = 0.0
+    # Told (engine, voice, language) when a reply comes to a language the
+    # persona's voice speaks but is not ready for: the app makes it ready,
+    # where the user sees it (iris.readiness)
+    on_voice_not_ready: Optional[Callable[[str, str, str], None]] = None
 
     def __init__(
         self,
@@ -280,6 +289,9 @@ class VoiceAssistant:
         # Conversation activity, so background work can give way to it
         self._turn_active = threading.Event()
         self._last_voice = 0.0
+        # Held while a turn is taken and answered, and while everything is
+        # forgotten, so that happens between turns
+        self._turn_lock = threading.Lock()
 
         # Turns submitted by an external UI: {"text": str, "id": str} for typed
         # messages, {"audio": path} for recorded speech
@@ -301,6 +313,12 @@ class VoiceAssistant:
         self.conversation_language = "en"
         # The language the reply being spoken is in, piece by piece
         self._reply_language = "en"
+        # Of the reply: whether a piece of it was queued for the voice, and
+        # whether one was only shown, in a language the voice does not speak
+        self._reply_voiced = False
+        self._reply_unspoken = False
+        # (engine, voice, language) the user was told are shown, not spoken
+        self._unspoken_told: set[tuple[str, str, str]] = set()
 
         # The persona speaks with its own engine and voice
         self.persona = persona if persona else get_persona("iris")
@@ -876,13 +894,106 @@ class VoiceAssistant:
                 dormant = False
 
     def _speak(self, text: str):
-        """Queue reply text for speech, unless voice output is switched off."""
+        """Queue reply text for speech, unless voice output is switched off.
+        A piece in a language the persona's voice does not speak properly is
+        only shown: no other voice says it in its place. So is one in a
+        language the voice is not ready for yet: what it needs is never
+        fetched or made here, unseen, but by the app, with its progress in
+        the conversation, and the voice speaks the language once it is. A
+        cloned voice that is not here is ready for none."""
         if not self.speak_replies:
             return
         clean_text = self.conversation.clean_markdown(text)
-        if clean_text.strip():
-            self.speech_pipeline.queue_speech(
-                clean_text, language=self._speech_language(clean_text)
+        if not clean_text.strip():
+            return
+        spoken_in = self._speech_language(clean_text)
+        if not self.tts_generator.speaks(spoken_in):
+            self._shown_only(spoken_in)
+            return
+        if not self.tts_generator.ready(spoken_in):
+            self._not_ready(spoken_in)
+            return
+        self._reply_voiced = True
+        self.speech_pipeline.queue_speech(clean_text, language=spoken_in)
+
+    def _not_ready(self, language_code: str):
+        """A piece of the reply is shown, not spoken: the persona's voice
+        speaks its language, but is not ready for it yet. The app is told,
+        to make it ready with its progress shown; without one to tell, the
+        user is told once for the voice and language. A cloned voice that is
+        not here cannot be made ready: the user is told to choose another."""
+        self._reply_unspoken = True
+        if not self._reply_voiced:
+            self._report_timing()
+        generator = self.tts_generator
+        if cloning.voice_missing(generator.voice):
+            self._voice_missing()
+            return
+        if self.on_voice_not_ready is not None:
+            self.on_voice_not_ready(generator.engine, generator.voice, language_code)
+            return
+        told = (generator.engine, generator.voice, language_code)
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        name = LANGUAGE_NAMES.get(language_code, language_code)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{self.persona.name}'s voice is not ready for {name} yet: "
+                    f"replies in {name} are shown until it is.",
+                    "kind": "not_ready",
+                    "language": language_code,
+                },
+            )
+
+    def _voice_missing(self):
+        """The persona's voice is a cloned one that is not here, which
+        nothing can make ready: the user is told once for the voice which
+        persona speaks with it, and where to give it another."""
+        generator = self.tts_generator
+        told = (generator.engine, generator.voice, "")
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        persona = self.persona.name
+        name = cloning.voice_name(cloning.voice_folder(generator.voice))
+        logger.info("%s's voice %s cannot be found: shown, not spoken", persona, generator.voice)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{persona}'s voice, {name}, cannot be found. "
+                    f"Choose another voice for {persona} in the persona editor.",
+                    "kind": "voice_missing",
+                },
+            )
+
+    def _shown_only(self, language_code: str):
+        """A piece of the reply is shown and not spoken, its language one the
+        persona's voice does not speak. The user is told once for the voice
+        and language. A reply nothing of which is spoken is complete once it
+        is written, as with the voice off."""
+        self._reply_unspoken = True
+        if not self._reply_voiced:
+            self._report_timing()
+        generator = self.tts_generator
+        told = (generator.engine, generator.voice, language_code)
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        name = LANGUAGE_NAMES.get(language_code, language_code)
+        logger.info("%s's voice does not speak %s: shown, not spoken", self.persona.name, name)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{self.persona.name}'s voice does not speak {name}: "
+                    f"replies in {name} are shown, not spoken.",
+                    "kind": "unspoken",
+                    "language": language_code,
+                },
             )
 
     def _prepare_voice(self, language: str):
@@ -922,6 +1033,38 @@ class VoiceAssistant:
             or not self.turn_queue.empty()
             or time.monotonic() - self._last_voice < 2.0
         )
+
+    def forget_everything(self):
+        """Forget the conversation and all that is remembered, as if Iris
+        had never been spoken to: every turn and topic in memory, what the
+        next reply would be given of the conversation, and the messages
+        waiting to be answered. A reply underway is stopped first, as Stop
+        stops it, and no turn starts until all is forgotten. The app is told
+        (memory.forgotten) so its conversation goes too: one shown that the
+        model no longer knows would mislead. Amnesia mode stays as it is."""
+        self.interrupt_event.set()
+        self.speech_pipeline.stop()
+        # The turn underway ends once stopped. One that does not end in
+        # time cannot keep its exchange either (ConversationManager.forget)
+        took = self._turn_lock.acquire(timeout=FORGET_WAIT)
+        try:
+            if took:
+                # The stop was for the turn underway, not for the next one
+                self.interrupt_event.clear()
+            while True:
+                try:
+                    self.turn_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.conversation.forget()
+            if self.memory:
+                self.memory.store.forget_all()
+            self.conversation_language = "en"
+            if self.event_bus:
+                self.event_bus.emit("memory.forgotten", {})
+        finally:
+            if took:
+                self._turn_lock.release()
 
     def _run_text_turn(self, turn: dict):
         """Answer a typed message, exactly as if it had been spoken."""
@@ -1024,13 +1167,14 @@ class VoiceAssistant:
             self._sleep_word_said()
             return
 
-        # Determine response language: the one the user spoke, if the
-        # persona's voice can speak it, otherwise keep the current
-        # conversation language. Whisper guesses it from the sound, and a
-        # few words in an accent can fool it ("Parliamo italiano." heard as
-        # Portuguese); the words heard tell it better when they are clear.
+        # Determine response language: the one the user spoke, if Iris
+        # talks in it (whether the persona's voice speaks it or not),
+        # otherwise keep the current conversation language. Whisper guesses
+        # it from the sound, and a few words in an accent can fool it
+        # ("Parliamo italiano." heard as Portuguese); the words heard tell it
+        # better when they are clear.
         spoken = language.language_of(text, detected_language, self.tts_generator.languages())
-        if self.tts_generator.speaks(spoken):
+        if spoken in self.tts_generator.languages():
             self.conversation_language = spoken
         response_language = self.conversation_language
 
@@ -1079,12 +1223,13 @@ class VoiceAssistant:
 
     def _keep_exchange(self, prompt: str, answer: str, source: Optional[str], cut: bool):
         """Keep the exchange in the conversation as the user took it in: a
-        reply cut short only as far as it was said, or shown with the voice
-        off. Of a reply stopped before anything was said, nothing is kept."""
+        reply cut short only as far as it was said, or shown, with the voice
+        off or in a language it does not speak. Of a reply stopped before
+        anything was said, nothing is kept."""
         if not cut:
             self.conversation.keep(prompt, self.conversation.reply or "", source)
             return
-        if self.speak_replies:
+        if self.speak_replies and not self._reply_unspoken:
             kept = self.speech_pipeline.said()
         else:
             kept = self.conversation.clean_markdown(answer)
@@ -1121,6 +1266,7 @@ class VoiceAssistant:
             # the reply is spoken in the language it is written in
             self.speech_pipeline.current_language = response_language
             self._reply_language = response_language
+            self._reply_voiced = self._reply_unspoken = False
             # What speaking that language needs loads while the model thinks
             if self.speak_replies:
                 threading.Thread(
@@ -1386,17 +1532,19 @@ class VoiceAssistant:
 
         # Turns from an external UI come first, whether or not the mic
         # is live, so a typed message never waits for the user to speak
-        turn = self._take_turn()
+        with self._turn_lock:
+            turn = self._take_turn()
+            if turn is not None:
+                try:
+                    if "audio" in turn:
+                        self._handle_heard(turn["audio"], self.dormant)
+                    elif turn.get("greet"):
+                        self._greet()
+                    else:
+                        self._run_text_turn(turn)
+                except Exception:
+                    logger.exception("Turn failed")
         if turn is not None:
-            try:
-                if "audio" in turn:
-                    self._handle_heard(turn["audio"], self.dormant)
-                elif turn.get("greet"):
-                    self._greet()
-                else:
-                    self._run_text_turn(turn)
-            except Exception:
-                logger.exception("Turn failed")
             return
 
         # A voice is being previewed: the microphone would hear it as
@@ -1485,7 +1633,8 @@ class VoiceAssistant:
 
             # 2. Transcribe, then 3. answer (streams and speaks the
             # reply), listening on in case the user was not finished
-            self._answer_listening(audio_path, dormant)
+            with self._turn_lock:
+                self._answer_listening(audio_path, dormant)
 
         except Exception:
             logger.exception("Listening failed")

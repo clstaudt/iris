@@ -132,8 +132,10 @@ def _assistant(*replies, wake_word="Iris", speak=True, plugins=(sleep.plugin,)):
     a.transcriber = object()
     a.player = HeldPlayer()
     a.speech_pipeline = SpeechPipeline(InstantGenerator(), a.player)
-    # The voice's languages, which a typed message's language is told among
-    a.tts_generator = SimpleNamespace(languages=lambda: frozenset({"en", "de", "fr", "it"}))
+    # The languages a typed message's language is told among, all spoken
+    a.tts_generator = SimpleNamespace(
+        languages=lambda: frozenset({"en", "de", "fr", "it"}), speaks=lambda language: True, ready=lambda language: True
+    )
     a.tools = Tools(list(plugins), a._plugin_context())
     with patch("iris.llm.ollama") as mock_ollama:
         mock_ollama.show.return_value = MagicMock(modelinfo={}, details=MagicMock(family="test"))
@@ -265,6 +267,7 @@ def test_the_wake_word_is_listened_for_only_once_the_goodbye_has_died_away(monke
     a.stop_event = threading.Event()
     a.hold_event = threading.Event()
     a.turn_queue = queue.Queue()
+    a._turn_lock = threading.Lock()
     a.recorder = Recorder(a)
     a._stay_awake()
     a._note_dormancy(False)  # awake, as during the conversation

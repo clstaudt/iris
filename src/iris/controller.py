@@ -12,7 +12,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from iris import cloning, downloads, engines, servers, speech_models
+from iris import cloning, downloads, engines, readiness, servers, speech_models
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AUDIO_FILTERS, AudioPlayer, AudioRecorder, SoundCheck, get_filter
@@ -27,7 +27,9 @@ from iris.personas import (
     reload_personas,
     save_persona,
     shipped,
+    speaking_with,
     voice_in_use,
+    voice_users,
 )
 from iris.llm_client import is_openai, resolve_host
 from iris.roles import delete_role, find_role, reload_roles, save_role
@@ -46,18 +48,32 @@ from iris.speech_models import KOKORO_MB, WHISPER_MB
 from iris.tts import (
     KOKORO_MODEL_FILE,
     KOKORO_VOICES_FILE,
+    LANGUAGE_NAMES,
+    POCKET_LANGUAGES,
+    PocketGenerator,
     SpeechGenerator,
     SpeechPipeline,
-    engine_speaks,
     find_kokoro_models,
+    in_order,
     kokoro_files_in,
     list_voices,
     voice_language,
+    voice_languages,
+    voice_ready,
 )
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
+# How long a voice played that is not here yet is waited for, in seconds
+PREVIEW_WAIT = 900.0
+
+
+def _shown_path(folder: Path) -> str:
+    """A folder as the app shows it, the home folder as ~."""
+    try:
+        return str(Path("~") / folder.relative_to(Path.home()))
+    except ValueError:
+        return str(folder)
 
 # What a voice says when previewed, in its own language
 PREVIEW_LINES = {
@@ -223,8 +239,15 @@ class AssistantController:
         # Voices cloned in the persona editor; a sample is recorded from
         # Iris's microphone, while it does not listen
         self.cloning = cloning.Cloning(
-            bus.emit, lambda: self.assistant, self.interrupt, voice_in_use
+            bus.emit, lambda: self.assistant, self.interrupt, voice_in_use, self._voice_changed
         )
+        # Iris's languages, as chosen in the app: every persona's voice is
+        # made ready for them ahead. They do not hold a conversation to them
+        self.languages: list[str] = ["en"]
+        # Voices made ready to speak a language, where the user sees it; the
+        # preview last asked for, played once its voice is
+        self.readier = readiness.Readier(bus.emit, self._fetching, self._tts_dir)
+        self._preview_wanted: dict | None = None
 
         bus.subscribe(self._on_bus_event)
 
@@ -237,6 +260,10 @@ class AssistantController:
             with self._transcript_lock:
                 self._transcript.append({"type": event_type, "data": dict(data)})
                 del self._transcript[:-TRANSCRIPT_LIMIT]
+        elif event_type == "memory.forgotten":
+            # Nor does a window that reloads show the conversation again
+            with self._transcript_lock:
+                self._transcript.clear()
         if event_type == "turn.timing":
             self._timings.append(dict(data))
         if event_type == "flags":
@@ -436,6 +463,7 @@ class AssistantController:
         # The app still shows the conversation when it starts a core again
         # after one stopped: the recent turns are not shown a second time
         restore = bool(kwargs.pop("restore_thread", True))
+        languages = kwargs.pop("languages", None)
         # Model folders chosen in Settings; empty means download as usual
         if stt_path := kwargs.pop("stt_model_path", ""):
             kwargs["whisper_model"] = stt_path
@@ -461,6 +489,7 @@ class AssistantController:
                 **kwargs,
             )
             self.assistant.conversation.set_amnesia(amnesia)
+            self.assistant.on_voice_not_ready = self._voice_not_ready
             self._enter_first_thread(thread)
             self.bus.emit("config", self.assistant.config_info())
             if restore:
@@ -471,6 +500,12 @@ class AssistantController:
             with self._start_lock:
                 self._loop_ended()
             return
+
+        # Every persona's voice is made ready for Iris's languages
+        try:
+            self.set_languages(self.languages if languages is None else languages)
+        except Exception:
+            logger.exception("Could not make the voices ready for Iris's languages")
 
         # Diagnostics only — must never prevent the assistant from running
         try:
@@ -898,10 +933,11 @@ class AssistantController:
 
     def memory_topics(self) -> dict:
         """The topics Iris remembers of the open thread, most recently
-        discussed first."""
+        discussed first, and how many turns it keeps in all, in every
+        thread, filed under a topic or not yet."""
         memory = getattr(self.assistant, "memory", None)
         if memory is None:
-            return {"topics": []}
+            return {"topics": [], "turns": 0}
         thread = self.assistant.conversation.thread
         counts = memory.store.turn_counts(thread)
         return {
@@ -914,7 +950,8 @@ class AssistantController:
                     "turns": counts.get(t.id, 0),
                 }
                 for t in memory.store.topics(thread)
-            ]
+            ],
+            "turns": memory.store.turn_count(),
         }
 
     def memory_topic(self, topic_id: int) -> dict:
@@ -950,6 +987,16 @@ class AssistantController:
             return {"ok": False, "error": "Memory is off"}
         memory.store.forget(int(topic_id))
         self.bus.emit("memory.updated", {})
+        return {"ok": True}
+
+    def memory_forget_all(self) -> dict:
+        """Forget everything: every thread and all that is remembered, and
+        the conversation, in the model's context and in the app (see
+        VoiceAssistant.forget_everything). Iris goes on in a new thread,
+        with the same persona."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        self.assistant.forget_everything()
         return {"ok": True}
 
     def _progress(self, model: str, label: str):
@@ -1414,8 +1461,9 @@ class AssistantController:
         generator.engine = persona.engine
         generator.voice = persona.voice
         generator.speed = persona.speed
-        # A language the new voice cannot speak is not kept up
-        if not generator.speaks(assistant.conversation_language):
+        # The conversation keeps its language, also one the new voice does
+        # not speak: its replies in it are shown
+        if assistant.conversation_language not in generator.languages():
             assistant.conversation_language = "en"
         assistant.player.audio_filter = (
             get_filter(persona.audio_filter) if persona.audio_filter else None
@@ -1429,13 +1477,15 @@ class AssistantController:
                 self.bus.emit("error", {"message": f"Could not load the voice: {e}"})
 
         threading.Thread(target=prepare, daemon=True).start()
+        self._ready_personas(readiness.VOICES, {persona.id})
         self._persona_stamp = persona_stamp(persona.id)
         self.bus.emit("config", assistant.config_info())
         return {"ok": True, "persona": name}
 
     def persona_voices(self) -> dict:
         """For the persona editor: the speech engines (names, whether they
-        take a speed) and their voices, and the audio filters."""
+        take a speed) and their voices, each with the languages it speaks
+        properly; the languages Iris talks in; and the audio filters."""
         models_dir = self.assistant.tts_generator.models_dir if self.assistant else None
         registered = engines.speech_engines()
         return {
@@ -1443,6 +1493,10 @@ class AssistantController:
             "engine_info": [
                 {"id": engine.id, "name": engine.name, "takes_speed": engine.takes_speed}
                 for engine in registered.values()
+            ],
+            "languages": [
+                {"code": code, "name": LANGUAGE_NAMES.get(code, code)}
+                for code in in_order(engines.speech_languages())
             ],
             "filters": list(AUDIO_FILTERS),
         }
@@ -1470,12 +1524,21 @@ class AssistantController:
         if settings.get("engine") not in engines.speech_engines() or not settings.get("voice"):
             return {"ok": False, "error": "The persona needs a voice"}
         before = find_persona(settings.get("id") or "")
+        # A cloned voice that is not here is not given to a persona. One
+        # that speaks with it already (its voice removed outside Iris, or by
+        # an Iris that dropped voices) still saves its other changes, its
+        # wake word say; the conversation tells to choose another voice
+        voice = settings["voice"]
+        if cloning.voice_missing(voice) and (before is None or before.voice != voice):
+            name = cloning.voice_name(cloning.voice_folder(voice))
+            error = f"The voice {name} cannot be found: choose another voice"
+            return {"ok": False, "error": error}
         persona_id = save_persona(settings, settings.get("id") or None)
-        # A voice cloned again replaces the one cloned before
-        if before is not None:
-            self.cloning.replaced(before.voice, settings["voice"])
         if self.assistant is not None and self.assistant.persona.id == persona_id:
             self.set_persona(persona_id)
+        else:
+            # Its voice is made ready for Iris's languages
+            self._ready_personas(readiness.VOICES, {persona_id})
         return {"ok": True, "id": persona_id, **self.list_personas()}
 
     def set_persona_words(
@@ -1532,6 +1595,184 @@ class AssistantController:
             self.set_persona(current)
         return {"ok": True, "persona": current, **self.list_personas()}
 
+    # ------------------------------------------------------------------
+    # Iris's languages, and the voices made ready for them
+    # ------------------------------------------------------------------
+
+    def set_languages(self, codes) -> dict:
+        """Iris's languages, as chosen in the app (English always): every
+        persona's voice is made ready for each of them, ahead, with progress
+        (voice.job events). They never hold a conversation to them: Iris
+        follows the user into any of its languages, and a voice not ready
+        for one is made ready when a reply comes to it."""
+        wanted = {code for code in (codes or []) if code in LANGUAGE_NAMES} | {"en"}
+        self.languages = in_order(wanted)
+        return {"ok": True, "languages": self.languages, "jobs": self._ready_personas()}
+
+    def _ready_personas(self, origin: str = readiness.LANGUAGES, only: set | None = None) -> list:
+        """Make the personas' voices (those of only, by id, if given) ready
+        for Iris's languages. Returns the jobs that does."""
+        jobs = []
+        for (engine, voice), speakers in voice_users().items():
+            if only is not None and not any(persona.id in only for persona in speakers):
+                continue
+            names = [persona.name for persona in speakers]
+            for language in self.languages:
+                job = self.readier.request(
+                    engine, voice, language, self._voice_name(engine, voice), names, origin
+                )
+                if job is not None:
+                    jobs.append(job)
+        return jobs
+
+    def _voice_not_ready(self, engine: str, voice: str, language: str):
+        """A reply came to a language the persona's voice is not ready for:
+        it is made ready now, with its progress in the conversation. One that
+        failed stays failed until the user retries it."""
+        found = self.readier.find(engine, voice, language)
+        if found is not None and found.state == readiness.FAILED:
+            return
+        persona = self.assistant.persona.name if self.assistant else ""
+        self.readier.request(
+            engine,
+            voice,
+            language,
+            self._voice_name(engine, voice),
+            [persona] if persona else [],
+            readiness.CONVERSATION,
+        )
+
+    def _tts_dir(self) -> str | None:
+        """The voice model folder chosen in the app, if any."""
+        if self.assistant is not None:
+            folder = self.assistant.tts_generator.models_dir
+            return str(folder) if folder else None
+        return self._walkthrough.get("tts_dir") or None
+
+    @staticmethod
+    def _voice_name(engine: str, voice: str) -> str:
+        """A voice as the app names it."""
+        folder = cloning.voice_folder(voice)
+        if folder is not None:
+            return cloning.voice_name(folder)
+        name = voice.split("_", 1)[-1] if engine == "kokoro" else voice
+        return name.replace("_", " ").title()
+
+    def _voice_changed(self, voice: str):
+        """A cloned voice made again from a new sample: what was loaded of
+        it goes, in Iris's voice and in the walkthrough's."""
+        generators = []
+        if self.assistant is not None:
+            generators.append(self.assistant.tts_generator)
+        with self._preview_lock:
+            if self._preview is not None:
+                generators.append(self._preview.generator)
+        for generator in generators:
+            generator.voice_changed(voice)
+
+    def voice_list(self) -> dict:
+        """For the Voices page and the persona editor: every engine's voices,
+        as persona_voices() lists them, each with the personas that speak
+        with it and the languages it is ready for; a cloned voice with its
+        folder and the languages it is made for so far. With Iris's
+        languages, the jobs making voices ready, and the voice a persona
+        speaks with once its cloned voice is deleted."""
+        listing = self.persona_voices()
+        users = voice_users()
+        models_dir = self._tts_dir()
+        for engine, voices in listing["engines"].items():
+            for voice in voices:
+                speakers = users.get((engine, voice["id"]), [])
+                voice["personas"] = [{"id": p.id, "name": p.name} for p in speakers]
+                voice["ready"] = [
+                    code
+                    for code in voice["languages"]
+                    if voice_ready(engine, voice["id"], code, models_dir)
+                ]
+                folder = cloning.voice_folder(voice["id"]) if engine == PocketGenerator.id else None
+                if folder is not None:
+                    made = set(cloning.made_for(folder))
+                    voice["cloned"] = {
+                        "folder": _shown_path(folder),
+                        "made": [code for code, lang in POCKET_LANGUAGES.items() if lang in made],
+                    }
+        listing["chosen"] = list(self.languages)
+        listing["jobs"] = self.readier.jobs()
+        listing["fallback"] = cloning.FALLBACK_VOICE
+        return listing
+
+    def voice_make_ready(self, engine: str, voice: str, languages=None) -> dict:
+        """Make a voice ready for languages (Iris's, without any), from the
+        Voices page; one that failed is tried again."""
+        codes = list(languages) if languages else list(self.languages)
+        names = [persona.name for persona in speaking_with(voice)]
+        jobs = []
+        for code in codes:
+            found = self.readier.find(engine, voice, code)
+            if found is not None and found.state == readiness.FAILED:
+                job = self.readier.retry(found.id)
+            else:
+                job = self.readier.request(
+                    engine, voice, code, self._voice_name(engine, voice), names, readiness.VOICES
+                )
+            if job is not None:
+                jobs.append(job)
+        return {"ok": True, "jobs": jobs}
+
+    def voice_retry(self, job_id: str) -> dict:
+        job = self.readier.retry(job_id)
+        return {"ok": job is not None, "job": job}
+
+    def voice_clone(self, params: dict) -> dict:
+        """Make a cloned voice of the sample prepared (see Cloning.clone),
+        then for the languages chosen with it and Iris's own, which its
+        personas will speak: those jobs come back, for the clone to finish
+        once they have."""
+        result = self.cloning.clone(params.get("name", ""), params.get("replace", ""))
+        if not result.get("ok"):
+            return result
+        voice = result["voice"]["id"]
+        named = (params.get("name") or "").strip()
+        names = [persona.name for persona in speaking_with(voice)] or ([named] if named else [])
+        codes = in_order(set(params.get("languages") or []) | set(self.languages))
+        jobs = []
+        for code in codes:
+            job = self.readier.request(
+                "kyutai", voice, code, result["voice"]["name"], names, readiness.CLONE
+            )
+            if job is not None:
+                jobs.append(job)
+        return {**result, "jobs": jobs}
+
+    def voice_delete(self, voice: str, reassign: bool = False) -> dict:
+        """Delete a cloned voice, from the Voices page. One that personas
+        speak with is deleted only when they are to speak with another
+        (reassign): Kyutai's own default voice, which the app names when it
+        asks. The persona in use takes it at once."""
+        folder = cloning.voice_folder(voice)
+        if folder is None or not folder.is_dir():
+            return {"ok": False, "error": "There is no such cloned voice"}
+        speakers = speaking_with(voice)
+        if speakers and not reassign:
+            names = [persona.name for persona in speakers]
+            verb = "speaks" if len(names) == 1 else "speak"
+            return {
+                "ok": False,
+                "error": f"{readiness._together(names)} {verb} with this voice",
+                "personas": [{"id": p.id, "name": p.name} for p in speakers],
+            }
+        for persona in speakers:
+            self.persona_save(
+                {
+                    **persona.to_dict(),
+                    "id": persona.id,
+                    "engine": PocketGenerator.id,
+                    "voice": cloning.FALLBACK_VOICE,
+                }
+            )
+        cloning.forget_voice(voice)
+        return {"ok": True, **self.list_personas()}
+
     def persona_preview(self, settings: dict) -> dict:
         """Say a line in a persona's voice, as edited, cutting off whatever is
         being said. It goes through the speech pipeline, so the mic stays
@@ -1540,10 +1781,14 @@ class AssistantController:
         engine, voice = settings.get("engine"), settings.get("voice")
         if engine not in engines.speech_engines() or not voice:
             return {"ok": False, "error": "No voice chosen"}
-        # In the voice's own language, when Iris can speak it with that engine
+        if cloning.voice_missing(voice):
+            name = cloning.voice_name(cloning.voice_folder(voice))
+            return {"ok": False, "error": f"The voice {name} cannot be found"}
+        # In the voice's own language, or the first it speaks
         language = voice_language(engine, voice)
-        if not engine_speaks(engine, language):
-            language = "en"
+        spoken = voice_languages(engine, voice)
+        if language not in spoken:
+            language = "en" if "en" in spoken or not spoken else spoken[0]
         name = (settings.get("name") or "").strip() or "Iris"
         line = PREVIEW_LINES.get(language, PREVIEW_LINES["en"]).format(name=name)
         sound = {
@@ -1552,12 +1797,31 @@ class AssistantController:
             "speed": float(settings.get("speed") or 1.0),
             "audio_filter": settings.get("audio_filter") or "",
         }
+        self._preview_wanted = dict(settings)
+        if self.assistant is None and not self._voice_downloaded(engine):
+            return {"ok": False, "error": "The voice is still downloading"}
+        # A voice not here yet is downloaded first, where the user sees it,
+        # and plays once it is (unless another was asked for meanwhile)
+        if not self.readier.ready(engine, voice, language):
+            users = [persona.name for persona in speaking_with(voice)]
+            job = self.readier.request(
+                engine, voice, language, self._voice_name(engine, voice), users, readiness.PREVIEW
+            )
+            if job is not None:
+                threading.Thread(
+                    target=self._preview_once_ready, args=(job["id"], dict(settings)), daemon=True
+                ).start()
+                return {"ok": True, "job": job}
         if self.assistant is None:
             return self._preview_before_start(line, language, sound)
         pipeline = self.assistant.speech_pipeline
         pipeline.stop()
         pipeline.queue_speech(line, language=language, sound=sound)
         return {"ok": True}
+
+    def _preview_once_ready(self, job_id: str, settings: dict):
+        if self.readier.wait(job_id, PREVIEW_WAIT) and self._preview_wanted == settings:
+            self.persona_preview(settings)
 
     def _voice_downloaded(self, engine: str) -> bool:
         """Whether a speech engine's model is here, to preview its voices

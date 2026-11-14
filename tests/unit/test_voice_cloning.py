@@ -30,11 +30,14 @@ from iris.cloning import (
     CloneAccessError,
     Cloning,
     SampleError,
+    VoiceNotReadyError,
     access,
     cloned_voices,
     cloning_weights,
     connect,
     forget_voice,
+    made_for,
+    make_language,
     make_voice,
     prepare_sample,
     read_audio,
@@ -82,7 +85,9 @@ def _gated() -> GatedRepoError:
 
 
 class StandInKyutai:
-    """Hugging Face and Kyutai's gated repo, as cloning sees them."""
+    """Hugging Face and Kyutai's gated repo, as cloning sees them. The open
+    repo's files (the models without cloning, the tokenizers, the voices)
+    are downloaded, as Iris's first run leaves them."""
 
     def __init__(self, token=TOKEN, valid=True, terms=True, cached=(), online=True):
         self._token = token
@@ -118,16 +123,17 @@ class StandInKyutai:
         self._token, self.valid = token, True
 
     def cached(self, file):
-        return file in self.files
+        return file in self.files or file.repo != cloning.CLONING_REPO
 
-    def fetch(self, file, on_progress):
+    def fetch(self, files, on_progress):
         self._online()
-        if not self.terms or not self._token:
+        gated = [file for file in files if file.repo == cloning.CLONING_REPO]
+        if gated and (not self.terms or not self._token):
             raise _gated()
         on_progress(100, 200)
         on_progress(200, 200)
-        self.files.add(file)
-        self.fetched.append(file.filename.split("/")[1])
+        self.files.update(files)
+        self.fetched += [file.filename.split("/")[1] for file in gated]
 
     def load_model(self, pocket_lang):
         model = StandInModel(pocket_lang, clones=cloning_weights(pocket_lang) in self.files)
@@ -341,12 +347,19 @@ def test_another_voice_of_the_same_name_gets_a_number():
     assert [v["name"] for v in cloned_voices()] == ["Ada", "Ada 2"]
 
 
-def test_a_forgotten_voice_is_gone_and_its_folder_not_taken_again():
+def test_a_deleted_voice_is_gone_and_its_folder_not_taken_again():
     folder = a_voice("Ada")
     assert forget_voice("clone:ada")
     assert not folder.exists() and cloned_voices() == []
     # A voice loaded from that folder may still be in memory
     assert a_voice("Ada").name == "ada-2"
+
+
+def test_a_new_voice_takes_no_folder_a_persona_names():
+    """A persona that names a voice no longer there would speak with the new
+    one unasked."""
+    named = {"clone:ada"}.__contains__
+    assert make_voice(speech(8, rate=cloning.RATE), "Ada", named).name == "ada-2"
 
 
 def test_only_folders_of_the_voices_folder_are_cloned_voices():
@@ -361,18 +374,26 @@ def test_only_folders_of_the_voices_folder_are_cloned_voices():
 # ---------------------------------------------------------------------------
 
 
-def test_a_voice_new_to_a_language_is_made_by_its_cloning_model_and_kept(kyutai):
+def test_a_voice_is_made_for_a_language_by_its_cloning_model_and_kept(kyutai):
     folder = a_voice()
-    models = {"french": StandInModel("french", clones=False)}
+    progress, making = [], []
 
-    state = voice_state(models, "french", folder)
+    make_language(folder, "french", lambda *got: progress.append(got), lambda: making.append(1))
 
-    assert "made" in state
-    assert kyutai.fetched == ["french"]
-    # The cloning model took the open one's place, and its voice is kept
-    assert models["french"].has_voice_cloning
-    assert models["french"].prompts == [folder / cloning.SAMPLE_FILE]
+    # Its cloning model downloaded first, with progress, then the voice made
+    assert kyutai.fetched == ["french"] and progress[-1] == (200, 200) and making
+    [french] = [model for model in kyutai.loaded if model.language == "french"]
+    assert french.has_voice_cloning and french.prompts == [folder / cloning.SAMPLE_FILE]
     assert (folder / "french.safetensors").is_file()
+    assert made_for(folder) == ["french"]
+
+
+def test_a_voice_not_made_for_a_language_is_not_made_when_it_is_to_speak_it(kyutai):
+    folder = a_voice()
+    with pytest.raises(VoiceNotReadyError, match="Ada is not made for French yet"):
+        voice_state({"french": StandInModel("french", clones=False)}, "french", folder)
+    assert not kyutai.fetched and not kyutai.loaded
+    assert not (folder / "french.safetensors").exists()
 
 
 def test_a_kept_voice_is_read_by_whichever_model_is_loaded(kyutai):
@@ -389,15 +410,14 @@ def test_a_kept_voice_is_read_by_whichever_model_is_loaded(kyutai):
 def test_without_access_a_new_language_says_why(kyutai):
     kyutai.terms = False
     folder = a_voice()
-    models = {"german": StandInModel("german", clones=False)}
-    with pytest.raises(CloneAccessError, match="Ada is a cloned voice: speaking German needs"):
-        voice_state(models, "german", folder)
+    with pytest.raises(CloneAccessError, match="Making Ada for German needs Kyutai's cloning"):
+        make_language(folder, "german")
     assert not (folder / "german.safetensors").exists()
 
 
 def test_a_voice_whose_folder_is_gone_says_so(kyutai):
     with pytest.raises(FileNotFoundError, match="is gone"):
-        voice_state({}, "english", cloning.voices_dir() / "nobody")
+        make_language(cloning.voices_dir() / "nobody", "english")
 
 
 @pytest.fixture
@@ -424,34 +444,31 @@ def test_a_persona_with_a_cloned_voice_speaks_english_with_it(pocket):
 def test_a_cloned_voice_stays_itself_in_another_language(pocket, kyutai):
     folder = a_voice()
     (folder / "english.safetensors").write_bytes(b"made when cloned")
+    make_language(folder, "french")
     gen = PocketGenerator(voice="clone:ada")
 
     Path(gen.generate("Bonjour.", language="fr")).unlink()
 
     # Not the French model's own voice: the clone, made for French
     french = [m for m in kyutai.loaded if m.language == "french"]
-    prompts = [p for m in french for p in m.prompts]
-    assert prompts == [folder / cloning.SAMPLE_FILE]
-    assert (folder / "french.safetensors").is_file()
+    read = [p for m in french for p in m.prompts if str(p).endswith(".safetensors")]
+    assert read == [str(folder / "french.safetensors")]
     # The next reply reads it from memory
     Path(gen.generate("Merci.", language="fr")).unlink()
-    assert [p for m in french for p in m.prompts] == prompts
+    assert [p for m in french for p in m.prompts if str(p).endswith(".safetensors")] == read
 
 
-def test_access_gone_is_told_once_and_the_voice_does_not_change(pocket, kyutai):
+def test_a_language_not_made_is_not_spoken_and_no_other_voice_speaks_it(pocket, kyutai):
     folder = a_voice()
     (folder / "english.safetensors").write_bytes(b"made when cloned")
-    kyutai.terms = False
     told = []
     gen = SpeechGenerator("kyutai", "clone:ada", prepare=False)
     gen.on_failure = told.append
 
     assert gen.generate("Guten Tag.", language="de") is None
-    assert gen.generate("Wie geht's?", language="de") is None
 
-    assert len(told) == 1
-    assert "German" in told[0] and "Hugging Face" in told[0]
-    # No other voice spoke in its place
+    # Nothing downloaded or made for it, and no other voice spoke in its place
+    assert not kyutai.fetched and not (folder / "german.safetensors").exists()
     assert not [p for m in kyutai.loaded if m.language == "german" for p in m.prompts]
     # English goes on in the voice
     english = gen.generate("Hello.", language="en")
@@ -610,17 +627,9 @@ def test_the_cloning_model_downloads_with_progress(kyutai):
     assert kyutai.fetched == ["english"]
 
 
-def test_a_voice_a_persona_speaks_with_is_not_dropped():
-    a_voice("Ada")
-    a_voice("Bea")
-    service = Cloning(lambda t, d: None, in_use=lambda voice: voice == "clone:ada")
-    assert service.forget("clone:ada") == {"ok": True, "forgotten": False}
-    assert service.forget("clone:bea") == {"ok": True, "forgotten": True}
-    assert service.forget("anna") == {"ok": True, "forgotten": False}
-    assert [v["id"] for v in cloned_voices()] == ["clone:ada"]
-
-
-def test_saving_a_persona_cloned_again_drops_its_old_voice(kyutai):
+def test_saving_a_persona_with_a_voice_cloned_again_keeps_the_one_before(kyutai, caplog):
+    """Iris removed the voice cloned before, and so lost voices the user
+    liked. Every voice stays until it is deleted on the Voices page."""
     a_voice("Ada")
     a_voice("Ada")
     controller = AssistantController(EventBus())
@@ -628,18 +637,56 @@ def test_saving_a_persona_cloned_again_drops_its_old_voice(kyutai):
     first = controller.persona_save({**ada, "voice": "clone:ada"})
     assert personas.find_persona(first["id"]).voice == "clone:ada"
 
-    controller.persona_save({**ada, "id": first["id"], "voice": "clone:ada-2"})
+    with caplog.at_level(logging.INFO, logger="iris.cloning"):
+        controller.persona_save({**ada, "id": first["id"], "voice": "clone:ada-2"})
+        controller.persona_save({**ada, "id": first["id"], "voice": "anna"})
 
-    assert [v["id"] for v in cloned_voices()] == ["clone:ada-2"]
-    # Switching to a voice of the catalogue keeps the clone to switch back to
-    controller.persona_save({**ada, "id": first["id"], "voice": "anna"})
-    assert [v["id"] for v in cloned_voices()] == ["clone:ada-2"]
+    assert [v["id"] for v in cloned_voices()] == ["clone:ada", "clone:ada-2"]
     assert personas.load_all_personas()[first["id"]].voice == "anna"
+    assert not [r for r in caplog.records if "removing" in r.getMessage()]
+
+
+def test_a_voice_cloned_and_not_saved_with_a_persona_stays(kyutai, heard_by_energy):
+    kyutai.files.add(cloning_weights("english"))
+    service = Cloning(lambda t, d: None)
+    for _ in range(2):
+        service.use_file(base64.b64encode(wav(speech(8))).decode())
+        assert service.clone("Ada")["ok"]
+    assert [v["id"] for v in cloned_voices()] == ["clone:ada", "clone:ada-2"]
+
+
+def test_a_cloned_voice_that_is_not_here_is_not_given_to_a_persona():
+    """The editor offered a voice removed meanwhile, and the persona saved
+    with it named a voice that was not there."""
+    controller = AssistantController(EventBus())
+    noam = {"name": "Noam", "engine": "kyutai", "description": "", "speed": 1.0}
+
+    refused = controller.persona_save({**noam, "voice": "clone:noam-2"})
+
+    assert refused["ok"] is False
+    assert refused["error"] == "The voice Noam 2 cannot be found: choose another voice"
+    assert "noam" not in personas.load_all_personas()
+    # Nor in place of the voice a persona speaks with
+    persona_id = controller.persona_save({**noam, "voice": "anna"})["id"]
+    instead = controller.persona_save({**noam, "id": persona_id, "voice": "clone:noam-2"})
+    assert instead["ok"] is False
+    assert personas.load_all_personas()[persona_id].voice == "anna"
+
+
+def test_a_persona_whose_cloned_voice_is_not_here_still_saves_its_other_changes():
+    """Its wake word, say: its voice is for the user to choose again."""
+    noam = {"name": "Noam", "engine": "kyutai", "voice": "clone:noam-2", "description": ""}
+    persona_id = personas.save_persona(noam)
+    personas.reload_personas()
+    controller = AssistantController(EventBus())
+
+    assert controller.persona_save({**noam, "id": persona_id, "speed": 1.2})["ok"]
+    assert controller.set_persona_words(persona_id, wake_word="Hey Noam")["ok"]
+    saved = personas.load_all_personas()[persona_id]
+    assert (saved.voice, saved.speed, saved.wake_word) == ("clone:noam-2", 1.2, "Hey Noam")
 
 
 def test_slow_cloning_requests_do_not_hold_up_the_others():
     slow = ("voice.clone_access", "voice.clone_connect", "voice.clone_fetch", "voice.clone")
     for method in (*slow, "voice.record", "voice.sample"):
         assert method in rpc_server.CONCURRENT
-    # Dropping a voice comes after the persona saved with it
-    assert "voice.forget" not in rpc_server.CONCURRENT

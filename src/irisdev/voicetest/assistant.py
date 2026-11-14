@@ -19,6 +19,7 @@ from typing import Optional, Protocol
 
 from iris.controller import AssistantController
 from iris.events import EventBus
+from iris.personas import get_persona
 from iris.turns import SAMPLE_RATE, SmartTurn
 from irisdev.voicetest.acoustics import Endpoint
 from irisdev.voicetest.isolation import isolate
@@ -298,6 +299,22 @@ class IrisUnderTest:
             conversation.open_thread(store.create_thread(conversation.persona.id))
         for topic in topics:
             store.create_topic(conversation.thread, topic["title"], topic["gist"], topic["summary"])
+
+    def persona_speaking_with(self, engine: str, voice: str) -> str:
+        """Iris speaking in this voice, a persona saved in its home: the
+        persona's id."""
+        iris = get_persona("iris")
+        saved = self.controller.persona_save({
+            "id": f"iris-{voice}",
+            "name": iris.name,
+            "engine": engine,
+            "voice": voice,
+            "speed": iris.speed if engine == iris.engine else 1.0,
+            "description": iris.description,
+        })
+        if not saved.get("ok"):
+            raise RuntimeError(f"Could not make a persona speaking with {engine}:{voice}: {saved}")
+        return saved["id"]
 
     def speaking(self) -> bool:
         """Whether it is still speaking its reply (optional for an assistant

@@ -4,10 +4,11 @@
   import Icon from "../Icon.svelte";
   import PersonaForm from "./PersonaForm.svelte";
 
-  // Pick up personas added since launch
+  // Pick up personas added since launch, and the voices as they are now:
+  // cloned voices come and go
   onMount(() => {
     store.refreshPersonas().catch(() => {});
-    if (!store.voices) store.loadVoices().catch(() => {});
+    store.loadVoices().catch(() => {});
   });
 
   const name = (id: string) => store.personaNames[id] ?? id;

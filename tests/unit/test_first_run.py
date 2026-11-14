@@ -537,6 +537,8 @@ def test_what_iris_was_asked_to_open_with_is_kept_as_a_note():
     conversation.memory = None
     conversation.amnesia = False
     conversation.conversation_history = []
+    conversation._keeping = threading.Lock()
+    conversation._forgotten = conversation._reply_began = 0
     conversation._record("Greet the user.", "Hello! I'm Iris.", OPENING)
     assert conversation.conversation_history == [
         {"role": "system", "content": "Greet the user."},
