@@ -572,6 +572,10 @@ class IrisStore {
         if (this.panel === "memory") this.loadMemory();
         break;
 
+      case "core.restarted":
+        this.coreRestarted();
+        break;
+
       case "tool.use":
         this.messages.push({
           role: "tool",
@@ -1117,6 +1121,31 @@ class IrisStore {
       this.loadLists();
     } catch (err) {
       console.error("[store] init failed:", err);
+      this.messages.push({ role: "error", text: `Iris could not be reached: ${err}`, streaming: false });
+    }
+  }
+
+  /** The core stopped and was started again (the error saying so came
+   *  before): it holds nothing of the conversation, which stays shown, and
+   *  nothing runs in it yet. Messages waiting in the old one are gone. */
+  private async coreRestarted() {
+    for (const waiting of this.pending) releasePreviews(waiting.attachments);
+    this.pending = [];
+    if (this.streamingIndex !== null && this.messages[this.streamingIndex]) {
+      this.messages[this.streamingIndex].streaming = false;
+    }
+    this.streamingIndex = null;
+    // The microphone chosen is chosen again in the new core
+    this.micRestored = false;
+    try {
+      if (this.needsSetup && !this.installing) {
+        this.setupInfo = await rpc<SetupInfo>("setup.info");
+        return;
+      }
+      const info = await rpc<AppInfo>("app.info");
+      if (!info.running) await this.startAssistant(false);
+    } catch (err) {
+      this.messages.push({ role: "error", text: `Iris could not be started again: ${err}`, streaming: false });
     }
   }
 
@@ -1135,9 +1164,13 @@ class IrisStore {
     this.needsSetup = false;
   }
 
-  private async startAssistant() {
+  /** Start the assistant with the saved settings; restore shows the recent
+   *  part of the conversation the core remembers (not when it is shown
+   *  already). */
+  private async startAssistant(restore = true) {
     const saved = loadSettings();
     const options: Record<string, unknown> = {};
+    if (!restore) options.restore_thread = false;
     if (saved.llm_model) options.llm_model = saved.llm_model;
     if (saved.persona) options.persona = saved.persona;
     if (saved.speak_replies !== undefined) options.speak_replies = saved.speak_replies;

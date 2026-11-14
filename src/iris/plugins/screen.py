@@ -1,6 +1,7 @@
 """The screen: Iris looks at what is on the user's monitor when asked."""
 
 import base64
+import sys
 from io import BytesIO
 
 import numpy as np
@@ -28,6 +29,23 @@ GUIDANCE = (
     "  * NEVER use this to read websites - use 'browse' for websites\n"
     "  * 'page', 'article', 'headline', 'website' refer to the WEB, not the screen\n"
 )
+# Where macOS lets an app record the screen; it asks the app to be reopened
+MAC_PERMISSION = (
+    "Allow Iris under System Settings > Privacy & Security > Screen Recording, then reopen Iris."
+)
+
+
+def _refused(what: str) -> dict:
+    """A capture the system gave nothing of. On macOS that is how an app
+    that may not record the screen is answered, which only the user can
+    change: they are told as well as the model."""
+    if sys.platform != "darwin":
+        return {"success": False, "message": f"{what}, so the screen could not be seen."}
+    return {
+        "success": False,
+        "message": f"{what}: Iris may not record the screen. {MAC_PERMISSION}",
+        "notice": f"Iris may not record the screen. {MAC_PERMISSION}",
+    }
 
 
 def capture_screen(**kwargs) -> dict:
@@ -46,21 +64,11 @@ def capture_screen(**kwargs) -> dict:
 
             # Empty or black: screen recording was refused
             if screenshot.size[0] == 0 or screenshot.size[1] == 0:
-                return {
-                    "success": False,
-                    "message": "Screen capture failed - screen recording permission may be "
-                    "required. Grant permission in System Settings > Privacy & Security > "
-                    "Screen Recording.",
-                }
+                return _refused("The screen capture came back empty")
 
             image = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
             if np.array(image).max() == 0:
-                return {
-                    "success": False,
-                    "message": "Screen capture returned black image - please grant screen "
-                    "recording permission in System Settings > Privacy & Security > Screen "
-                    "Recording, then restart the application.",
-                }
+                return _refused("The screen capture came back black")
 
             # Vision models don't need full resolution
             max_dimension = 1920
@@ -76,11 +84,13 @@ def capture_screen(**kwargs) -> dict:
             return {"success": True, "image": image_base64, "message": "Screen captured"}
 
     except Exception as e:
-        return {
-            "success": False,
-            "message": f"Error capturing screen: {e}. You may need to grant screen "
-            "recording permission in System Settings.",
-        }
+        if sys.platform == "darwin":
+            return {
+                "success": False,
+                "message": f"Error capturing screen: {e}. {MAC_PERMISSION}",
+                "notice": f"Iris could not capture the screen. {MAC_PERMISSION}",
+            }
+        return {"success": False, "message": f"Error capturing screen: {e}"}
 
 
 class Screen(Plugin):

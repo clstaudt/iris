@@ -303,17 +303,19 @@ class IrisUnderTest:
 
     def refresh_model(self):
         """Read what the model is again (the scripted model's changed): its
-        context length and capabilities, forgetting tools it refused."""
+        context length and capabilities, forgetting tools it refused, and
+        which model on the server sees, as Iris picks it at its start."""
         conversation = self.assistant.conversation
         conversation._capability_cache.clear()
         conversation._no_tools.clear()
         conversation.max_context_tokens = conversation._get_model_context_length()
+        conversation.vision_model = self.controller._pick_vision_model()
 
     def configure(self, name: str, value, wait: float = CONFIG_WAIT) -> bool:
         """Change a setting as the app does, and wait for the "config" event
         that shows it. Settings: "tool" (id, on), "persona", "turn_detection",
-        "stt_model", "wake_word", "wake_options" {window, sleep_word} and
-        "mic". Returns whether it showed in time."""
+        "stt_model", "wake_word", "wake_options" {window, sleep_word}, "mic"
+        and "model". Returns whether it showed in time."""
         since = time.monotonic()
         answer, shows = self._change(name, value)
         if not answer.get("ok", False):
@@ -347,6 +349,7 @@ class IrisUnderTest:
             "stt_model": ("set_stt_model", "whisper_model", value),
             "wake_word": ("set_wake_word", "wake_word", value or ""),
             "mic": ("set_mic", "mic_on", bool(value)),
+            "model": ("set_model", "llm_model", value),
         }
         if name not in setters:
             raise ValueError(f"No setting called {name!r}")

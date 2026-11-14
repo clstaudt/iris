@@ -29,6 +29,16 @@ MAX_TOOL_ROUNDS = 3
 # one asked again after a reply that was nothing but a call it cannot make
 NO_MORE_TOOLS_NOTE = "Answer the user now from what you have. No more tools can be used."
 NO_TOOLS_NOTE = "No tools can be used now. Answer the user in words."
+# Told the model in place of images no model at hand can see: shared by
+# the user, or captured by a tool (the camera, the screen)
+IMAGES_UNSEEN = (
+    "(The images cannot be shown to you: no model that can see images is "
+    "installed. Let the user know.)"
+)
+IMAGE_UNSEEN = (
+    "(The image cannot be shown to you: no model that can see images is "
+    "installed. Let the user know.)"
+)
 # How Ollama refuses a request with tools for a model that cannot take them
 TOOLS_REFUSED = "does not support tools"
 
@@ -47,10 +57,28 @@ def ollama_client(host: Optional[str] = None, **kwargs):
     return ollama.Client(host=host, **{"timeout": MODEL_TIMEOUT, **kwargs})
 
 
-def failure_message(error: Exception, host: Optional[str]) -> str:
+def model_missing(error: Exception) -> bool:
+    """Whether the server said it has no such model: it was removed after it
+    was chosen, or never there. Ollama answers 404 "model '...' not found",
+    OpenAI-compatible servers 404 "The model ... does not exist"."""
+    return (
+        isinstance(error, ollama.ResponseError)
+        and error.status_code == 404
+        and "model" in str(error.error).lower()
+    )
+
+
+def failure_message(error: Exception, host: Optional[str], model: Optional[str] = None) -> str:
     """What the user is told when the model could not answer. A server out
-    of reach, or one that stopped answering, is said to be so in words that
-    fit any kind of server; other errors are passed on as they are."""
+    of reach, one that stopped answering or ran into a problem of its own,
+    and a model it does not have are said to be so in words that fit any
+    kind of server; other errors are passed on as they are.
+
+    Args:
+        error: What the request raised
+        host: The server, as kept
+        model: The model asked, which the server may not have
+    """
     server = f"The model server at {effective_host(host)}"
     if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError)):
         return f"{server} cannot be reached."
@@ -60,6 +88,19 @@ def failure_message(error: Exception, host: Optional[str]) -> str:
         return f"{server} did not answer in time."
     if isinstance(error, (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)):
         return f"The connection to the model server at {effective_host(host)} was lost."
+    if isinstance(error, ollama.ResponseError):
+        # Ollama's client adds the status code to the message, -1 for an
+        # error the server streamed once the reply had begun
+        reason = str(error.error).strip() or "it gave no reason"
+        if model_missing(error):
+            named = f"The model {model}" if model else "The model"
+            return (
+                f"{named} is not on the server at {effective_host(host)}. "
+                "Choose another one in Settings."
+            )
+        if error.status_code >= 500 or error.status_code == -1:
+            return f"{server} ran into a problem: {reason}"
+        return f"The language model could not answer: {reason}"
     return f"The language model could not answer: {error}"
 
 
@@ -213,6 +254,12 @@ class ConversationManager:
         # The client replies stream through while self.client is the ollama
         # module, whose shared client must stay open
         self._own_client = None
+        # The client of the reply being streamed: all its rounds go to the
+        # server it began on, and cancel() cuts that one off, also after a
+        # switch to another server
+        self._streaming = None
+        # The model last asked for a reply, which an error may be about
+        self.asked: Optional[str] = None
         self.memory = memory
         # Recalled topics stay in context for a few turns: {topic_id: turns left}
         self.pinned: dict[int, int] = {}
@@ -274,7 +321,8 @@ class ConversationManager:
             return []
 
     def set_host(self, host: Optional[str]):
-        """Switch to another server, keeping the conversation history."""
+        """Switch to another server, keeping the conversation history. A
+        reply being streamed goes on with the server it began on."""
         self.host = normalize_host(host)
         self.client = ollama_client(self.host)
         self.reachable = True  # set_host is only called for a server that answered
@@ -628,6 +676,7 @@ class ConversationManager:
         source=None,
         attachments: Optional[list[Attachment]] = None,
         keep: bool = True,
+        on_tool_result=None,
     ):
         """
         Send prompt to LLM and stream response with tool support.
@@ -638,6 +687,7 @@ class ConversationManager:
             response_language: Language the assistant should respond in
                 (Whisper ISO 639-1 code, e.g. 'en', 'fr', 'ja')
             on_tool_use: Optional callback(tool_name, tool_args) called before each tool executes
+            on_tool_result: Optional callback(tool_name, result) called after each tool ran
             attachments: Files sent with the message; they stay in context for
                 a few turns, and only their names are recorded
             keep: Keep the exchange in the conversation once the reply is
@@ -651,10 +701,16 @@ class ConversationManager:
         """
         self.reply = None
         self._cancelled.clear()
-        yield from self._reply_stream(
-            prompt, response_language, on_tool_use, source, attachments or []
-        )
-        if keep:
+        client = self._streaming = self._reply_client()
+        try:
+            yield from self._reply_stream(
+                prompt, response_language, on_tool_use, source, attachments or [], on_tool_result
+            )
+        finally:
+            if self._streaming is client:
+                self._streaming = None
+        # A reply cut off (cancel()) never completed: there is nothing to keep
+        if keep and self.reply is not None:
             self._record(recorded_text(prompt, attachments or []), self.reply, source)
 
     def cancel(self):
@@ -663,13 +719,15 @@ class ConversationManager:
         tool or tool round starts. The stream then ends or fails; whoever
         cancelled no longer listens to it."""
         self._cancelled.set()
-        client = self._reply_client()
+        client = self._streaming or self._reply_client()
         if client is self._own_client:
             self._own_client = None
-        else:
+        elif client is self.client:
             self.client = ollama_client(self.host)
             if getattr(client, "tools_refused", False):
                 self.client.tools_refused = True
+        # Otherwise the reply came from a server since switched away from,
+        # whose client is no longer kept
         try:
             client._client.close()  # the client's httpx.Client
         except Exception:
@@ -686,8 +744,10 @@ class ConversationManager:
         return self._own_client
 
     def _ask(self, model: str, messages: list, **extra):
-        """Ask the model for a streamed reply to these messages."""
-        return self._reply_client().chat(
+        """Ask the model for a streamed reply to these messages, on the
+        server the reply began on."""
+        self.asked = model
+        return (self._streaming or self._reply_client()).chat(
             model=model, messages=system_first(messages), stream=True, **extra
         )
 
@@ -733,6 +793,7 @@ class ConversationManager:
         on_tool_use,
         source,
         attachments: list[Attachment],
+        on_tool_result=None,
     ):
         """The model's reply as it streams in, tool rounds included."""
         # Language names for the LLM instruction
@@ -772,10 +833,7 @@ class ConversationManager:
         if sees:
             user_message["images"] = images
         elif images:
-            user_message["content"] += (
-                "\n\n(The images cannot be shown to you: no model that can see "
-                "images is installed. Let the user know.)"
-            )
+            user_message["content"] += "\n\n" + IMAGES_UNSEEN
         messages.append(user_message)
 
         # The reply streams as it comes, so the voice can start before the
@@ -822,7 +880,7 @@ class ConversationManager:
             messages.append(
                 {"role": "assistant", "content": "".join(said), "tool_calls": tool_calls}
             )
-            ran = self._run_tools(tool_calls, messages, on_tool_use)
+            ran = self._run_tools(tool_calls, messages, on_tool_use, on_tool_result)
             if ran is None:
                 return  # cancelled
             uses_vision, ends = ran
@@ -831,8 +889,10 @@ class ConversationManager:
             # Said nothing yet, it answers once more, without tools.
             if ends and "".join(spoken).strip():
                 break
-            # A tool that returned an image is answered by the vision model
-            response_model = self.vision_model if (uses_vision and self.vision_model) else model
+            # A tool's image is answered by a model that sees it: the model
+            # of the conversation if it can, else the vision model. Without
+            # either, the image was left out and the model answers in words.
+            response_model = (self.image_model() or model) if uses_vision else model
 
             # Tools stay on offer, so a search can be followed by reading
             # a page: without them a model writes its next call out as
@@ -860,11 +920,14 @@ class ConversationManager:
             return None
         return [{"function": {"name": c.name, "arguments": c.arguments}} for c in runnable]
 
-    def _run_tools(self, tool_calls: list, messages: list, on_tool_use) -> Optional[tuple[bool, bool]]:
+    def _run_tools(
+        self, tool_calls: list, messages: list, on_tool_use, on_tool_result=None
+    ) -> Optional[tuple[bool, bool]]:
         """Run a round's tool calls, adding their results to the messages.
-        Returns whether one returned an image and whether every call ends
-        the reply (going to sleep), or None if the reply was cancelled
-        before all had run."""
+        Returns whether one returned an image a model can see and whether
+        every call ends the reply (going to sleep), or None if the reply was
+        cancelled before all had run. An image no model at hand can see is
+        left out, and the model is told so."""
         uses_vision = False
         ends = True
         for tool_call in tool_calls:
@@ -878,6 +941,8 @@ class ConversationManager:
 
             # Execute the tool (it shows its activity meanwhile)
             result = self.tools.execute(tool_name, **tool_args)
+            if on_tool_result:
+                on_tool_result(tool_name, result)
             ends = ends and bool(result.get("success") and result.get("ends_reply"))
             if result.get("success") and result.get("pin_topic") is not None:
                 self.pinned[result["pin_topic"]] = PIN_TURNS
@@ -886,6 +951,8 @@ class ConversationManager:
             tool_msg = {"role": "tool", "content": ""}
             if not result.get("success"):
                 tool_msg["content"] = f"Error: {result.get('message', 'Tool execution failed')}"
+            elif result.get("image") and self.image_model() is None:
+                tool_msg["content"] = result.get("message", "Image captured") + " " + IMAGE_UNSEEN
             elif result.get("image"):
                 uses_vision = True
                 tool_msg["images"] = [result["image"]]

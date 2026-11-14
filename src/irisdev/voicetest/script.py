@@ -32,8 +32,9 @@ Part = Union[str, float]
 
 # The user waits this long after the assistant has finished before speaking
 GAP = 0.6
-# What a turn may expect of Iris
-EXPECTATIONS = ("answer", "silent", "continued", "either", "silenced", "wake", "sleep")
+# What a turn may expect of Iris ("unanswered": heard, but no reply could be
+# had, and the error says why)
+EXPECTATIONS = ("answer", "silent", "continued", "either", "silenced", "wake", "sleep", "unanswered")
 
 
 @dataclass(frozen=True)
@@ -168,7 +169,9 @@ class Check:
 
 
 # An action at a moment: "stop", "pause", "resume", ("mic", on), ("persona",
-# name), ("tool", id, on), ("send", text) or ("turn_detection", mode)
+# name), ("tool", id, on), ("send", text), ("turn_detection", mode),
+# ("model", name) (another model chosen, as in the app) or ("stub",
+# {setting: value}) (the scripted model changes, see StubModel.SETTINGS)
 Action = Union[str, tuple]
 
 
@@ -327,10 +330,14 @@ class Conversation:
     tools: dict = field(default_factory=dict)
     # FakeWeb's arguments (results, pages, delay, browse_delay)
     web: Optional[dict] = None
+    # FakeCamera's and FakeScreen's arguments (color, available, black...)
+    camera: Optional[dict] = None
+    screen: Optional[dict] = None
     # The scripted model's rules
     stub_rules: Optional[list] = None
     # The scripted model's settings (first_token, per_word, serial,
-    # context_length, summary_delay, capabilities, refuse_tools)
+    # context_length, summary_delay, capabilities, refuse_tools, vision,
+    # missing)
     stub_options: dict = field(default_factory=dict)
     persona: Optional[str] = None
     turn_detection: Optional[str] = None

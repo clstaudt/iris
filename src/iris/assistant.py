@@ -18,8 +18,14 @@ from iris import engines, language
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
-from iris.events import EventBus
-from iris.llm import ConversationManager, effective_host, failure_message, split_speech
+from iris.events import EventBus, brief
+from iris.llm import (
+    ConversationManager,
+    effective_host,
+    failure_message,
+    model_missing,
+    split_speech,
+)
 from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.plugin import Plugin, PluginContext
@@ -54,6 +60,14 @@ GOODBYE_SETTLE = 1.0
 # Seconds the microphone stays closed after a voice preview, for the room
 # to fall quiet
 PREVIEW_SETTLE = 0.4
+
+# Told the user when an image (attached, or from the camera or the screen)
+# has no model to see it
+NO_VISION = (
+    "None of the installed models can see images. Install one with vision, "
+    "such as qwen3-vl, to talk about pictures."
+)
+
 
 def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
     """Soft tones in sequence, each swelling in and out."""
@@ -268,11 +282,14 @@ class VoiceAssistant:
         # user over the voice.
         self.barge_in = barge_in
         self.echo = _echo_canceller()
+        turn_end = SmartTurn.load() if turn_detection == "smart_turn" else None
+        if turn_detection == "smart_turn" and turn_end is None:
+            self._error("Smart Turn could not be loaded, so a turn ends after a silence.")
         self.recorder = AudioRecorder(
             sample_rate,
             silence_threshold,
             silence_duration,
-            turn_end=SmartTurn.load() if turn_detection == "smart_turn" else None,
+            turn_end=turn_end,
             echo=self.echo,
             audio=audio,
         )
@@ -282,10 +299,17 @@ class VoiceAssistant:
         self.player = AudioPlayer(audio_filter=audio_filter, audio=audio)
         self.player.echo = self.echo
 
+        # Speech recognition and the voice may fail to load, offline before
+        # their models were ever downloaded: Iris then starts without them,
+        # says so, and answers typed messages, in text when it has no voice
         self.recognition_engine = recognition_engine
-        self.transcriber = engines.recognition_engine(recognition_engine).create(
-            {"model": whisper_model, "device": whisper_device, "engine": whisper_engine}
-        )
+        self.recognition_options = {
+            "model": whisper_model,
+            "device": whisper_device,
+            "engine": whisper_engine,
+        }
+        self.transcriber = None
+        self.load_recognition()
 
         # Initialize TTS with persona's engine, voice and speed
         self.tts_generator = SpeechGenerator(
@@ -293,7 +317,14 @@ class VoiceAssistant:
             self.persona.voice,
             self.persona.speed,
             models_dir=tts_models_dir,
+            prepare=False,
         )
+        # Why the voice could not be loaded; None while it speaks
+        self.voice_error: Optional[str] = None
+        self.load_voice()
+        # A language's voice that cannot be loaded later on (Pocket TTS
+        # loads one per language at its first reply) is told too
+        self.tts_generator.on_failure = self._error
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
         self.speech_pipeline.on_reply_audio = self._reply_heard
         # Told what language each piece of a reply is in, before the first
@@ -329,7 +360,9 @@ class VoiceAssistant:
             choices=tools,
         )
 
-        self.set_wake_word(wake_word, engine=whisper_engine)
+        # Asked again once recognition loads, should it not have
+        self._wanted_wake_word = wake_word
+        self._set_wanted_wake_word(engine=whisper_engine)
 
         # Initialize conversation manager with tools
         # The vision model answers when the camera, the screen or an attached
@@ -344,6 +377,56 @@ class VoiceAssistant:
         )
         if self.memory:
             self.memory.start()
+
+    def load_recognition(self) -> bool:
+        """Load speech recognition. Without it Iris cannot listen: the
+        microphone stays off, typed messages are still answered, and the
+        user is told. Returns whether it loaded."""
+        try:
+            self.transcriber = engines.recognition_engine(self.recognition_engine).create(
+                dict(self.recognition_options)
+            )
+        except Exception as e:
+            logger.exception("Speech recognition could not be loaded")
+            self.transcriber = None
+            self.pause_event.set()
+            self._error(
+                "Speech recognition could not be loaded, so Iris cannot listen. "
+                f"Typed messages are answered. {brief(e)}"
+            )
+            return False
+        if getattr(self, "conversation", None) is not None:
+            self._set_wanted_wake_word()
+        return True
+
+    def load_voice(self) -> bool:
+        """Load the persona's voice. Without it replies are shown as text,
+        and the user is told; switching the voice on tries again. Returns
+        whether it loaded."""
+        try:
+            self.tts_generator.prepare()
+        except Exception as e:
+            logger.exception("The voice could not be loaded")
+            self.voice_error = brief(e)
+            self.speak_replies = False
+            self._error(f"The voice could not be loaded, so replies are shown as text. {brief(e)}")
+            return False
+        self.voice_error = None
+        return True
+
+    def _set_wanted_wake_word(self, engine: str = "auto"):
+        """Listen for the wake word asked for at the start. Without
+        recognition there is nothing to listen with yet; a wake word that
+        cannot be set up leaves Iris listening to everything."""
+        if not self._wanted_wake_word or self.transcriber is None:
+            return
+        try:
+            self.set_wake_word(self._wanted_wake_word, engine=engine)
+        except Exception as e:
+            logger.exception("The wake word could not be set up")
+            self._error(
+                f"The wake word could not be set up, so Iris listens without it. {brief(e)}"
+            )
 
     def _plugin_context(self) -> PluginContext:
         """What the plugins get to make their tools: long-term memory, and
@@ -735,14 +818,7 @@ class VoiceAssistant:
                 event["attachments"] = [a.describe() for a in attachments]
             self.event_bus.emit("chat.user", event)
             if any(a.kind == "image" for a in attachments) and not self.conversation.image_model():
-                self.event_bus.emit(
-                    "error",
-                    {
-                        "message": "None of the installed models can see images. Install "
-                        "one with vision, such as qwen3-vl, to talk about pictures.",
-                        "kind": "no_vision",
-                    },
-                )
+                self.event_bus.emit("error", {"message": NO_VISION, "kind": "no_vision"})
         self.chat(
             text,
             response_language=self.conversation_language,
@@ -916,6 +992,15 @@ class VoiceAssistant:
                         "tool.use", {"tool": tool_name, "label": label, "detail": detail}
                     )
 
+            def on_tool_result(tool_name, result):
+                # What only the user can fix is told them, not just the model
+                if not self.event_bus:
+                    return
+                if result.get("notice"):
+                    self.event_bus.emit("error", {"message": result["notice"]})
+                if result.get("image") and not self.conversation.image_model():
+                    self.event_bus.emit("error", {"message": NO_VISION, "kind": "no_vision"})
+
             interrupted = False
             try:
                 stream = self.conversation.chat_stream(
@@ -925,6 +1010,7 @@ class VoiceAssistant:
                     source=source,
                     attachments=attachments,
                     keep=False,  # kept below, once it is known what was heard
+                    on_tool_result=on_tool_result,
                 )
                 for chunk_text in self._reply_chunks(stream):
                     # Paused: stop consuming the reply until resumed (or stopped)
@@ -1014,11 +1100,24 @@ class VoiceAssistant:
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = False
 
-            error_msg = failure_message(e, self.conversation.host)
+            conversation = self.conversation
+            error_msg = failure_message(e, conversation.host, getattr(conversation, "asked", None))
             if self.event_bus:
-                self.event_bus.emit("error", {"message": error_msg})
+                event = {"message": error_msg}
+                if model_missing(e):
+                    # Retracted by the app once another model is chosen
+                    event["kind"] = "model_missing"
+                self.event_bus.emit("error", event)
             logger.exception("Reply failed")
             return error_msg
+
+    def _mic_lost(self):
+        """Switch the microphone off after it failed, and show it off."""
+        self.pause_event.set()
+        self.recorder._device_error = False
+        self.recorder.close_microphone()
+        if self.event_bus:
+            self.event_bus.emit("config", self.config_info())
 
     def _error(self, message: str):
         """Tell the app about a problem it should show."""
@@ -1030,8 +1129,10 @@ class VoiceAssistant:
         """Listen and answer until stop_event is set."""
         devices_ok, device_msg = self.recorder.check_audio_devices()
         if not devices_ok:
+            # Typed messages are still answered; the microphone is off until
+            # the user switches it on again
             self._error(f"No microphone: {device_msg}")
-            return
+            self._mic_lost()
 
         try:
             while True:
@@ -1090,9 +1191,11 @@ class VoiceAssistant:
                     time.sleep(PREVIEW_SETTLE)
                     continue
 
-                # Paused, or the user is typing: keep the microphone closed
-                # (models stay loaded) and keep watching for typed turns
-                if self.pause_event.is_set() or self.hold_event.is_set():
+                # Paused, the user is typing, or nothing to recognize speech
+                # with: keep the microphone closed (models stay loaded) and
+                # keep watching for typed turns
+                closed = self.pause_event.is_set() or self.hold_event.is_set()
+                if closed or self.transcriber is None:
                     self.recorder.close_microphone()
                     with self.status_manager.status_lock:
                         self.status_manager.status_listening = False
@@ -1147,13 +1250,16 @@ class VoiceAssistant:
                         self.status_manager.status_listening = False
                         self.status_manager.status_dormant = False
 
-                    # Check if we had a device error
+                    # The microphone went away: typed messages are still
+                    # answered, and the microphone is off until switched on
                     if self.recorder._device_error:
                         self.speech_pipeline.stop()
                         self._error(
-                            "The microphone was disconnected. Connect one and start Iris again."
+                            "The microphone was disconnected. Connect one and switch "
+                            "the microphone on again."
                         )
-                        break
+                        self._mic_lost()
+                        continue
 
                     if not audio_path:
                         continue

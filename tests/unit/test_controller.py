@@ -52,6 +52,9 @@ class FakeAssistant:
         self.turn_queue = kwargs.get("turn_queue")
         self.speak_replies = kwargs.get("speak_replies", True)
         self.conversation_language = "en"
+        # Loaded: recognition and the voice
+        self.transcriber = object()
+        self.voice_error = None
 
     def run_loop(self):
         while not self.stop_event.is_set():

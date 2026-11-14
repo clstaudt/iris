@@ -209,8 +209,8 @@ def get_persona(persona_name: str = "iris") -> Persona:
     if persona_name not in PERSONAS:
         available = ", ".join(list_personas())
         print(f"Warning: Persona '{persona_name}' not found. Available: {available}")
-        # Return first available persona
-        return list(PERSONAS.values())[0]
+        # Iris, rather than whichever persona file was found first
+        return PERSONAS.get("iris") or list(PERSONAS.values())[0]
     return PERSONAS[persona_name]
 
 

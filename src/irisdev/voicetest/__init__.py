@@ -18,6 +18,7 @@ the computer's speakers, and nothing in the room reaches the test.
   testing the voice without a model's time and whims; its rules make it
   call tools (a web search, reading a page) as a model with tools would.
 - fakeweb.FakeWeb is a scripted web for Iris's searches and page reads.
+- fakesight.FakeCamera and FakeScreen are a scripted camera and screen.
 - script.py is what conversations are written in (turns, the moments things
   happen at, asides, actions, what is expected); conversations.GROUPS holds
   them by what they test.
@@ -29,6 +30,7 @@ the computer's speakers, and nothing in the room reaches the test.
 from irisdev.voicetest.acoustics import Endpoint, Space
 from irisdev.voicetest.assistant import AssistantUnderTest, IrisUnderTest, finished, wait_until
 from irisdev.voicetest.conversations import CONVERSATIONS, GROUPS, group
+from irisdev.voicetest.fakesight import FakeCamera, FakeScreen
 from irisdev.voicetest.fakeweb import FakeWeb
 from irisdev.voicetest.script import At, Conversation, Say, Silence, Sound, Turn
 from irisdev.voicetest.scripted import BUDGETS, ScriptedConversations, TurnResult, summarize
@@ -43,6 +45,8 @@ __all__ = [
     "CONVERSATIONS",
     "Conversation",
     "Endpoint",
+    "FakeCamera",
+    "FakeScreen",
     "FakeWeb",
     "GROUPS",
     "IrisUnderTest",

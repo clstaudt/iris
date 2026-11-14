@@ -44,6 +44,7 @@ from irisdev.voicetest.assistant import (
     finished,
     wait_until,
 )
+from irisdev.voicetest.fakesight import FakeCamera, FakeScreen
 from irisdev.voicetest.fakeweb import FakeWeb
 from irisdev.voicetest.script import GAP, At, Conversation, Echo, Noise, Say, Silence, Sound, Turn
 from irisdev.voicetest.sounds import gain_for_snr, sound
@@ -81,7 +82,7 @@ BUDGETS = {
 
 
 # The scripted model's settings that change what the assistant knows of it
-MODEL_SETTINGS = {"context_length", "capabilities", "refuse_tools"}
+MODEL_SETTINGS = {"context_length", "capabilities", "refuse_tools", "vision", "missing"}
 
 
 def budgets_from(text: str) -> dict:
@@ -414,6 +415,14 @@ class View:
         return self.runner.web
 
     @property
+    def camera(self) -> Optional[FakeCamera]:
+        return self.runner.camera
+
+    @property
+    def screen(self) -> Optional[FakeScreen]:
+        return self.runner.screen
+
+    @property
     def previous(self) -> Optional[Running]:
         return self.running.previous
 
@@ -469,6 +478,8 @@ class ScriptedConversations:
         self.resources = resources
         self.real_web = os.environ.get("IRIS_VOICETEST_WEB", "") == "real" if real_web is None else real_web
         self.web: Optional[FakeWeb] = None
+        self.camera: Optional[FakeCamera] = None
+        self.screen: Optional[FakeScreen] = None
         self._voices: dict = {}
         self._touched: dict = {}
         self._saved: dict = {}
@@ -582,6 +593,12 @@ class ScriptedConversations:
         if conversation.web is not None or conversation.tools.get("web"):
             self.web = FakeWeb(**(conversation.web or {}), real=self.real_web or None)
             self.web.__enter__()
+        # The camera and the screen are always scripted: a test never looks
+        # at the room or the screen it runs in
+        if conversation.camera is not None or conversation.tools.get("camera"):
+            self.camera = FakeCamera(**(conversation.camera or {})).__enter__()
+        if conversation.screen is not None or conversation.tools.get("screen"):
+            self.screen = FakeScreen(**(conversation.screen or {})).__enter__()
         for plugin, on in conversation.tools.items():
             self._set("tool", (plugin, on), ("tool", plugin), (plugin, DEFAULT_TOOLS.get(plugin, False)))
         if conversation.persona:
@@ -631,8 +648,8 @@ class ScriptedConversations:
         """Put back what the conversation changed, so the next one finds
         the defaults: web off, persona iris, Smart Turn, the default
         recognizer, the microphone on, the default wake window and sleep
-        word, not paused, no scripted web, no rules, no sounds in the room,
-        the echo as it was."""
+        word, not paused, no scripted web, camera or screen, no rules, no
+        sounds in the room, the echo as it was."""
         assistant = self.assistant
         touched, self._touched = self._touched, {}
         if "paused" in touched:
@@ -649,6 +666,10 @@ class ScriptedConversations:
         if self.web is not None:
             self.web.__exit__(None, None, None)
             self.web = None
+        for name in ("camera", "screen"):
+            if getattr(self, name) is not None:
+                getattr(self, name).__exit__(None, None, None)
+                setattr(self, name, None)
         if self.stub is not None:
             self.stub.reset_rules()
             if "stub" in self._saved:
@@ -770,7 +791,7 @@ class ScriptedConversations:
 
     def _expects_reply(self, running: Running) -> bool:
         expectation = running.turn.expectation
-        if running.merged_into_next or expectation in ("silent", "silenced", "sleep"):
+        if running.merged_into_next or expectation in ("silent", "silenced", "sleep", "unanswered"):
             return False
         if expectation == "wake":
             return len(words(running.result.said)) > 2
@@ -941,6 +962,14 @@ class ScriptedConversations:
             if expectation in ("silent", "sleep") or (expectation == "wake" and not self._expects_reply(running)):
                 time.sleep(max(0.0, running.ref_end + NO_REPLY_WATCH - time.monotonic()))
                 wait_until(lambda: finished(assistant), self._timeout)
+            elif expectation == "unanswered":
+                # Over once the turn was heard and what went wrong was shown
+                def told() -> bool:
+                    users = log.since(running.ref_end, "chat.user")
+                    return bool(users) and bool(log.since(users[-1][0], "error")) and finished(assistant)
+
+                if not wait_until(told, self._timeout):
+                    running.result.fail("complete", f"no error within {self._timeout:.0f} s")
             elif expectation == "silenced" or running.merged_into_next:
                 wait_until(lambda: finished(assistant), self._timeout)
             elif turn.presses_stop:
@@ -1015,10 +1044,20 @@ class ScriptedConversations:
             self._touched.setdefault(("tool", plugin), ("tool", (plugin, DEFAULT_TOOLS.get(plugin, False))))
             if plugin == "web" and on and self.web is None:
                 self.web = FakeWeb(real=self.real_web or None).__enter__()
+            if plugin == "camera" and on and self.camera is None:
+                self.camera = FakeCamera().__enter__()
+            if plugin == "screen" and on and self.screen is None:
+                self.screen = FakeScreen().__enter__()
             assistant.configure("tool", (plugin, bool(on)))
         elif name == "turn_detection":
             self._touched.setdefault("turn_detection", ("turn_detection", "smart_turn"))
             assistant.configure("turn_detection", args[0])
+        elif name == "model":
+            self._touched.setdefault("model", ("model", getattr(assistant, "options", {}).get("llm_model")))
+            assistant.configure("model", args[0])
+        elif name == "stub" and self.stub is not None:
+            before = self._configure_stub(args[0])
+            self._saved["stub"] = {**before, **self._saved.get("stub", {})}
         else:
             owner.result.fail("action", f"no action called {name!r}")
 
@@ -1198,6 +1237,13 @@ class ScriptedConversations:
         elif expectation == "silent":
             if result.heard or result.spoke:
                 fail("silent", f"answered something not addressed to it (heard: {result.heard!r})")
+        elif expectation == "unanswered":
+            # Heard, but no reply could be had: what went wrong is shown
+            # (error_mentions) and nothing is said
+            if not result.heard:
+                fail("heard", "did not hear the turn")
+            if result.spoke:
+                fail("spoke", "spoke a reply it could not have")
         elif expectation == "sleep":
             if not log.since(start, "sleep", end):
                 fail("sleep", "did not fall asleep")

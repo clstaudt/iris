@@ -1,9 +1,11 @@
 // End-to-end test of the app's UI against the real Python core.
 //
 // The built UI (ui/dist) runs in headless Chrome; window.iris, which Electron's
-// preload provides in the app, is bridged to a core started for the test. The
-// core gets a home folder of its own, so the tester's personas, memory and
-// settings are left alone; the speech models already on this computer are used.
+// preload provides in the app, is bridged to a core started for the test,
+// through the app's own bridge (electron/python-bridge.ts), which reports a
+// core that stops and starts it again. The core gets a home folder of its
+// own, so the tester's personas, memory and settings are left alone; the
+// speech models already on this computer are used.
 // It listens only for a wake word nobody says, and it does speak: voice
 // previews and replies are heard on the speakers while the test runs.
 //
@@ -17,14 +19,14 @@
 //   E2E_ONLY    run only the steps whose name contains this text
 //   E2E_HEADED  set to watch the browser
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+
+import { PythonBridge } from "../electron/python-bridge.ts";
 
 const UI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPO = path.resolve(UI, "..");
@@ -46,53 +48,33 @@ const realHome = os.homedir();
 const python =
   process.env.E2E_PYTHON ??
   path.join(REPO, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
-const core = spawn(python, ["-m", "iris.rpc_server"], {
-  cwd: REPO,
-  env: {
-    ...process.env,
+const coreLog = fs.createWriteStream(path.join(OUT, "core.log"));
+
+/** Every event the core pushed, and the bridge told, in order. */
+const events = [];
+let pushEvent = () => {};
+
+const bridge = new PythonBridge(
+  REPO,
+  false,
+  "",
+  {
     HOME: home,
     USERPROFILE: home,
     HF_HOME: process.env.HF_HOME ?? path.join(realHome, ".cache", "huggingface"),
     IRIS_MODELS_DIR: process.env.IRIS_MODELS_DIR ?? path.join(realHome, ".iris", "models"),
     IRIS_MEMORY_DB: path.join(home, "memory.db"),
-    PYTHONPATH: path.join(REPO, "src"),
-    PYTHONUNBUFFERED: "1",
   },
-});
-const coreLog = fs.createWriteStream(path.join(OUT, "core.log"));
-core.stderr.pipe(coreLog);
-
-/** Every event the core pushed, in order. */
-const events = [];
-const pending = new Map();
-let nextId = 1;
-let pushEvent = () => {};
-
-readline.createInterface({ input: core.stdout }).on("line", (line) => {
-  let frame;
-  try {
-    frame = JSON.parse(line);
-  } catch {
-    coreLog.write(line + "\n");
-    return;
-  }
-  if (frame.id !== undefined && pending.has(frame.id)) {
-    const { resolve, reject } = pending.get(frame.id);
-    pending.delete(frame.id);
-    if (frame.error) reject(new Error(frame.error.message));
-    else resolve(frame.result);
-  } else if (frame.method === "event") {
-    events.push({ ...frame.params, at: Date.now() });
-    pushEvent(frame.params.type, frame.params.data);
-  }
-});
+  { command: python, args: ["-m", "iris.rpc_server"] }
+);
+bridge.onLog = (line) => coreLog.write(line + "\n");
+bridge.onEvent = (type, data) => {
+  events.push({ type, data, at: Date.now() });
+  pushEvent(type, data);
+};
 
 function rpc(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    core.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-  });
+  return bridge.call(method, params);
 }
 
 // ------------------------------------------------------------- the browser
@@ -621,6 +603,26 @@ try {
     check(!["thinking", "speaking", "searching", "browsing"].includes(info.state), `Iris is ${info.state}`);
   });
 
+  await step("the core stops: the app says so, starts it again, and goes on", async () => {
+    await page.locator("nav button", { hasText: "Conversation" }).click().catch(() => {});
+    const messages = page.locator(".bubble.user, .bubble.assistant, .bubble.error");
+    const shown = await messages.count();
+    const since = Date.now();
+    process.kill(bridge.pid, "SIGKILL");
+    await page.getByText("Iris stopped unexpectedly (stopped by SIGKILL). Starting it again.").waitFor({ timeout: 10_000 });
+    await eventAfter("core.restarted", since, () => true, 30_000);
+    // The app starts the assistant in the new core, with its settings
+    await eventAfter("config", since, () => true, 180_000);
+    check(config().wake_word === WAKE_WORD, "the new core was not started with the settings");
+    check(config().llm_model === model, `the new core runs ${config().llm_model}`);
+    await rpc("mic.set", { on: false });
+    // The conversation stays shown, once
+    check((await messages.count()) === shown + 1, `${shown} messages before, ${await messages.count()} after`);
+    const asked = await ask("Reply with exactly: back again.");
+    const done = await eventAfter("chat.done", asked, () => true, 180_000);
+    check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
+  });
+
   await step("nothing went wrong in the page", async () => {
     check(pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
   });
@@ -628,7 +630,7 @@ try {
   await browser.close().catch(() => {});
   server.close();
   await rpc("assistant.stop").catch(() => {});
-  core.kill();
+  bridge.kill();
   fs.rmSync(home, { recursive: true, force: true });
 }
 

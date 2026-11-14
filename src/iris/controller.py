@@ -5,6 +5,7 @@ state stream for external UIs such as the Electron shell."""
 import importlib.metadata
 import itertools
 import queue
+import sys
 import threading
 import time
 from collections import deque
@@ -14,7 +15,7 @@ from iris import downloads, engines, servers
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AUDIO_FILTERS, AudioRecorder, get_filter
-from iris.events import EventBus
+from iris.events import EventBus, brief
 from iris.llm import ConversationManager, effective_host, normalize_host, ollama_client
 from iris.personas import (
     delete_persona,
@@ -95,6 +96,24 @@ APPROX_MODEL_MB = {
 }
 KOKORO_MB = 335
 
+# The model that answers about images when the conversation's model cannot
+# see, if the server has it; else the first one that can see
+VISION_MODEL = "qwen3-vl:8b"
+
+# Told when the microphone gives only exact zeros: a real one always has a
+# noise floor. macOS gives them to an app it does not let hear the microphone
+SILENT_MAC = (
+    "Microphone returns pure silence — macOS is denying audio capture. In dev "
+    "mode the permission belongs to the app that launched the dev server "
+    "(Cursor, VS Code, Terminal or iTerm), not to Electron. Enable it under "
+    "System Settings > Privacy & Security > Microphone, then relaunch that app "
+    "completely."
+)
+SILENT = (
+    "The microphone gives only silence. Check that it is not muted, and that "
+    "Iris may use it."
+)
+
 # Events that make up the visible conversation. Kept here so a UI that
 # reloads (or attaches late) can rebuild its transcript; streaming chunks are
 # left out because chat.done carries the full reply.
@@ -121,6 +140,9 @@ class AssistantController:
 
         self._loop_thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
+        # Held while recognition or the voice that did not load is loaded
+        # again, so switching it on twice loads (and downloads) it once
+        self._reloading = {"recognition": threading.Lock(), "voice": threading.Lock()}
 
         # Typed turns. Owned here rather than by the assistant so messages sent
         # while the models are still loading are answered once they are ready.
@@ -176,18 +198,7 @@ class AssistantController:
             self._zero_level_since = time.monotonic()
         elif not self._silence_warned and time.monotonic() - self._zero_level_since > 4:
             self._silence_warned = True
-            self.bus.emit(
-                "error",
-                {
-                    "message": (
-                        "Microphone returns pure silence — macOS is denying audio "
-                        "capture. In dev mode the permission belongs to the app that "
-                        "launched the dev server (Cursor, VS Code, Terminal or iTerm), "
-                        "not to Electron. Enable it under System Settings > Privacy & "
-                        "Security > Microphone, then relaunch that app completely."
-                    )
-                },
-            )
+            self.bus.emit("error", {"message": SILENT_MAC if sys.platform == "darwin" else SILENT})
 
     def _flag_state(self) -> str:
         with self._state_lock:
@@ -254,7 +265,7 @@ class AssistantController:
             threading.Thread(target=self._speaking_poller, daemon=True).start()
         return {"ok": True}
 
-    def _pick_vision_model(self, preferred: str) -> str | None:
+    def _pick_vision_model(self, preferred: str = VISION_MODEL) -> str | None:
         """Resolve the model used for image prompts.
 
         Returns None when no separate model is needed or available, which keeps
@@ -277,6 +288,9 @@ class AssistantController:
         # {plugin id: enabled} chosen in the UI; the others follow their default
         kwargs["tools"] = kwargs.pop("tools", {}) or {}
         amnesia = bool(kwargs.pop("amnesia", False))
+        # The app still shows the conversation when it starts a core again
+        # after one stopped: the recent turns are not shown a second time
+        restore = bool(kwargs.pop("restore_thread", True))
         # Model folders chosen in Settings; empty means download as usual
         if stt_path := kwargs.pop("stt_model_path", ""):
             kwargs["whisper_model"] = stt_path
@@ -284,7 +298,7 @@ class AssistantController:
             kwargs["tts_models_dir"] = tts_dir
 
         if "vision_model" not in kwargs:
-            kwargs["vision_model"] = self._pick_vision_model("qwen3-vl:8b")
+            kwargs["vision_model"] = self._pick_vision_model()
 
         try:
             self._fetch_models(kwargs)
@@ -301,7 +315,8 @@ class AssistantController:
             )
             self.assistant.conversation.set_amnesia(amnesia)
             self.bus.emit("config", self.assistant.config_info())
-            self._restore_thread()
+            if restore:
+                self._restore_thread()
         except Exception as e:
             self.bus.emit("error", {"message": f"Failed to start assistant: {e}"})
             self._publish_state("idle")
@@ -359,9 +374,14 @@ class AssistantController:
         return {"ok": True}
 
     def set_mic(self, on: bool) -> dict:
-        """Switch the microphone. Off still answers typed messages."""
+        """Switch the microphone. Off still answers typed messages. Without
+        speech recognition, which did not load at the start, it is loaded
+        first, and the microphone opens once it is there."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
+        if on and self.assistant.transcriber is None:
+            threading.Thread(target=self._load_recognition, daemon=True).start()
+            return {"ok": True}
         if on:
             self.assistant.pause_event.clear()
         else:
@@ -401,14 +421,59 @@ class AssistantController:
         return {"ok": True}
 
     def set_voice_output(self, enabled: bool) -> dict:
-        """Switch spoken replies on or off. Switching off cuts current speech."""
+        """Switch spoken replies on or off. Switching off cuts current speech.
+        A voice that did not load is tried again first, and speaks once it
+        is there."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
+        if enabled and self.assistant.voice_error is not None:
+            threading.Thread(target=self._load_voice, daemon=True).start()
+            return {"ok": True}
         self.assistant.speak_replies = bool(enabled)
         if not enabled:
             self.assistant.speech_pipeline.stop()
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
+
+    def _load_recognition(self):
+        """Try again to load speech recognition (downloading it first), and
+        open the microphone once it is there."""
+        if not self._reloading["recognition"].acquire(blocking=False):
+            return
+        try:
+            self._reload_recognition()
+        finally:
+            self._reloading["recognition"].release()
+
+    def _reload_recognition(self):
+        assistant = self.assistant
+        options = assistant.recognition_options
+        try:
+            if assistant.recognition_engine == "whisper":
+                self._fetch_stt(
+                    options.get("model", "auto"),
+                    whisper_engine=options.get("engine", "auto"),
+                    whisper_device=options.get("device", "auto"),
+                )
+        except Exception:
+            pass  # loading says why
+        finally:
+            self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
+        if assistant.load_recognition():
+            assistant.pause_event.clear()
+        self.bus.emit("config", assistant.config_info())
+
+    def _load_voice(self):
+        """Try again to load the voice, and speak replies once it is there."""
+        if not self._reloading["voice"].acquire(blocking=False):
+            return
+        try:
+            assistant = self.assistant
+            if assistant.load_voice():
+                assistant.speak_replies = True
+            self.bus.emit("config", assistant.config_info())
+        finally:
+            self._reloading["voice"].release()
 
     def set_barge_in(self, enabled: bool) -> dict:
         """Whether speaking interrupts the voice (with echo cancellation)."""
@@ -601,17 +666,29 @@ class AssistantController:
         say "Loading models". A model folder chosen in Settings is used as it
         is and never downloaded.
         """
-        try:
-            # Whisper's models; another recognition engine fetches its own
-            if kwargs.get("recognition_engine", "whisper") == "whisper":
-                self._fetch_stt(
+        steps = []
+        # Whisper's models; another recognition engine fetches its own
+        if kwargs.get("recognition_engine", "whisper") == "whisper":
+            steps.append((
+                "speech recognition model",
+                lambda: self._fetch_stt(
                     kwargs.get("whisper_model", "auto"),
                     kwargs.get("wake_word"),
                     whisper_engine=kwargs.get("whisper_engine", "auto"),
                     whisper_device=kwargs.get("whisper_device", "auto"),
-                )
-            self._fetch_turn()
-            self._fetch_tts(kwargs.get("tts_models_dir"))
+                ),
+            ))
+        steps.append(("turn detection model", self._fetch_turn))
+        steps.append(("Kokoro voice model", lambda: self._fetch_tts(kwargs.get("tts_models_dir"))))
+        # Each is tried whatever became of the others (offline, all fail):
+        # Iris starts with what it has and says what it could not fetch
+        try:
+            for what, fetch in steps:
+                try:
+                    fetch()
+                except Exception as e:
+                    message = f"Could not download the {what}: {brief(e)}"
+                    self.bus.emit("error", {"message": message})
         finally:
             self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
 
@@ -677,6 +754,7 @@ class AssistantController:
                         assistant.tts_generator.speed,
                         models_dir=tts_dir or None,
                     )
+                    generator.on_failure = assistant.tts_generator.on_failure
                     assistant.tts_generator = generator
                     assistant.speech_pipeline.generator = generator
                 self.bus.emit("config", assistant.config_info())
@@ -840,11 +918,9 @@ class AssistantController:
             ]
         if self.assistant is not None:
             self.assistant.conversation.set_host(host)
-            if self.assistant.conversation.vision_model:
-                conversation = self.assistant.conversation
-                conversation.vision_model = (
-                    self._pick_vision_model("qwen3-vl:8b") or conversation.vision_model
-                )
+            # The model that sees is one of this server's, or there is none:
+            # the last server's would not be found here
+            self.assistant.conversation.vision_model = self._pick_vision_model()
             self.bus.emit("config", self.assistant.config_info())
             try:
                 self._warn_if_model_missing()
