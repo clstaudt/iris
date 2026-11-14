@@ -396,6 +396,8 @@ class IrisStore {
   /** Each speech engine's voices, for the persona editor */
   voices = $state<VoiceOptions | null>(null);
   memoryTopics = $state<MemoryTopic[]>([]);
+  /** Turns the core keeps, filed under a topic or not yet */
+  memoryTurns = $state(0);
   /** First launch: the setup screen is shown and nothing starts until done.
    *  Shown from the first frame, while the core is still booting. */
   needsSetup = $state(!loadSettings().setup_done);
@@ -583,6 +585,10 @@ class IrisStore {
         if (this.panel === "memory") this.loadMemory();
         break;
 
+      case "memory.forgotten":
+        this.forgotten();
+        break;
+
       case "core.restarted":
         this.coreRestarted();
         break;
@@ -607,6 +613,19 @@ class IrisStore {
         });
         break;
     }
+  }
+
+  /** Everything was forgotten: the conversation shown goes with it, as do
+   *  the messages waiting to be answered, which the core dropped. */
+  private forgotten() {
+    for (const waiting of this.pending) releasePreviews(waiting.attachments);
+    this.pending = [];
+    this.messages = [];
+    this.streamingIndex = null;
+    this.restoredCount = 0;
+    this.memoryTopics = [];
+    this.memoryTurns = 0;
+    if (this.panel === "memory") this.loadMemory();
   }
 
   /** A turn of the conversation before this launch, as memory kept it: it
@@ -933,8 +952,9 @@ class IrisStore {
   }
 
   async loadMemory() {
-    const result = await rpc<{ topics: MemoryTopic[] }>("memory.topics");
+    const result = await rpc<{ topics: MemoryTopic[]; turns?: number }>("memory.topics");
     this.memoryTopics = result.topics;
+    this.memoryTurns = result.turns ?? 0;
   }
 
   async memoryTopic(id: number): Promise<MemoryTopicDetail | null> {
@@ -945,6 +965,24 @@ class IrisStore {
   async forgetTopic(id: number) {
     await rpc("memory.forget", { id });
     await this.loadMemory();
+  }
+
+  /** Forget everything Iris remembers, and the conversation with it (the
+   *  core says so to every window, memory.forgotten). */
+  async forgetEverything() {
+    let result: { ok: boolean; error?: string };
+    try {
+      result = await rpc("memory.forget_all");
+    } catch (err) {
+      result = { ok: false, error: `${err}` };
+    }
+    if (!result.ok) {
+      this.messages.push({
+        role: "error",
+        text: `Forgetting failed: ${result.error ?? "Iris did not answer"}`,
+        streaming: false,
+      });
+    }
   }
 
   /** Listen only for this word until addressed; "" listens to everything. */
