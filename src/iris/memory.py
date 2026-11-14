@@ -253,24 +253,24 @@ class MemoryStore:
         threads = self._query(self._THREADS + " ORDER BY th.updated DESC, th.id DESC LIMIT 1")
         return self._titled(threads[0]) if threads else None
 
-    # A thread with what its title is made of: its earliest topic, else its
-    # first words (an opening Iris made itself has only its reply)
+    # A thread with what its title is made of: its earliest topic, else the
+    # user's first words. Nothing of Iris's own: neither its replies nor an
+    # opening it made itself, such as its greeting
     _THREADS = """
         SELECT th.*,
             (SELECT title FROM topics WHERE thread_id = th.id ORDER BY created, id LIMIT 1)
                 AS topic,
             (SELECT text FROM turns WHERE thread_id = th.id AND role = 'user'
-                ORDER BY id LIMIT 1) AS asked,
-            (SELECT text FROM turns WHERE thread_id = th.id AND role = 'assistant'
-                ORDER BY id LIMIT 1) AS answered
+                ORDER BY id LIMIT 1) AS asked
         FROM threads th
     """
 
     @staticmethod
     def _titled(row: sqlite3.Row) -> dict:
+        """The thread with its title, "" until the user has said anything."""
         thread = dict(row)
-        topic, asked, answered = thread.pop("topic"), thread.pop("asked"), thread.pop("answered")
-        thread["title"] = topic or shortened(asked or answered or "")
+        topic, asked = thread.pop("topic"), thread.pop("asked")
+        thread["title"] = topic or shortened(asked or "")
         return thread
 
     def forget_thread(self, thread_id: int):

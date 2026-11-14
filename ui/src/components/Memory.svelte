@@ -55,9 +55,9 @@
   <div class="flex h-12 shrink-0 items-center justify-between pl-5 pr-2.5">
     <h2 class="flex min-w-0 items-baseline gap-2 text-[13px] font-semibold text-ink">
       Memory
-      {#if store.thread}
-        <span class="truncate text-[12px] font-normal text-ink-3">{store.thread.title}</span>
-      {/if}
+      <span class="truncate text-[12px] font-normal text-ink-3"
+        >{store.thread?.title || "New thread"}</span
+      >
     </h2>
     <button
       onclick={() => (store.panel = null)}

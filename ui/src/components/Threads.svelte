@@ -69,7 +69,7 @@
           <button class="open" onclick={() => store.openThreadById(thread.id)}>
             <PersonaRing name={thread.persona_name} />
             <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span class="title">{thread.title}</span>
+              <span class="title">{thread.title || "New thread"}</span>
               <span class="who">{thread.persona_name}</span>
             </span>
           </button>
