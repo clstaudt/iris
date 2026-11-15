@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fade } from "svelte/transition";
+  import { tour } from "../../lib/tour.svelte";
   import { STEPS, walkthrough as w, type Step as StepId } from "../../lib/walkthrough.svelte";
   import Icon from "../Icon.svelte";
   import Progress from "../Progress.svelte";
@@ -118,6 +119,18 @@
         {/if}
         <button class="primary" onclick={() => w.next()}>Continue</button>
       {:else}
+        {#if w.firstRun}
+          <button
+            class="secondary"
+            onclick={() => {
+              tour.take();
+              w.finish();
+            }}
+            disabled={w.starting}
+          >
+            Take the tour
+          </button>
+        {/if}
         <button class="primary" onclick={() => w.finish()} disabled={w.starting}>
           {w.firstRun ? "Start talking" : "Done"}
         </button>
@@ -167,6 +180,25 @@
     opacity: 0.9;
   }
   .primary:disabled {
+    opacity: 0.5;
+  }
+  .secondary {
+    height: 2.4rem;
+    flex-shrink: 0;
+    border-radius: 9999px;
+    border: 1px solid var(--color-line-strong);
+    padding: 0 1.2rem;
+    font-size: 13.5px;
+    color: var(--color-ink-2);
+    transition:
+      background-color 150ms,
+      color 150ms;
+  }
+  .secondary:hover:not(:disabled) {
+    background: var(--color-hover);
+    color: var(--color-ink);
+  }
+  .secondary:disabled {
     opacity: 0.5;
   }
   .quiet {

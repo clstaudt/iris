@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store, type SettingsPage } from "../../lib/state.svelte";
+  import { tour } from "../../lib/tour.svelte";
   import { walkthrough } from "../../lib/walkthrough.svelte";
   import Icon from "../Icon.svelte";
   import Personas from "./Personas.svelte";
@@ -30,6 +31,7 @@
         onclick={() => store.openSettings(item.id)}
         aria-current={store.settingsPage === item.id ? "page" : undefined}
         class="nav {store.settingsPage === item.id ? 'active' : ''}"
+        data-tour="settings-{item.id}"
       >
         <Icon name={item.icon} size={15} />
         {item.label}
@@ -42,7 +44,11 @@
     {/each}
     <button onclick={() => walkthrough.open(false)} class="nav back mt-auto">
       <Icon name="play" size={13} />
-      Walkthrough
+      Set up
+    </button>
+    <button onclick={() => tour.start()} class="nav back">
+      <Icon name="compass" size={13} />
+      Tour
     </button>
     <button onclick={() => store.openSettings(null)} class="nav back">
       <Icon name="back" size={14} />
@@ -52,6 +58,7 @@
 
   <section
     class="flex min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-line bg-panel"
+    data-tour="settings-page"
   >
     <div class="flex h-12 shrink-0 items-center gap-3 border-b border-line px-5">
       <h2 class="text-[13.5px] font-semibold text-ink">{page.label}</h2>

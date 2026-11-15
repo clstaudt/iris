@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { fade } from "svelte/transition";
   import Composer from "./components/Composer.svelte";
   import Icon from "./components/Icon.svelte";
@@ -9,10 +9,12 @@
   import StatusZone from "./components/StatusZone.svelte";
   import SwitchConfirm from "./components/SwitchConfirm.svelte";
   import Threads from "./components/Threads.svelte";
+  import Tour from "./components/Tour.svelte";
   import Transcript from "./components/Transcript.svelte";
   import Walkthrough from "./components/walkthrough/Walkthrough.svelte";
   import { connectConversation } from "./lib/orb.svelte";
   import { store } from "./lib/state.svelte";
+  import { tour } from "./lib/tour.svelte";
 
   onMount(() => {
     store.init();
@@ -22,6 +24,19 @@
 
   // The window's own buttons sit at the top left on macOS
   const mac = window.iris?.platform === "darwin";
+
+  /** The tour taken at the end of the walkthrough starts once the
+   *  conversation has faded in, and again at a launch until it is finished
+   *  or skipped; run from Settings it shows at once. */
+  let tourDelay = $state(0);
+  $effect(() => {
+    if (store.needsSetup || tour.active) return;
+    untrack(() => {
+      const byItself = tour.startsByItself();
+      tourDelay = byItself ? 1000 : 0;
+      if (byItself) tour.start();
+    });
+  });
 </script>
 
 <main class="flex h-screen flex-col bg-frame text-ink">
@@ -35,6 +50,7 @@
         ? 'hidden'
         : ''}"
       title="Threads"
+      data-tour="threads"
     >
       <Icon name="panel" size={15} />
     </button>
@@ -44,6 +60,7 @@
         onclick={() => store.setPresence(true)}
         class="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-hover hover:text-ink"
         title="Presence"
+        data-tour="presence"
       >
         <Icon name="shrink" size={15} />
       </button>
@@ -54,6 +71,7 @@
           ? 'bg-hover text-ink'
           : 'text-ink-3'}"
         title="Memory"
+        data-tour="memory"
       >
         <Icon name="brain" size={15} />
       </button>
@@ -63,6 +81,7 @@
           ? 'bg-hover text-ink'
           : 'text-ink-3'}"
         title="Settings"
+        data-tour="settings"
       >
         <Icon name="settings" size={15} />
       </button>
@@ -115,6 +134,10 @@
       </div>
     {/if}
   </div>
+
+  {#if tour.active && !store.needsSetup}
+    <Tour delay={tourDelay} />
+  {/if}
 </main>
 
 <style>

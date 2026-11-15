@@ -140,6 +140,7 @@
             {disabled}
             aria-expanded={active !== undefined ? active === stage.id : undefined}
             data-stage={stage.id}
+            data-tour="stage-{stage.id}"
             class="{classes} opens"
           >
             {@render body(stage, row)}

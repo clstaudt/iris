@@ -70,9 +70,10 @@
   <aside
     class="strip flex w-[52px] shrink-0 flex-col items-center overflow-hidden rounded-[14px] border border-line bg-panel"
     aria-label="Threads"
+    data-tour="thread-list"
   >
     <div class="flex flex-col items-center gap-1 pb-1.5 pt-2.5">
-      <button onclick={() => store.newThread()} class="new square" title="New thread" aria-label="New thread">
+      <button onclick={() => store.newThread()} class="new square" title="New thread" aria-label="New thread" data-tour="new-thread">
         <Icon name="plus" size={15} />
       </button>
       <button
@@ -114,9 +115,10 @@
 <aside
   class="flex w-[256px] shrink-0 flex-col overflow-hidden rounded-[14px] border border-line bg-panel"
   aria-label="Threads"
+  data-tour="thread-list"
 >
   <div class="flex gap-1.5 px-2.5 pb-1.5 pt-2.5">
-    <button onclick={() => store.newThread()} class="new">
+    <button onclick={() => store.newThread()} class="new" data-tour="new-thread">
       <Icon name="plus" size={15} />
       New thread
     </button>

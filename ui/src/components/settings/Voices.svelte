@@ -83,7 +83,7 @@
     <LanguageChoice />
   </section>
 
-  <section class="flex flex-col gap-5" aria-label="Library">
+  <section class="flex flex-col gap-5" aria-label="Library" data-tour="voices">
     <div class="flex flex-col gap-3">
       <h3 class="s-section">Voices</h3>
       {#if languages.length}
