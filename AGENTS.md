@@ -27,6 +27,18 @@ except ImportError:
     HAS_SEARCH = False
 ```
 
+# User Data
+
+Nothing from a development session or from the developer's own setup ever goes into the repository: not into code, docstrings, comments, tests, fixtures, test data, docs, commit messages or pull request text. That covers what was said in a conversation, and every user customization, for example:
+
+- names of personas, voices, wake words and sleep words, and persona descriptions;
+- cloned voices, voice samples and recordings;
+- memory, transcripts and conversation content;
+- model servers, hostnames, addresses, ports and the models in use;
+- local paths, usernames, email addresses, keys and tokens.
+
+Use neutral placeholders instead: invented names (Ada, Robin, Felix), `https://<host>:<port>/v1`, "a small model". Tests make the personas, voices and data they need themselves, and never use the developer's own personas, voices, memory or settings. Downloaded model files may come from the shared cache, and the end-to-end test talks only to the model server it is given, never to one it finds on the machine.
+
 # Pull Requests
 
 - One pull request per change request.
