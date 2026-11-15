@@ -235,6 +235,82 @@ const browser = await chromium.launch({
   args: ["--disable-updater-scheduler"],
 });
 
+/** The processes running, by PID, with their parent and command line; none
+ *  where there is no ps. */
+function processes() {
+  try {
+    const rows = execFileSync("ps", ["-A", "-o", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n");
+    return new Map(
+      rows.map((row) => row.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
+        .map(([, pid, ppid, command]) => [Number(pid), { ppid: Number(ppid), command }])
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+/** The open files lsof lists for its arguments, as { pid, file }, where file
+ *  names the open file itself, the same in every process that inherited it;
+ *  none where there is no lsof. */
+function openFiles(args) {
+  let out = "";
+  try {
+    out = execFileSync("lsof", [...args, "-n", "-P", "-F", "pfdi"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 1 << 28,
+    });
+  } catch (error) {
+    // lsof exits with 1 when it misses something it was asked for
+    out = error.stdout ?? "";
+  }
+  const files = [];
+  let pid;
+  for (const line of out.split("\n")) {
+    if (line[0] === "p") pid = Number(line.slice(1));
+    else if (line[0] === "f") files.push({ pid, file: "" });
+    else if ((line[0] === "d" || line[0] === "i") && files.length) files.at(-1).file += line;
+  }
+  return files;
+}
+
+// This run's Chrome is the child of this process that Playwright drives
+// through a pipe; its stdout and stderr are kept for closeBrowser
+const chromePid = [...processes()].find(
+  ([, p]) => p.ppid === process.pid && p.command.includes("--remote-debugging-pipe")
+)?.[0];
+const browserOutput = new Set(
+  chromePid ? openFiles(["-a", "-p", String(chromePid), "-d", "1,2"]).map((f) => f.file).filter(Boolean) : []
+);
+
+/** Close the browser, but not for ever. Should a process Chrome started
+ *  still hold its output, close waits for it (see the switch above): after a
+ *  while, the processes that hold it are stopped. Only this run's Chrome can
+ *  have passed them its output, so no other Chrome is touched, the tester's
+ *  own nor another run's. */
+async function closeBrowser() {
+  const closed = browser.close().then(() => true, () => true);
+  const within = (ms) => Promise.race([closed, quiet(ms).then(() => false)]);
+  if (await within(20_000)) return;
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    // Node's pipes to a child are Unix sockets
+    const holders = new Set(
+      openFiles(["-U"]).filter((f) => browserOutput.has(f.file) && f.pid !== process.pid).map((f) => f.pid)
+    );
+    if (!holders.size) break;
+    const running = processes();
+    const named = [...holders].map((pid) => `${pid} ${running.get(pid)?.command.split(" --")[0].split("/").pop() ?? ""}`);
+    console.log(`  the browser is not closing: ${signal} to the processes it started that hold its output: ${named.join(", ")}`);
+    for (const pid of holders) {
+      try {
+        process.kill(pid, signal);
+      } catch {}
+    }
+    if (await within(5000)) return;
+  }
+  console.log("  the browser is not closing: going on without it");
+}
+
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const pageErrors = [];
 page.on("pageerror", (error) => pageErrors.push(String(error)));
@@ -3314,7 +3390,7 @@ try {
     check(pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
   });
 } finally {
-  await browser.close().catch(() => {});
+  await closeBrowser();
   server.close();
   stub.close();
   await rpc("assistant.stop").catch(() => {});
