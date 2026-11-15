@@ -50,3 +50,21 @@ jobs:
       run: |
         mkdir -p "$HF_HOME" "$IRIS_MODELS_DIR"
         uv run --frozen pytest tests/unit -q
+
+  # The app's bridge to the core, with a stand-in core (ui/e2e/fake-core.mjs):
+  # a core that crashes is reported and started again. It needs only Node,
+  # which runs the bridge's TypeScript as it is
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: "22"
+
+    - name: Run the bridge tests
+      run: npm run test:bridge
+      working-directory: ui
