@@ -300,3 +300,18 @@ def test_filing_works_on_such_a_server_and_skips_inline_reasoning(monkeypatch):
     chat = memory.chat_json(lambda: BASE, lambda: "big-model")
     schema = {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}
     assert chat([{"role": "user", "content": "Title?"}], schema) == {"title": "Sourdough"}
+
+
+def test_filing_on_a_server_that_refuses_the_reasoning_switch_asks_again_without_it(monkeypatch):
+    unknown = "Unrecognized request argument supplied: chat_template_kwargs"
+    refused = httpx.Response(400, json={"error": {"message": unknown}})
+    server = Server(refused, [_delta(content='{"title": "Sourdough"}')])
+    transport = httpx.MockTransport(server)
+    monkeypatch.setattr(
+        memory, "OpenAIClient", lambda host, **kw: OpenAIClient(host, transport=transport)
+    )
+    chat = memory.chat_json(lambda: BASE, lambda: "big-model")
+    schema = {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}
+    assert chat([{"role": "user", "content": "Title?"}], schema) == {"title": "Sourdough"}
+    assert server.requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "chat_template_kwargs" not in server.requests[1]

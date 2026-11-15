@@ -1,13 +1,17 @@
 """Unit tests for long-term memory: storage, filing, recall and context."""
 
+import json
 import threading
 import time
 from unittest.mock import patch
 
+import httpx
+import ollama
 import pytest
 
 from iris import memory as memory_module
 from iris.llm import ConversationManager
+from iris.llm_client import OpenAIClient
 from iris.memory import PIN_TURNS, Filer, MemoryKeeper, MemoryStore
 from iris.plugin import PluginContext
 from iris.plugins import memory as memory_plugin
@@ -353,6 +357,59 @@ def test_a_call_in_flight_is_cut_off_when_the_conversation_resumes(fake_ollama):
     with pytest.raises(memory_module.FilingInterruptedError):
         chat([{"role": "user", "content": "Decide."}], DECISION_SCHEMA, abort=user_speaks)
     assert time.monotonic() - started < 0.5
+
+
+LISBON = '{"remember": true, "topic_id": 0, "title": "Lisbon trip"}'
+
+
+def _answer(request: httpx.Request) -> httpx.Response:
+    """A decision, streamed as Ollama (/api/chat) or an OpenAI-compatible
+    server (/v1/chat/completions) streams it."""
+    if request.url.path == "/api/chat":
+        line = {"model": "model", "message": {"role": "assistant", "content": LISBON}, "done": True}
+        return httpx.Response(200, content=json.dumps(line).encode() + b"\n")
+    event = {"choices": [{"index": 0, "delta": {"content": LISBON}}]}
+    body = f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n"
+    return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+
+
+@pytest.mark.parametrize(
+    "host, path, flag",
+    [
+        ("http://ollama.example:11434", "/api/chat", {"think": False}),
+        (
+            "https://box.example:8000/v1",
+            "/v1/chat/completions",
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        ),
+    ],
+)
+def test_filing_asks_the_model_to_answer_without_reasoning_first(monkeypatch, host, path, flag):
+    """A model that reasons first can spend the whole budget of a filing
+    call on it and leave the reply empty."""
+    sent = []
+
+    def answer(request):
+        sent.append((request.url.path, json.loads(request.content)))
+        return _answer(request)
+
+    transport = httpx.MockTransport(answer)
+    ollama_client = ollama.Client
+    monkeypatch.setattr(
+        memory_module.ollama,
+        "Client",
+        lambda host=None, **kw: ollama_client(host=host, transport=transport, **kw),
+    )
+    monkeypatch.setattr(
+        memory_module,
+        "OpenAIClient",
+        lambda host, **kw: OpenAIClient(host, transport=transport, **kw),
+    )
+    chat = memory_module.chat_json(lambda: host, lambda: "model")
+    assert chat([{"role": "user", "content": "Decide."}], DECISION_SCHEMA)["title"] == "Lisbon trip"
+    [(to, body)] = sent
+    assert to == path
+    assert {key: body.get(key) for key in flag} == flag
 
 
 def test_an_interrupted_filing_saves_nothing_half_done(store):
