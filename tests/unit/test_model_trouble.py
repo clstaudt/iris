@@ -6,7 +6,6 @@ servers are the scripted model on a local port and httpx.MockTransport."""
 
 import json
 import threading
-import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -276,6 +275,8 @@ def test_the_app_shows_the_switch_while_the_reply_goes_on(two):
     """Through the controller, as the app switches: the reply in progress
     comes whole, and the config shows the new server."""
     first, second = two
+    # The reply would take half a minute: the switch comes while it is coming
+    first.configure(per_word=0.25)
     bus = EventBus()
     events = []
     bus.subscribe(lambda kind, data: events.append((kind, data)))
@@ -292,11 +293,15 @@ def test_the_app_shows_the_switch_while_the_reply_goes_on(two):
 
     thread = threading.Thread(target=reply)
     thread.start()
-    assert wait_until(lambda: first.requests and first.requests[0].first_byte, 2.0)
+    assert wait_until(lambda: first.requests and first.requests[0].first_byte, 10.0)
     assert controller.set_ollama_host(second.url)["ok"]
+    assert first.requests[0].finished is None
+    # The rest of the reply comes at once
+    first.configure(per_word=0.0)
     thread.join(10)
+    assert not thread.is_alive()
     assert "".join(said) == LONG
     assert ("config", {"ollama_host": second.url}) in events
-    started = time.monotonic()
+    # The next turn goes to the server switched to, and to it only
     assert "".join(conversation.chat_stream("Hello?")) == SHORT
-    assert time.monotonic() - started < 2 and len(second.requests) == 1
+    assert len(first.requests) == 1 and len(second.requests) == 1

@@ -50,21 +50,38 @@ def test_emit_levels_handles_audio_shorter_than_one_frame():
     assert levels == []
 
 
-def test_paused_playback_resumes_where_it_was_cut(monkeypatch):
-    """A pause stops the device; resume plays the rest, slightly rewound."""
-    import time as time_module
+class Clock:
+    """The audio module's clock, moved on by the test alone: the time heard
+    is what the test says, however slowly the threads run. Sleeps are real,
+    so the threads still take turns."""
 
-    from iris import audio as audio_module
+    def __init__(self):
+        self.now = 1000.0
 
-    sample_rate = 16000
-    audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)  # 2 s, a ramp
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _wait_for(condition, timeout=10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return bool(condition())
+
+
+def _device(monkeypatch):
+    """A speaker that plays until the test says the clip is over, on the
+    test's clock; the clips it was given."""
     played = []
 
     class FakeStream:
         latency = 0.0
-
-        def __init__(self):
-            self.active = True
+        active = True
 
     stream = FakeStream()
 
@@ -75,29 +92,46 @@ def test_paused_playback_resumes_where_it_was_cut(monkeypatch):
     def fake_stop():
         stream.active = False
 
+    clock = Clock()
+    monkeypatch.setattr(audio_module, "time", clock)
     monkeypatch.setattr(audio_module.sd, "play", fake_play)
     monkeypatch.setattr(audio_module.sd, "stop", fake_stop)
     monkeypatch.setattr(audio_module.sd, "get_stream", lambda: stream)
+    return clock, stream, played
 
+
+def _hold(monkeypatch, after: float, rewind: bool) -> tuple[float, float]:
+    """Play a 2 s ramp, hold it after so many seconds (on the test's clock)
+    and let it go on; where it went on, and how much had been heard."""
+    sample_rate = 16000
+    audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)
+    clock, stream, played = _device(monkeypatch)
     player = AudioPlayer()
     worker = threading.Thread(target=player._play_resumable, args=(audio, sample_rate, None))
     worker.start()
-    time_module.sleep(0.8)  # ~0.8 s "heard"
+    assert _wait_for(lambda: played)
+    clock.now += after
     player.pause()
-    time_module.sleep(0.2)
+    assert _wait_for(lambda: not stream.active)  # the device is stopped
+    # However long the pause lasts, it is not counted as heard
+    clock.now += 5.0
     assert len(played) == 1 and player.paused
 
-    player.resume()
-    time_module.sleep(0.2)
+    player.resume(rewind=rewind)
+    assert _wait_for(lambda: len(played) == 2)
     stream.active = False  # the remainder finishes
-    worker.join(timeout=2)
+    worker.join(timeout=10)
 
     assert not worker.is_alive()
     assert len(played) == 2
-    resumed_at = len(audio) - len(played[1])
-    heard = 0.8 - audio_module.RESUME_REWIND
+    return (len(audio) - len(played[1])) / sample_rate, after
+
+
+def test_paused_playback_resumes_where_it_was_cut(monkeypatch):
+    """A pause stops the device; resume plays the rest, slightly rewound."""
+    resumed_at, heard = _hold(monkeypatch, 0.8, rewind=True)
     # Restarted a little before the cut, never after it
-    assert abs(resumed_at / sample_rate - heard) < 0.15
+    assert resumed_at == pytest.approx(heard - audio_module.RESUME_REWIND, abs=0.001)
 
 
 def test_playback_waits_until_the_stream_has_really_finished(monkeypatch):
@@ -131,53 +165,12 @@ def test_playback_waits_until_the_stream_has_really_finished(monkeypatch):
     assert time_module.monotonic() - started[0] >= 1.0
 
 
-def _hold(monkeypatch, after: float, rewind: bool):
-    """Play a 2 s ramp, hold it after so many seconds and let it go on;
-    where it went on, and how much had been heard (seconds)."""
-    sample_rate = 16000
-    audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)
-    played, started, cut = [], [], []
-
-    class FakeStream:
-        latency = 0.0
-        active = True
-
-    stream = FakeStream()
-
-    def fake_play(segment, rate, **kwargs):
-        played.append(segment.copy())
-        started.append(time.monotonic())
-        stream.active = True
-
-    def fake_stop():
-        if stream.active and not cut:
-            cut.append(time.monotonic())
-        stream.active = False
-
-    monkeypatch.setattr(audio_module.sd, "play", fake_play)
-    monkeypatch.setattr(audio_module.sd, "stop", fake_stop)
-    monkeypatch.setattr(audio_module.sd, "get_stream", lambda: stream)
-
-    player = AudioPlayer()
-    worker = threading.Thread(target=player._play_resumable, args=(audio, sample_rate, None))
-    worker.start()
-    time.sleep(after)
-    player.pause()
-    time.sleep(0.2)
-    player.resume(rewind=rewind)
-    time.sleep(0.2)
-    stream.active = False
-    worker.join(timeout=2)
-    assert len(played) == 2
-    return (len(audio) - len(played[1])) / sample_rate, cut[0] - started[0]
-
-
 @pytest.mark.parametrize("after", [0.3, 0.8])
 def test_a_hold_for_the_voices_own_echo_goes_on_where_it_was_cut(monkeypatch, after):
     """Held for nothing (its own echo), early in a clip or later, the voice
     goes on exactly where it was heard to: nothing is said twice."""
     resumed_at, heard = _hold(monkeypatch, after, rewind=False)
-    assert resumed_at == pytest.approx(heard, abs=0.01)
+    assert resumed_at == pytest.approx(heard, abs=0.001)
 
 
 def test_a_clip_held_early_does_not_start_over(monkeypatch):
@@ -185,4 +178,4 @@ def test_a_clip_held_early_does_not_start_over(monkeypatch):
     after a clip began goes back at most half of what was heard: resuming
     from its start repeated the first words at every hold."""
     resumed_at, heard = _hold(monkeypatch, 0.3, rewind=True)
-    assert heard / 2 - 0.01 <= resumed_at < heard
+    assert resumed_at == pytest.approx(heard / 2, abs=0.001)

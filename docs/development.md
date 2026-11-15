@@ -5,6 +5,8 @@ uv run pytest                  # unit tests
 uv run pytest -m integration   # integration tests, which need Ollama, Kokoro and Whisper
 ```
 
+The unit tests also run on CI's slow, shared runners, where a sleep of 0.3 s can last half a second. A test that measures time must hold there too, without widening its numbers. Where the code reads a clock, give it one the test moves on (the `Clock` in `test_playback_levels` and `test_voicetest`), so what is measured is what the test said. Wait for an event or a condition with a generous ceiling instead of sleeping and hoping the other thread got there. Where real time must pass, as when the virtual microphone delivers blocks in real time, check what the code promises: a block never comes before it was heard, measured on the stream's own times, rather than "ten blocks in 0.32 s". Bound a wait by what the test guards against (a call cut off before the model's first words), not by how fast your machine is. A bound like that still fails when the behaviour breaks.
+
 The walkthrough opens by itself only once per settings folder (Settings > Walkthrough runs it again with Iris running). To go through it as a new user:
 
 ```bash
