@@ -10,10 +10,14 @@ of Iris does not need to know which kind of server it talks to.
 A server URL is resolved once, when it is set (resolve_host): an Ollama
 server is kept as its root URL, any other as its OpenAI base URL, which ends
 in /v1. The kept URL alone then says which client to use (is_openai).
+
+A server that wants a key gets the one kept for it (set_server_key), or else
+the one in IRIS_LLM_API_KEY, as a bearer token.
 """
 
 import json
 import os
+from pathlib import Path
 from typing import Iterator, Optional
 
 import httpx
@@ -21,8 +25,13 @@ import ollama
 
 # Fallback shown when neither a server URL nor OLLAMA_HOST is configured
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-# A key for servers that need one, sent as a bearer token
+# A key for the servers that have none of their own, sent as a bearer token
 API_KEY_ENV = "IRIS_LLM_API_KEY"
+# The keys of the servers that have their own, {server: key}, kept on this
+# computer alone and readable by its user alone
+KEYS_PATH = Path.home() / ".iris" / "server-keys.json"
+# How a server refuses a request without its key
+KEY_WANTED = (401, 403)
 # How long resolve_host waits for a server to say what it is
 PROBE_TIMEOUT = 5.0
 # How long a request to the model waits for the server. Without a limit, a
@@ -74,17 +83,57 @@ def effective_host(host: Optional[str]) -> str:
     return normalize_host(host) or os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_URL
 
 
-def _auth_headers() -> dict:
-    key = os.environ.get(API_KEY_ENV)
+def _server(url: Optional[str]) -> str:
+    """A server as its key is kept for it: the URL as typed, as kept (with
+    /v1) and without its scheme all name the same server."""
+    url = normalize_host(url) or ""
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url if "://" in url or not url else f"http://{url}"
+
+
+def _keys() -> dict[str, str]:
+    try:
+        keys = json.loads(KEYS_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+    return keys if isinstance(keys, dict) else {}
+
+
+def set_server_key(url: str, key: str):
+    """Keep the key a server wants, or with "" forget it. Only this
+    computer's user can read the file it is kept in."""
+    keys = _keys()
+    server, key = _server(url), (key or "").strip()
+    if key:
+        keys[server] = key
+    elif keys.pop(server, None) is None:
+        return
+    KEYS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = KEYS_PATH.with_name(KEYS_PATH.name + ".tmp")
+    temporary.touch(mode=0o600)
+    temporary.chmod(0o600)
+    temporary.write_text(json.dumps(keys, indent=2))
+    temporary.replace(KEYS_PATH)
+
+
+def auth_headers(url: Optional[str]) -> dict:
+    """What a request to the server sends to be let in: the key kept for
+    it, or else the one in IRIS_LLM_API_KEY; nothing without either."""
+    key = _keys().get(_server(url)) or os.environ.get(API_KEY_ENV)
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
-def _answers(url: str, key: str) -> bool:
-    """Whether a GET of the URL returns JSON holding this key. Raises
+def _answers(server: str, path: str, key: str) -> Optional[bool]:
+    """Whether a GET of the server's path returns JSON holding this key;
+    None when the server wants a key it was not given. Raises
     httpx.TransportError when nothing answers at all."""
     response = httpx.get(
-        url, timeout=PROBE_TIMEOUT, headers=_auth_headers(), follow_redirects=True
+        f"{server}{path}", timeout=PROBE_TIMEOUT, headers=auth_headers(server),
+        follow_redirects=True,
     )
+    if response.status_code in KEY_WANTED:
+        return None
     if response.status_code != 200:
         return False
     try:
@@ -100,8 +149,9 @@ def resolve_host(url: Optional[str]) -> Optional[str]:
 
     The server is asked what it is: Ollama answers /api/version. A URL given
     with /v1 is otherwise taken as OpenAI-compatible; one without is
-    OpenAI-compatible if /v1/models answers. A server that does not answer
-    keeps the URL as given, and is asked again next time.
+    OpenAI-compatible if /v1/models answers, or wants a key there. A server
+    that does not answer, or wants a key it was not given, keeps the URL as
+    given (with /v1 if it wants a key), and is asked again next time.
     """
     url = normalize_host(url)
     if not url:
@@ -110,14 +160,15 @@ def resolve_host(url: Optional[str]) -> Optional[str]:
         return _resolved[url]
     root = url[: -len("/v1")] if url.endswith("/v1") else url
     try:
-        if _answers(f"{root}/api/version", "version"):
+        if _answers(root, "/api/version", "version"):
             resolved = root
         elif url.endswith("/v1"):
             resolved = url
-        elif _answers(f"{url}/v1/models", "data"):
-            resolved = f"{url}/v1"
         else:
-            resolved = url
+            models = _answers(url, "/v1/models", "data")
+            if models is None:
+                return f"{url}/v1"
+            resolved = f"{url}/v1" if models else url
     except httpx.TransportError:
         return url
     _resolved[url] = resolved
@@ -245,7 +296,9 @@ class OpenAIClient:
             transport: How requests are sent (tests answer them themselves)
         """
         self.base = normalize_host(host)
-        self._client = httpx.Client(timeout=timeout, headers=_auth_headers(), transport=transport)
+        self._client = httpx.Client(
+            timeout=timeout, headers=auth_headers(self.base), transport=transport
+        )
         self._models: Optional[dict[str, dict]] = None
         # Set once the server has refused a request because of its tools
         self.tools_refused = False
@@ -274,10 +327,23 @@ class OpenAIClient:
             models=[ollama.ListResponse.Model(model=name) for name in self._models]
         )
 
+    def loaded(self) -> Optional[str]:
+        """The model the server answers with whatever model a request names,
+        when it says it has one: MTPLX lists the one model it has loaded, as
+        its own (owned_by "mtplx"). None for a server that answers with the
+        model asked for."""
+        if self._models is None:
+            self.list()
+        for name, entry in self._models.items():
+            if entry.get("owned_by") == "mtplx" and entry.get("capability", "chat") == "chat":
+                return name
+        return None
+
     def show(self, model: str) -> ollama.ShowResponse:
         """What the server tells of a model: its context length when it says,
         that it holds conversations and, unless refused, calls tools, and
-        that it sees images when it says so."""
+        that it sees images when it says so (as capabilities, as input
+        modalities, a list or {"input": [...]}, or as supports_vision)."""
         if self._models is None or model not in self._models:
             self.list()
         entry = self._models.get(model)
@@ -289,10 +355,11 @@ class OpenAIClient:
                 modelinfo["context_length"] = entry[key]
                 break
         capabilities = ["completion"] if self.tools_refused else ["completion", "tools"]
-        declared = list(entry.get("capabilities") or []) + list(
-            entry.get("input_modalities") or entry.get("modalities") or []
-        )
-        if "vision" in declared or "image" in declared:
+        modalities = entry.get("input_modalities") or entry.get("modalities") or []
+        if isinstance(modalities, dict):
+            modalities = modalities.get("input") or []
+        declared = list(entry.get("capabilities") or []) + list(modalities)
+        if "vision" in declared or "image" in declared or entry.get("supports_vision") is True:
             capabilities.append("vision")
         return ollama.ShowResponse(
             model_info=modelinfo, details={"family": ""}, capabilities=capabilities

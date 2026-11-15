@@ -12,12 +12,15 @@ download code itself, with the network replaced by stand-ins, is marked
 Whether a voice is ready to speak a language depends on what this computer
 has downloaded, so every voice counts as ready here, unless a test of
 readiness itself, marked `readiness`, has its own stand-ins say what is.
+
+The keys model servers want are kept in each test's own folder, never in the
+user's.
 """
 
 import huggingface_hub.constants as hf_constants
 import pytest
 
-from iris import downloads
+from iris import downloads, llm_client
 from iris.tts import KokoroGenerator, PocketGenerator
 
 
@@ -49,3 +52,8 @@ def voices_ready(request, monkeypatch):
         return
     for engine in (PocketGenerator, KokoroGenerator):
         monkeypatch.setattr(engine, "ready", classmethod(lambda cls, *args, **kwargs: True))
+
+
+@pytest.fixture(autouse=True)
+def server_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(llm_client, "KEYS_PATH", tmp_path / ".iris" / "server-keys.json")

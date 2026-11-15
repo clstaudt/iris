@@ -31,7 +31,7 @@ from iris.personas import (
     voice_in_use,
     voice_users,
 )
-from iris.llm_client import is_openai, resolve_host
+from iris.llm_client import is_openai, resolve_host, set_server_key
 from iris.roles import delete_role, find_role, reload_roles, save_role
 from iris.plugins import load as load_plugins
 from iris.plugins import plugin_dir
@@ -1429,6 +1429,13 @@ class AssistantController:
         return {"models": ConversationManager.list_available_models(self._ollama_host)}
 
     @staticmethod
+    def set_key(url: str, key: str) -> dict:
+        """Keep the key a model server wants ("" forgets it), on this
+        computer alone: it is sent to that server only, and never told."""
+        set_server_key(str(url or ""), str(key or ""))
+        return {"ok": True}
+
+    @staticmethod
     def check_servers(urls: list) -> dict:
         """Which of these model servers answer ("" is the default one)."""
         return {"servers": servers.check([str(url) for url in urls or []])}
@@ -1481,7 +1488,8 @@ class AssistantController:
                 e for e in self._transcript if e["data"].get("kind") != "model_missing"
             ]
         self.bus.emit("config", self.assistant.config_info())
-        return {"ok": True, "model": name}
+        # A server with one model loaded answers with it, whatever was chosen
+        return {"ok": True, "model": self.assistant.conversation.model}
 
     def list_input_devices(self) -> dict:
         """List available microphones."""
