@@ -161,7 +161,7 @@ def test_a_sleep_word_in_another_language_puts_iris_to_sleep(monkeypatch):
     felix = Persona("Felix", "Dry.", voice="juergen", sleep_word="Gute Nacht")
     a = _iris(monkeypatch, "Gute Nacht, Felix.", sleep_word="Gute Nacht", persona=felix)
     a.wake_word = None
-    a.transcriber.transcribe = lambda path: ("Gute Nacht, Felix.", "de")
+    a.transcriber.transcribe = lambda path, *languages: ("Gute Nacht, Felix.", "de")
     a._handle_heard("/clip.wav", dormant=False)
     assert a.replies == [] and a.dormant
 

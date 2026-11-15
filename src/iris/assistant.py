@@ -292,6 +292,11 @@ class VoiceAssistant:
     # persona's voice speaks but is not ready for: the app makes it ready,
     # where the user sees it (iris.readiness)
     on_voice_not_ready: Optional[Callable[[str, str, str], None]] = None
+    # Whether the user has spoken or typed in the conversation's language
+    # yet: until then Whisper goes by what it hears alone
+    _language_known = False
+    # Iris's languages, as the user chose them in the app; None for any
+    chosen_languages: Optional[frozenset[str]] = None
 
     def __init__(
         self,
@@ -1198,6 +1203,7 @@ class VoiceAssistant:
             if self.memory:
                 self.memory.store.forget_all()
             self.conversation_language = "en"
+            self._language_known = False
             if self.event_bus:
                 self.event_bus.emit("memory.forgotten", {})
         finally:
@@ -1221,6 +1227,7 @@ class VoiceAssistant:
         self.conversation_language = language.language_of(
             text, self.conversation_language, self.tts_generator.languages()
         )
+        self._language_known = True
         self._timing = TurnTiming("text", components=self._timing_components())
         if self.event_bus:
             event = {
@@ -1275,7 +1282,13 @@ class VoiceAssistant:
         # Its first syllable: the recording ends as the turn is taken (with
         # the silence waited for), and begins PRE_SPEECH before it
         turn_began = recognizing - _seconds_of(audio_path) + PRE_SPEECH
-        text, detected_language = self.transcriber.transcribe(audio_path)
+        # What the user says is written in the conversation's language unless
+        # Whisper clearly hears another: an accent can fool it
+        text, detected_language = self.transcriber.transcribe(
+            audio_path,
+            self.conversation_language if self._language_known else None,
+            self.chosen_languages,
+        )
         self._timing = TurnTiming(
             "voice",
             turn_end=turn_wait,
@@ -1314,6 +1327,7 @@ class VoiceAssistant:
         spoken = language.language_of(text, detected_language, self.tts_generator.languages())
         if spoken in self.tts_generator.languages():
             self.conversation_language = spoken
+        self._language_known = True
         response_language = self.conversation_language
 
         self._announced = True

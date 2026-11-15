@@ -1704,9 +1704,13 @@ class AssistantController:
         persona's voice is made ready for each of them, ahead, with progress
         (voice.job events). They never hold a conversation to them: Iris
         follows the user into any of its languages, and a voice not ready
-        for one is made ready when a reply comes to it."""
+        for one is made ready when a reply comes to it. Whisper leaves the
+        conversation's language for one of them more readily than for
+        another (iris.transcription.language_heard)."""
         wanted = {code for code in (codes or []) if code in LANGUAGE_NAMES} | {"en"}
         self.languages = in_order(wanted)
+        if self.assistant:
+            self.assistant.chosen_languages = frozenset(self.languages)
         return {"ok": True, "languages": self.languages, "jobs": self._ready_personas()}
 
     def _ready_personas(self, origin: str = readiness.LANGUAGES, only: set | None = None) -> list:
