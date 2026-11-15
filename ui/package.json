@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Electron UI shell for the Iris voice assistant",
   "author": "Christian Staudt",
-  "license": "GPL-3.0-or-later",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {

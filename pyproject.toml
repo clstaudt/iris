@@ -3,7 +3,7 @@ name = "iris"
 version = "0.1.0"
 description = "A modular voice and vision assistant, used through its desktop app"
 readme = "README.md"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.11,<3.14"
 dependencies = [
