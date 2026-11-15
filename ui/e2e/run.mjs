@@ -2102,9 +2102,15 @@ try {
     }
   }
 
+  /** Iris replies to nothing, as the app sees it: there is no Stop to
+   *  press, and so no question before a switch */
+  const atRest = () =>
+    until("Iris at rest", async () => !(await page.locator('button[title="Stop the current reply"]').count()), 60_000);
+
   /** Open a thread from the sidebar, as it was left shown or hidden. */
   async function openThread(id) {
     await toConversation();
+    await atRest();
     const shown = (await sidebar.count()) > 0;
     await showThreads(true);
     await threadItem(id).locator("button.open").click();
@@ -2115,6 +2121,7 @@ try {
   /** A new thread from the sidebar, with a persona chosen on its tile. */
   async function newThreadWith(name) {
     await showThreads(true);
+    await atRest();
     await sidebar.locator("button.new").click();
     await until("the personas", () => personaTiles.count(), 10_000);
     await personaTile(name).locator("button.pick").click();
@@ -2164,6 +2171,7 @@ try {
   });
 
   await step("threads: a new thread starts from its empty screen, with a persona chosen and heard", async () => {
+    await atRest();
     await sidebar.locator("button.new").click();
     await until("the personas", async () => (await personaTiles.count()) >= 3, 10_000);
     check(await personaTile("Iris").evaluate((el) => el.classList.contains("active")), "Iris is not chosen at first");
@@ -2182,14 +2190,16 @@ try {
     check(config().wake_word === "HAL", `HAL is woken by ${config().wake_word}`);
     // The first message starts the thread
     const known = new Set((await threads()).threads.map((t) => t.id));
+    const isNew = (call) => call.method === "threads.list" && call.result?.threads?.some((t) => !known.has(t.id));
     const typed = await ask(FIRST);
-    // Listed the moment it is sent, before the reply ends
-    const listedAt = await until("the thread to be listed", async () => {
-      const ids = await sidebar.locator(".item").evaluateAll((items) => items.map((i) => Number(i.dataset.thread)));
-      return ids.some((id) => !known.has(id)) && Date.now();
-    }, 30_000);
+    // Listed the moment it is sent: the app had it before the reply ended
     const done = await eventAfter("chat.done", typed, () => true, 180_000);
-    check(listedAt < done.at, "the thread was listed only once the reply was done");
+    const fetched = calls.find((call) => call.at >= typed && isNew(call));
+    check(fetched && fetched.at < done.at, "the thread was listed only once the reply was done");
+    await until("the thread in the sidebar", async () => {
+      const ids = await sidebar.locator(".item").evaluateAll((items) => items.map((i) => Number(i.dataset.thread)));
+      return ids.some((id) => !known.has(id));
+    }, 10_000);
     check(done.data.text.trim(), "HAL did not answer");
     await voiceDone();
     const listed = await stored(firstThread);
@@ -2228,7 +2238,7 @@ try {
     await page.locator('button[title="Close memory"]').click();
     // HAL's file, edited while Iris speaks, is taken on as his thread opens
     const hal = await rpc("persona.get", { id: "hal" });
-    const halFile = path.join(home, ".iris", "personas", "hal.yaml");
+    const halFile = path.join(coreHome, ".iris", "personas", "hal.yaml");
     const edit = "Speak like a test persona.";
     fs.mkdirSync(path.dirname(halFile), { recursive: true });
     fs.writeFileSync(halFile, ["name", "engine", "voice", "speed"].map((key) => `${key}: ${JSON.stringify(hal[key])}`)
@@ -2522,6 +2532,7 @@ try {
     // A thread with HAL, which a restart opens again
     const irisThread = (await rpc("threads.list")).open;
     await toConversation();
+    await atRest();
     await page.locator('button[title="Threads"]').click();
     await page.locator('aside[aria-label="Threads"] button.new').click();
     await page.locator('[aria-label="Persona"] .tile', { hasText: "HAL" }).locator("button.pick").click();
