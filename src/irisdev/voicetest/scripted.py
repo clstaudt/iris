@@ -26,7 +26,7 @@ from typing import Callable, Optional
 import numpy as np
 import soundfile as sf
 
-from iris.assistant import DEFAULT_WAKE_WINDOW, _sleep_chime, _wake_chime
+from iris.assistant import DEFAULT_WAKE_WINDOW, _sleep_chime, _thinking_tone, _wake_chime
 from irisdev.voicetest.acoustics import (
     AUDIBLE,
     RATE,
@@ -117,12 +117,17 @@ REPEAT_SLACK = 0.05
 EITHER_ANSWER = 1.0
 # Sentences run together in a reply: "up.In"
 GLUED = re.compile(r"[.!?][A-Za-z]")
-# The chimes Iris plays when it wakes and falls asleep, as a speaker records them
-CHIMES = {"rising": to_rate(_wake_chime(), 24000), "falling": to_rate(_sleep_chime(), 24000)}
+# The chimes Iris plays when it wakes and falls asleep, and the tone it sounds
+# while a reply is long in coming, as a speaker records them
+CHIMES = {
+    "rising": to_rate(_wake_chime(), 24000),
+    "falling": to_rate(_sleep_chime(), 24000),
+    "thinking": to_rate(_thinking_tone(), 24000),
+}
 
 
 def chime_of(clip: Clip) -> Optional[str]:
-    """"rising" or "falling" if the clip is one of Iris's chimes."""
+    """"rising", "falling" or "thinking" if the clip is one of Iris's chimes."""
     for name, chime in CHIMES.items():
         if abs(len(clip.audio) - len(chime)) <= 2:
             n = min(len(clip.audio), len(chime))
@@ -1274,7 +1279,7 @@ class ScriptedConversations:
                 break
         acted = [moment for moment, _ in running.actions]
         if result.spoke:
-            for clip in speaker.clips_between(first, end):
+            for clip in self._reply_clips(first, end):
                 cut = clip.stopped
                 if cut is None or cut >= end or any(abs(cut - moment) < 1.0 for moment in acted):
                     continue

@@ -2112,6 +2112,25 @@ try {
     }
   });
 
+  await step("thinking: a soft tone sounds now and then while a reply is long in coming, and stops as Iris speaks", async () => {
+    // The model is asked only 13 s after the message (irisdev/e2e_core.py),
+    // as one that thinks long before its first word: a tone about 4 s into
+    // the silence, then one about every 6 s
+    const question = "Reply with exactly: here I am.";
+    await rpc("e2e.slow_reply", { to: question, seconds: 13 });
+    const since = await ask(question);
+    const done = await replyEvent("chat.done", since);
+    check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
+    await until("the reply's voice at the speaker", async () => (await rpc("e2e.speaker", { since })).voice, 60_000);
+    await voiceDone();
+    const played = await rpc("e2e.speaker", { since });
+    const waiting = played.tones.filter((at) => at < played.voice);
+    check(waiting.length >= 2, `${waiting.length} tones while the reply was long in coming`);
+    check(waiting[0] - since >= 3500, `the first tone came ${waiting[0] - since} ms after the message`);
+    check(waiting[1] - waiting[0] >= 5000, `the tones came ${waiting[1] - waiting[0]} ms apart`);
+    check(played.tones.length === waiting.length, `${played.tones.length - waiting.length} tones once Iris spoke`);
+  });
+
   await step("a speaker that cannot be opened is told once, and Iris goes on: Pause, Resume and a preview work after", async () => {
     // As when AirPods disconnect under PortAudio
     fs.writeFileSync(AUDIO_FAULTS, JSON.stringify({ speaker: "broken" }));

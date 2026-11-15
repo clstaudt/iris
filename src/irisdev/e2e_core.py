@@ -26,10 +26,14 @@ The test looks into the core through methods of its own:
 
 - e2e.speaker {since, until}: how much sound the virtual speaker played
   between two moments, so the test knows a voice was heard, not only that
-  the core reported its level;
+  the core reported its level, and when the tones Iris sounds while it
+  thinks were played, and the first clip besides them;
 - e2e.model: when the model's streamed replies came in, its reasoning
   included, which the app is never shown: a reasoning model may think for
   minutes before it writes a word;
+- e2e.slow_reply {to, seconds}: the model is asked for the reply to the
+  message that holds this text only so many seconds later, as a model that
+  thinks long before its first word;
 - e2e.file_memory: files the conversation into topics now, as Iris does once
   it has been quiet for a while, so the test need not wait for that;
 - e2e.memory: what the core remembers (the turns and topics stored, the words
@@ -70,6 +74,7 @@ from iris.controller import AssistantController
 from iris.memory import DEFAULT_PATH
 from iris.plugins import camera
 from irisdev.voicetest.acoustics import Space
+from irisdev.voicetest.scripted import chime_of
 
 # The token the test logs in with, the file where it says what the account
 # did, and the voice every sample becomes
@@ -247,16 +252,26 @@ def _monotonic(moment_ms: float) -> float:
     return time.monotonic() - (time.time() - moment_ms / 1000)
 
 
+def _test_ms(moment: float) -> int:
+    """A moment of time.monotonic() on the test's clock."""
+    return round((time.time() - (time.monotonic() - moment)) * 1000)
+
+
 def speaker(params: dict) -> dict:
     """How much sound the laptop's speaker played between two moments
-    (since, and until or now): the seconds it was audible, and the clips it
-    was given."""
+    (since, and until or now): the seconds it was audible, the clips it was
+    given, when the tones Iris sounds while it thinks began to be heard, and
+    when the first clip besides the chimes and tones did (None for none)."""
     start = _monotonic(float(params.get("since") or 0))
     end = _monotonic(float(params["until"])) if params.get("until") else time.monotonic()
     played = LAPTOP.speaker
+    clips = played.clips_between(start, end)
+    others = [clip.started for clip in clips if not chime_of(clip)]
     return {
         "seconds": round(played.sound_heard(start, end), 3),
-        "clips": len(played.clips_between(start, end)),
+        "clips": len(clips),
+        "tones": [_test_ms(clip.started) for clip in clips if chime_of(clip) == "thinking"],
+        "voice": _test_ms(others[0]) if others else None,
     }
 
 
@@ -323,12 +338,52 @@ def without_reasoning(path: str, body: dict) -> dict:
     return body
 
 
+# The reply that waits before the model is asked for it (e2e.slow_reply):
+# to the message holding this text, and for how long
+SLOW = {"to": None, "seconds": 0.0}
+_slow_lock = threading.Lock()
+
+
+def slow_reply(params: dict) -> dict:
+    """Ask the model for the reply to the message that holds this text
+    ({"to"}) only so many seconds later ({"seconds"}), once."""
+    with _slow_lock:
+        SLOW.update(to=params.get("to") or None, seconds=float(params.get("seconds") or 0))
+    return {"ok": True}
+
+
+def _asked_last(body: dict) -> str:
+    """The last message from the user a chat request carries."""
+    messages = [m for m in body.get("messages") or [] if isinstance(m, dict)]
+    users = [m for m in messages if m.get("role") == "user"]
+    content = users[-1].get("content") if users else ""
+    return content if isinstance(content, str) else ""
+
+
+def _wait_if_slow(path: str, body: dict):
+    """Hold the request for the reply e2e.slow_reply named."""
+    if not path.endswith(CHAT_PATHS):
+        return
+    with _slow_lock:
+        if not SLOW["to"] or SLOW["to"] not in _asked_last(body):
+            return
+        seconds = SLOW["seconds"]
+        SLOW.update(to=None, seconds=0.0)
+    time.sleep(seconds)
+
+
 _build_request = httpx.Client.build_request
 
 
-def _built_without_reasoning(self, method, url, *args, **kwargs):
-    if REASONING["off"] and isinstance(kwargs.get("json"), dict):
-        kwargs["json"] = without_reasoning(httpx.URL(url).path, kwargs["json"])
+def _built_for_the_test(self, method, url, *args, **kwargs):
+    """A request as the test has it: without reasoning, and held when it
+    is the slow reply's."""
+    body = kwargs.get("json")
+    if isinstance(body, dict):
+        path = httpx.URL(url).path
+        _wait_if_slow(path, body)
+        if REASONING["off"]:
+            kwargs["json"] = without_reasoning(path, body)
     return _build_request(self, method, url, *args, **kwargs)
 
 
@@ -406,13 +461,14 @@ def main():
     # Both Ollama's client and Iris's own for other servers read a streamed
     # reply line by line, and build each request through httpx
     httpx.Response.iter_lines = _watched_lines
-    httpx.Client.build_request = _built_without_reasoning
+    httpx.Client.build_request = _built_for_the_test
     rpc_server.AssistantController = Controller
     rpc_server.main(
         {
             "e2e.speaker": speaker,
             "e2e.model": MODEL.report,
             "e2e.reasoning": reasoning,
+            "e2e.slow_reply": slow_reply,
             "e2e.file_memory": file_memory,
             "e2e.memory": remembered,
             "e2e.camera": CAMERA.report,

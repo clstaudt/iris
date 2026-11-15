@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from irisdev.voicetest.assistant import AssistantUnderTest, finished
-from irisdev.voicetest.scripted import heard_share
+from irisdev.voicetest.scripted import chime_of, heard_share
 
 # A speaker's sounds less than this apart are one reply
 REPLY_GAP = 1.2
@@ -112,7 +112,7 @@ class SelfTalk:
         )
         for speaker, other in pairs:
             cuts = [c.stopped for c in speaker.endpoint.speaker.clips_between(start, end)
-                    if c.stopped is not None and c.stopped < end - 1]
+                    if c.stopped is not None and c.stopped < end - 1 and not chime_of(c)]
             spoke = [other.endpoint.speaker.audible(t) for t in cuts]
             result.interrupted[speaker.name] = sum(spoke)
             result.self_cuts[speaker.name] = len(cuts) - sum(spoke)
