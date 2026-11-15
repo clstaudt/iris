@@ -82,8 +82,7 @@ export interface ThreadInfo {
   /** The persona's id, Iris for one whose persona is gone */
   persona: string;
   persona_name: string;
-  /** Its earliest topic once memory has filed one, else the user's first
-   *  words; "" until the user has said anything */
+  /** Its earliest topic's, once memory has filed one; "" until then */
   title: string;
   created: number;
   /** When it was last talked in (seconds since the epoch) */
@@ -364,8 +363,10 @@ export interface SavedSettings {
   persona?: string;
   /** The thread Iris is in, to open again; null for a new one */
   thread?: number | null;
-  /** Whether the threads are shown beside the conversation */
+  /** Whether the threads are shown beside the conversation, and whether
+   *  as a narrow strip of rings */
   sidebar?: boolean;
+  sidebar_strip?: boolean;
   input_device?: string;
   speak_replies?: boolean;
   /** Speaking interrupts the voice */
@@ -499,8 +500,12 @@ class IrisStore {
   openThread = $state<number | null>(null);
   /** The threads are shown beside the conversation */
   sidebar = $state(loadSettings().sidebar ?? false);
+  /** Shown, the threads are a narrow strip of their rings */
+  sidebarStrip = $state(loadSettings().sidebar_strip ?? false);
   /** A new thread was asked for: its persona is chosen until something is said */
   choosing = $state(false);
+  /** A switch of thread asked for while Iris replies, to be confirmed */
+  switchAsked = $state<{ open?: number; persona?: string; choose?: boolean } | null>(null);
   /** Turns the core keeps, filed under a topic or not yet */
   memoryTurns = $state(0);
   /** The walkthrough is shown instead of the conversation: on the first
@@ -892,20 +897,42 @@ class IrisStore {
     return this.threads.find((t) => t.id === this.openThread) ?? null;
   }
 
-  /** Go on in another thread: its persona and its memory. */
-  async openThreadById(id: number) {
-    this.choosing = false;
+  /** Go on in another thread: its persona and its memory. While Iris
+   *  replies, which that stops, it is asked first (switchAsked). */
+  async openThreadById(id: number, { confirmed = false } = {}) {
     if (this.settingsPage) this.settingsPage = null;
-    if (id === this.openThread) return;
+    if (id === this.openThread) {
+      this.choosing = false;
+      return;
+    }
+    if (this.busy && !confirmed) {
+      this.switchAsked = { open: id };
+      return;
+    }
+    this.choosing = false;
     await rpc("threads.open", { id });
   }
 
   /** A new thread with a persona: Iris unless another is chosen. Choosing,
-   *  its persona can be picked until something is said. */
-  async newThread(persona = "iris", { choose = true } = {}) {
-    this.choosing = choose;
+   *  its persona can be picked until something is said. While Iris
+   *  replies, which that stops, it is asked first (switchAsked). */
+  async newThread(persona = "iris", { choose = true, confirmed = false } = {}) {
     this.settingsPage = null;
+    if (this.busy && !confirmed) {
+      this.switchAsked = { persona, choose };
+      return;
+    }
+    this.choosing = choose;
     await rpc("threads.new", { persona });
+  }
+
+  /** Go on with the switch asked for while Iris replied, or not. */
+  async answerSwitch(confirmed: boolean) {
+    const asked = this.switchAsked;
+    this.switchAsked = null;
+    if (!asked || !confirmed) return;
+    if (asked.open !== undefined) await this.openThreadById(asked.open, { confirmed: true });
+    else await this.newThread(asked.persona, { choose: asked.choose, confirmed: true });
   }
 
   /** Forget a thread with its memory; the open one leaves a new thread. */
@@ -917,6 +944,12 @@ class IrisStore {
   toggleSidebar() {
     this.sidebar = !this.sidebar;
     saveSettings({ sidebar: this.sidebar });
+  }
+
+  /** The threads as a narrow strip of rings, or listed in full. */
+  toggleSidebarStrip() {
+    this.sidebarStrip = !this.sidebarStrip;
+    saveSettings({ sidebar_strip: this.sidebarStrip });
   }
 
   /** Open the persona editor on a persona, or on a new one (no id). */
