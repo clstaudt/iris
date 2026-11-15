@@ -46,7 +46,7 @@ from iris.cloning import (
 )
 from iris.controller import AssistantController
 from iris.events import EventBus
-from iris.tts import PocketGenerator, SpeechGenerator
+from iris.tts import PocketGenerator, SpeechGenerator, SpeechPipeline
 
 TOKEN = "hf_stand_in_secret_0123456789"
 
@@ -601,6 +601,154 @@ def test_a_chosen_file_makes_a_voice(kyutai, heard_by_energy):
 
     assert service.use_file(data, "grandpa.wav")["ok"]
     assert service.clone("Klaus")["voice"]["id"] == "clone:klaus"
+
+
+def _prepared(service, seconds=8.0) -> dict:
+    result = service.use_file(base64.b64encode(wav(speech(seconds))).decode(), "sample.wav")
+    assert result["ok"], result
+    return result
+
+
+def test_a_sample_prepared_is_no_voice_until_it_is_confirmed(kyutai, heard_by_energy):
+    """Choosing a file, or ending a recording, only prepares the sample: the
+    voice is made of it once the user confirms, by the sample's id."""
+    kyutai.files.add(cloning_weights("english"))
+    service = Cloning(lambda t, d: None)
+
+    prepared = _prepared(service)
+
+    assert prepared["sample"] and 7 < prepared["seconds"] < 9
+    assert cloned_voices() == [] and not any(cloning.voices_dir().iterdir())
+    assert kyutai.loaded == []
+    made = service.clone("Ada", sample=prepared["sample"])
+    assert made["ok"] and made["voice"]["id"] == "clone:ada"
+    # Used up: it is not cloned twice
+    assert service.clone("Ada", sample=prepared["sample"])["ok"] is False
+    assert [v["id"] for v in cloned_voices()] == ["clone:ada"]
+
+
+def test_a_sample_dropped_leaves_nothing_behind(kyutai, heard_by_energy):
+    """Back or Cancel, before the clone is confirmed: no voice, no folder,
+    and the sample cannot be cloned after."""
+    kyutai.files.add(cloning_weights("english"))
+    service = Cloning(lambda t, d: None)
+    prepared = _prepared(service)
+
+    assert service.drop(prepared["sample"]) == {"ok": True}
+
+    assert service.clone("Ada", sample=prepared["sample"])["ok"] is False
+    assert service.clone("Ada")["ok"] is False
+    assert service.sample_file(prepared["sample"]) is None
+    assert cloned_voices() == [] and not any(cloning.voices_dir().iterdir())
+
+
+def test_each_sample_is_cloned_by_its_own_id(kyutai, heard_by_energy):
+    """Two clones open at once (on the Voices page, one per voice): each
+    confirms its own sample, whichever was prepared last."""
+    kyutai.files.add(cloning_weights("english"))
+    service = Cloning(lambda t, d: None)
+    short, long = _prepared(service, 7.0), _prepared(service, 12.0)
+    assert short["sample"] != long["sample"]
+
+    assert service.clone("Ada", sample=short["sample"])["ok"]
+    assert service.clone("Bea", sample=long["sample"])["ok"]
+
+    def seconds(voice: str) -> float:
+        return sf.info(voice_folder(voice) / cloning.SAMPLE_FILE).duration
+
+    assert seconds("clone:ada") == pytest.approx(short["seconds"], abs=0.1)
+    assert seconds("clone:bea") == pytest.approx(long["seconds"], abs=0.1)
+
+
+def test_a_sample_that_could_not_be_cloned_is_kept_to_try_again(kyutai, heard_by_energy):
+    kyutai.terms = False
+    service = Cloning(lambda t, d: None)
+    prepared = _prepared(service)
+    assert service.clone("Ada", sample=prepared["sample"])["access"] is True
+
+    kyutai.terms = True
+    assert service.clone("Ada", sample=prepared["sample"])["ok"]
+
+
+def test_only_the_latest_samples_are_kept(kyutai, heard_by_energy):
+    service = Cloning(lambda t, d: None)
+    samples = [_prepared(service)["sample"] for _ in range(cloning.SAMPLES_KEPT + 1)]
+    assert service.sample_file(samples[0]) is None
+    assert all(service.sample_file(sample) is not None for sample in samples[1:])
+
+
+def test_a_sample_is_heard_from_a_file_of_its_own(kyutai, heard_by_energy):
+    service = Cloning(lambda t, d: None)
+    prepared = _prepared(service)
+
+    path = service.sample_file(prepared["sample"])
+
+    audio, rate = sf.read(path)
+    assert rate == cloning.RATE
+    assert len(audio) / rate == pytest.approx(prepared["seconds"], abs=0.1)
+    assert path.parent != cloning.voices_dir()
+    path.unlink()
+    assert service.sample_file("sample-unknown") is None
+
+
+def test_cloning_tells_the_languages_whose_cloning_model_is_here(kyutai):
+    kyutai.files.update({cloning_weights("english"), cloning_weights("german")})
+    service = Cloning(lambda t, d: None)
+    assert service.access()["downloaded"] == ["en", "de"]
+    assert service.connect(TOKEN)["downloaded"] == ["en", "de"]
+
+
+class PlayedPlayer:
+    """The speaker: what it was given to play, and with which filter."""
+
+    def __init__(self):
+        self.played: list[tuple[str, dict]] = []
+
+    def play(self, audio_file, on_level=None, cancelled=None, **effect):
+        self.played.append((Path(audio_file).read_bytes(), effect))
+
+    def stop(self):
+        pass
+
+    def progress(self):
+        return 1.0
+
+
+def test_a_sample_plays_as_it_is_and_is_no_part_of_a_reply(kyutai, heard_by_energy):
+    """Through the speech pipeline, as a preview: no voice says it, the
+    persona's effect is not put on it, and the file goes once played."""
+    service = Cloning(lambda t, d: None)
+    path = service.sample_file(_prepared(service)["sample"])
+    sample = path.read_bytes()
+    player = PlayedPlayer()
+    pipeline = SpeechPipeline(SimpleNamespace(generate=lambda *a, **k: None), player)
+    pipeline.begin_reply()
+
+    pipeline.queue_audio(path)
+    pipeline.wait_for_speech()
+
+    assert player.played == [(sample, {"audio_filter": None})]
+    assert pipeline.said() == "" and not path.exists()
+
+
+def test_the_app_plays_a_sample_through_iriss_voice_and_stops_it(kyutai, heard_by_energy):
+    controller = AssistantController(EventBus())
+    pipeline = SimpleNamespace(stopped=0, queued=[])
+    pipeline.stop = lambda: setattr(pipeline, "stopped", pipeline.stopped + 1)
+    pipeline.queue_audio = pipeline.queued.append
+    controller.assistant = SimpleNamespace(speech_pipeline=pipeline)
+    prepared = _prepared(controller.cloning)
+
+    assert controller.voice_sample_play(prepared["sample"]) == {"ok": True}
+    # What was said is cut off first
+    assert pipeline.stopped == 1 and len(pipeline.queued) == 1
+    assert sf.info(pipeline.queued[0]).duration == pytest.approx(prepared["seconds"], abs=0.1)
+    assert controller.voice_sample_play(on=False) == {"ok": True}
+    assert pipeline.stopped == 2
+    refused = controller.voice_sample_play("sample-unknown")
+    assert refused["ok"] is False and len(pipeline.queued) == 1
+    controller.assistant = None
+    pipeline.queued[0].unlink()
 
 
 def test_a_short_file_or_no_audio_is_refused(kyutai, heard_by_energy):

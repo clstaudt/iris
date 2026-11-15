@@ -241,6 +241,8 @@ class AssistantController:
         self.cloning = cloning.Cloning(
             bus.emit, lambda: self.assistant, self.interrupt, voice_in_use, self._voice_changed
         )
+        # What plays a sample before Iris runs
+        self._sample_player: AudioPlayer | None = None
         # Iris's languages, as chosen in the app: every persona's voice is
         # made ready for them ahead. They do not hold a conversation to them
         self.languages: list[str] = ["en"]
@@ -1724,17 +1726,21 @@ class AssistantController:
         return {"ok": job is not None, "job": job}
 
     def voice_clone(self, params: dict) -> dict:
-        """Make a cloned voice of the sample prepared (see Cloning.clone),
-        then for the languages chosen with it and Iris's own, which its
-        personas will speak: those jobs come back, for the clone to finish
-        once they have."""
-        result = self.cloning.clone(params.get("name", ""), params.get("replace", ""))
+        """Make a cloned voice of a sample prepared (see Cloning.clone), once
+        the user confirms it, then for the languages chosen with it (Iris's
+        own when none are named), English always: those jobs come back, for
+        the clone to finish once they have. A language whose cloning model
+        is not here downloads it first, shown as its job."""
+        result = self.cloning.clone(
+            params.get("name", ""), params.get("replace", ""), params.get("sample", "")
+        )
         if not result.get("ok"):
             return result
         voice = result["voice"]["id"]
         named = (params.get("name") or "").strip()
         names = [persona.name for persona in speaking_with(voice)] or ([named] if named else [])
-        codes = in_order(set(params.get("languages") or []) | set(self.languages))
+        chosen = params.get("languages")
+        codes = in_order({"en", *(self.languages if chosen is None else chosen)})
         jobs = []
         for code in codes:
             job = self.readier.request(
@@ -1743,6 +1749,49 @@ class AssistantController:
             if job is not None:
                 jobs.append(job)
         return {**result, "jobs": jobs}
+
+    def voice_sample_play(self, sample: str = "", on: bool = True) -> dict:
+        """Play a sample prepared for cloning, as the voice would be made of
+        it, cutting off whatever is being said; or stop it (on false). It
+        goes through the speech pipeline, as a preview does, so the
+        microphone does not take it for the user; before Iris runs, it
+        plays on the speaker alone."""
+        if not on:
+            if self.assistant is not None:
+                self.assistant.speech_pipeline.stop()
+            if self._sample_player is not None:
+                self._sample_player.stop()
+            return {"ok": True}
+        path = self.cloning.sample_file(sample)
+        if path is None:
+            return {"ok": False, "error": "Record a sample or choose one first"}
+        if self.assistant is not None:
+            pipeline = self.assistant.speech_pipeline
+            pipeline.stop()
+            pipeline.queue_audio(path)
+            return {"ok": True}
+        if self._sample_player is not None:
+            self._sample_player.stop()
+        player = self._sample_player = AudioPlayer()
+
+        def play():
+            self._publish_state("speaking")
+            try:
+                player.play(
+                    str(path),
+                    on_level=lambda level: self.bus.emit("audio.output", {"rms": level}),
+                    audio_filter=None,
+                )
+            except Exception as e:
+                self.bus.emit("error", {"message": f"The sample could not be played: {brief(e)}"})
+            finally:
+                path.unlink(missing_ok=True)
+                # Unless Iris has started meanwhile, which says what it is doing
+                if self.assistant is None:
+                    self._publish_state("idle")
+
+        threading.Thread(target=play, daemon=True).start()
+        return {"ok": True}
 
     def voice_delete(self, voice: str, reassign: bool = False) -> dict:
         """Delete a cloned voice, from the Voices page. One that personas

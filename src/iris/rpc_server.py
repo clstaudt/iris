@@ -322,6 +322,12 @@ def main(extra: dict | None = None):
         "voice.sample": lambda params: controller.cloning.use_file(
             params.get("data", ""), params.get("name", "")
         ),
+        # A sample prepared is heard, and dropped unless it is cloned once
+        # the user confirms it
+        "voice.sample_play": lambda params: controller.voice_sample_play(
+            params.get("sample", ""), bool(params.get("on", True))
+        ),
+        "voice.sample_drop": lambda params: controller.cloning.drop(params.get("sample", "")),
         "voice.clone": lambda params: controller.voice_clone(params),
         # The Voices page: every voice, the cloned ones managed, and each
         # made ready for Iris's languages
