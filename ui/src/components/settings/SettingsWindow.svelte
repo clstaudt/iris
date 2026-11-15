@@ -4,6 +4,7 @@
   import Icon from "../Icon.svelte";
   import Personas from "./Personas.svelte";
   import Pipeline from "./Pipeline.svelte";
+  import Roles from "./Roles.svelte";
   import SetupSwitcher from "./SetupSwitcher.svelte";
   import StageInspector from "./StageInspector.svelte";
   import Voices from "./Voices.svelte";
@@ -12,6 +13,7 @@
     { id: "pipeline", label: "Pipeline", icon: "flow" },
     { id: "personas", label: "Personas", icon: "users" },
     { id: "voices", label: "Voices", icon: "wave" },
+    { id: "roles", label: "Roles", icon: "target" },
   ];
 
   const page = $derived(PAGES.find((p) => p.id === store.settingsPage) ?? PAGES[0]);
@@ -33,6 +35,8 @@
         {item.label}
         {#if item.id === "personas" && store.personas.length}
           <span class="count">{store.personas.length}</span>
+        {:else if item.id === "roles" && store.roles.length}
+          <span class="count">{store.roles.length}</span>
         {/if}
       </button>
     {/each}
@@ -57,6 +61,8 @@
         <Pipeline />
       {:else if page.id === "voices"}
         <Voices />
+      {:else if page.id === "roles"}
+        <Roles />
       {:else}
         <Personas />
       {/if}

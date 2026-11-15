@@ -138,7 +138,9 @@
             <PersonaRing name={thread.persona_name} />
             <span class="flex min-w-0 flex-1 flex-col gap-0.5">
               <span class="title">{thread.title || "New thread"}</span>
-              <span class="who">{thread.persona_name}</span>
+              <span class="who"
+                ><b>{thread.persona_name}</b>{#if thread.role_name}&nbsp;· {thread.role_name}{/if}</span
+              >
             </span>
           </button>
           <button
@@ -260,6 +262,10 @@
     color: var(--color-ink-3);
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .who b {
+    font-weight: 500;
+    color: var(--color-ink-2);
   }
   .more {
     display: flex;

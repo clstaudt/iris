@@ -82,11 +82,25 @@ export interface ThreadInfo {
   /** The persona's id, Iris for one whose persona is gone */
   persona: string;
   persona_name: string;
+  /** Its role's id and name, if it has one */
+  role: string | null;
+  role_name: string;
   /** Its earliest topic's, once memory has filed one; "" until then */
   title: string;
   created: number;
   /** When it was last talked in (seconds since the epoch) */
   updated: number;
+}
+
+/** A role: a focus a thread can be given. */
+export interface RoleInfo {
+  /** File name; none for a role not saved yet */
+  id?: string;
+  name: string;
+  focus: string;
+  /** Shipped with Iris: it can be reset once edited, but not deleted */
+  shipped?: boolean;
+  edited?: boolean;
 }
 
 /** A typed message waiting for the current turn to finish. */
@@ -192,6 +206,9 @@ export interface AssistantConfig {
   remember?: boolean;
   /** The thread Iris is in; null for a new one, stored with its first turn */
   thread?: number | null;
+  /** The thread's role, if it has one, and its name */
+  role?: string | null;
+  role_name?: string;
   tools?: Record<string, ToolState>;
   /** Swappable engines per slot (speech recognition, voice, ...), once the
    *  core reports them */
@@ -237,7 +254,7 @@ const SETUP_KEYS = [
 ] as const;
 
 /** The pages of the settings window. */
-export type SettingsPage = "pipeline" | "personas" | "voices";
+export type SettingsPage = "pipeline" | "personas" | "voices" | "roles";
 
 /** What ends a turn: Smart Turn hearing the user has finished, or a silence. */
 export type TurnDetection = "smart_turn" | "silence";
@@ -508,10 +525,21 @@ class IrisStore {
   sidebar = $state(loadSettings().sidebar ?? false);
   /** Shown, the threads are a narrow strip of their rings */
   sidebarStrip = $state(loadSettings().sidebar_strip ?? false);
-  /** A new thread was asked for: its persona is chosen until something is said */
+  /** A new thread was asked for: its persona and role are chosen until
+   *  something is said */
   choosing = $state(false);
   /** A switch of thread asked for while Iris replies, to be confirmed */
-  switchAsked = $state<{ open?: number; persona?: string; choose?: boolean } | null>(null);
+  switchAsked = $state<{
+    open?: number;
+    persona?: string;
+    role?: string | null;
+    choose?: boolean;
+  } | null>(null);
+  /** The roles, by name */
+  roles = $state<RoleInfo[]>([]);
+  /** The role open in the role editor; "" for a new one, null for the
+   *  first in the list */
+  editingRole = $state<string | null>(null);
   /** Turns the core keeps, filed under a topic or not yet */
   memoryTurns = $state(0);
   /** The walkthrough is shown instead of the conversation: on the first
@@ -947,17 +975,21 @@ class IrisStore {
     await rpc("threads.open", { id });
   }
 
-  /** A new thread with a persona: Iris unless another is chosen. Choosing,
-   *  its persona can be picked until something is said. While Iris
-   *  replies, which that stops, it is asked first (switchAsked). */
-  async newThread(persona = "iris", { choose = true, confirmed = false } = {}) {
+  /** A new thread with a persona, and a role if one is given: Iris and no
+   *  role unless others are chosen. Choosing, they can be picked until
+   *  something is said. While Iris replies, which that stops, it is asked
+   *  first (switchAsked). */
+  async newThread(
+    persona = "iris",
+    { choose = true, role = null as string | null, confirmed = false } = {}
+  ) {
     this.settingsPage = null;
     if (this.busy && !confirmed) {
-      this.switchAsked = { persona, choose };
+      this.switchAsked = { persona, role, choose };
       return;
     }
     this.choosing = choose;
-    await rpc("threads.new", { persona });
+    await rpc("threads.new", { persona, ...(role ? { role } : {}) });
   }
 
   /** Go on with the switch asked for while Iris replied, or not. */
@@ -966,13 +998,50 @@ class IrisStore {
     this.switchAsked = null;
     if (!asked || !confirmed) return;
     if (asked.open !== undefined) await this.openThreadById(asked.open, { confirmed: true });
-    else await this.newThread(asked.persona, { choose: asked.choose, confirmed: true });
+    else {
+      await this.newThread(asked.persona, { choose: asked.choose, role: asked.role, confirmed: true });
+    }
   }
 
   /** Forget a thread with its memory; the open one leaves a new thread. */
   async forgetThread(id: number) {
     await rpc("threads.forget", { id });
     await this.loadThreads();
+  }
+
+  // ------------------------------------------------------------------
+  // Roles
+  // ------------------------------------------------------------------
+
+  async loadRoles() {
+    const result = await rpc<{ roles: RoleInfo[] }>("roles.list");
+    this.roles = result.roles;
+  }
+
+  /** Open the role editor on a role, or on a new one (no id). */
+  editRole(id?: string) {
+    this.editingRole = id ?? "";
+    this.settingsPage = "roles";
+    this.panel = null;
+  }
+
+  /** Save a role; its threads have the new focus from their next turn.
+   *  Returns an error message, or null once saved. */
+  async saveRole(settings: RoleInfo): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string; id: string; roles: RoleInfo[] }>(
+      "roles.save",
+      { ...settings }
+    );
+    if (!result.ok) return result.error ?? "Could not save the role";
+    this.roles = result.roles;
+    this.editingRole = result.id;
+    return null;
+  }
+
+  /** Delete the user's role, or reset an edited one that ships with Iris. */
+  async deleteRole(id: string) {
+    const result = await rpc<{ roles: RoleInfo[] }>("roles.delete", { id });
+    this.roles = result.roles;
   }
 
   toggleSidebar() {
@@ -1760,6 +1829,7 @@ class IrisStore {
 
   private loadLists() {
     this.loadThreads();
+    this.loadRoles().catch((err) => console.error("[store] roles.list failed:", err));
     try {
       rpc<{ devices: { index: number; name: string }[] }>("audio.list_inputs").then(
         (inputs) => {

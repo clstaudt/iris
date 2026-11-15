@@ -93,7 +93,11 @@
           <!-- Who the thread is with -->
           <div class="flex h-10 shrink-0 items-center px-4">
             {#if !store.choosing && store.config}
-              <span class="thread-label text-[13px] text-ink-2">{store.config.persona}</span>
+              <span class="thread-label text-[13px] text-ink-2"
+                >{store.config.persona}{#if store.config.role_name}<span class="text-ink-3"
+                    >&nbsp;· {store.config.role_name}</span
+                  >{/if}</span
+              >
             {/if}
           </div>
           {#if store.choosing}

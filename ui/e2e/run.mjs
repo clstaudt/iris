@@ -2480,6 +2480,102 @@ try {
     await showThreads(false);
   });
 
+  // -------------------------------------------------------------- roles
+
+  const chips = page.locator('[role="radiogroup"][aria-label="Role"] .chip');
+  const chip = (name) => chips.filter({ hasText: exactly(name) });
+  const spaced = (text) => text.replace(/\s+/g, " ").trim();
+  /** A thread with HAL as a language partner, started in a step below */
+  let partnerThread = null;
+
+  await step("roles: a new thread is started with a persona and a role from its empty screen", async () => {
+    firstThread ??= (await threads()).open;
+    await showThreads(true);
+    await atRest();
+    await sidebar.locator("button.new").click();
+    await until("the roles", async () => (await chips.count()) >= 4, 10_000);
+    check(await chip("No role").evaluate((el) => el.classList.contains("active")), "No role is not chosen at first");
+    check(await personaTile("Iris").evaluate((el) => el.classList.contains("active")), "Iris is not chosen at first");
+    await chip("Language partner").click();
+    await until("a language partner for the new thread", () => config().role === "language-partner", 30_000);
+    await personaTile("HAL").locator("button.pick").click();
+    await until("HAL", () => config().persona === "HAL", 60_000);
+    check(config().role === "language-partner", "choosing the persona dropped the role");
+    check(await chip("Language partner").evaluate((el) => el.classList.contains("active")), "Language partner is not marked");
+    await shoot("roles-new");
+    const typed = await ask("Reply with one word: ciao.");
+    await eventAfter("chat.done", typed, () => true, 180_000);
+    await voiceDone();
+    const listed = await stored(firstThread);
+    partnerThread = listed.open;
+    const thread = listed.threads.find((t) => t.id === partnerThread);
+    check(thread && thread.role === "language-partner" && thread.role_name === "Language partner", `the thread's role is ${thread?.role}`);
+    await until("the label with the role", async () => spaced(await threadLabel()) === "HAL · Language partner", 10_000);
+    await threadItem(partnerThread).waitFor({ timeout: 5000 });
+    check(spaced(await threadItem(partnerThread).locator(".who").innerText()) === "HAL · Language partner", "the sidebar does not name the role");
+    await shoot("roles-thread");
+  });
+
+  await step("roles: a thread keeps the role it was started with, and its label changes nothing", async () => {
+    check(!(await page.locator("button.thread-label, .thread-label button").count()), "the label can be clicked");
+    await page.locator(".thread-label").click();
+    await quiet(300);
+    check(!(await page.locator('[role="menu"], [role="radiogroup"][aria-label="Role"]').count()), "the label opened a choice");
+    await openThread(firstThread);
+    await until("Iris without a role", () => config().persona === "Iris" && !config().role, 60_000);
+    check(spaced(await threadLabel()) === "Iris", `the label is ${await threadLabel()}`);
+    await openThread(partnerThread);
+    await until("HAL as a language partner again", () => config().persona === "HAL" && config().role === "language-partner", 60_000);
+    await until("the label with the role", async () => spaced(await threadLabel()) === "HAL · Language partner", 10_000);
+  });
+
+  await step("roles: the pipeline's persona names the thread's role", async () => {
+    await openSettings();
+    check(spaced(await stageValue("Persona")) === "HAL · Language partner", `the persona shows ${await stageValue("Persona")}`);
+    const partnerTitle = (await threads()).threads.find((t) => t.id === partnerThread).title || "New thread";
+    check((await stage("Persona").locator(".tag").innerText()).includes(partnerTitle),
+      "the persona is not tagged with the thread");
+    await shoot("roles-pipeline");
+  });
+
+  await step("roles: the Roles page creates, edits and deletes a role", async () => {
+    await openSettings("Roles");
+    const list = page.locator("button.role");
+    await until("the shipped roles", async () => (await list.count()) >= 2, 10_000);
+    check((await page.locator("#role-name").inputValue()) !== "", "no role is open");
+    await page.locator("button.s-btn", { hasText: "New role" }).click();
+    await until("an empty role", async () => (await page.locator("#role-name").inputValue()) === "");
+    await page.locator("#role-name").fill("Gardener");
+    await page.locator("#role-focus").fill("You help the user with their garden, season by season.");
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("Gardener in the list", () => list.filter({ hasText: "Gardener" }).count());
+    check((await rpc("roles.list")).roles.some((r) => r.id === "gardener"), "the role was not saved");
+    await shoot("roles-page");
+    // An edit is saved
+    await page.locator("#role-focus").fill("You help the user with their vegetable garden.");
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("the edit to be saved", async () =>
+      (await rpc("roles.list")).roles.find((r) => r.id === "gardener")?.focus === "You help the user with their vegetable garden.");
+    // A new thread offers it
+    await toConversation();
+    await showThreads(true);
+    await sidebar.locator("button.new").click();
+    await chip("Gardener").waitFor({ timeout: 5000 });
+    await openThread(partnerThread);
+    // Deleted
+    await openSettings("Roles");
+    await list.filter({ hasText: "Gardener" }).click();
+    await until("Gardener's form", async () => (await page.locator("#role-name").inputValue()) === "Gardener");
+    await page.locator("button.s-btn.danger", { hasText: "Delete" }).click();
+    await page.locator("button.s-btn.danger", { hasText: "Confirm delete" }).click();
+    await until("Gardener to be gone", async () => !(await list.filter({ hasText: "Gardener" }).count()));
+    check(!(await rpc("roles.list")).roles.some((r) => r.id === "gardener"), "the role is still there");
+    // Back to where the other steps talk
+    await openThread(firstThread);
+    await until("Iris", () => config().persona === "Iris", 60_000);
+    await showThreads(false);
+  });
+
   await step("the core stops: the app says so, starts it again, and goes on", async () => {
     await toConversation();
     const messages = page.locator(".bubble.user, .bubble.assistant, .bubble.error");
