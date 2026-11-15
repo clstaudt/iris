@@ -62,6 +62,10 @@ export interface IrisApi {
   askMicrophone: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
   chooseFolder: (title: string) => Promise<string | null>;
+  /** The system's save dialog for a persona's file, named for the persona */
+  savePersonaFile: (name: string) => Promise<string | null>;
+  /** The system's open dialog for a persona's file */
+  openPersonaFile: () => Promise<string | null>;
   /** Whether Iris opened as presence (only the orb) */
   presence: boolean;
   /** Show presence in place of the full window, or the full window again */

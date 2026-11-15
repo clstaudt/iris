@@ -164,6 +164,16 @@
     await load(draft.id!);
   }
 
+  async function exportFile() {
+    if (!draft?.id) return;
+    error = "";
+    try {
+      error = (await store.exportPersona(draft.id, draft.name)) ?? "";
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
   async function remove() {
     if (!draft?.id) return;
     if (!confirmDelete) {
@@ -345,17 +355,20 @@
     </div>
 
     <div class="flex items-center justify-between gap-2 border-t border-line pt-4">
-      <div class="min-w-0">
+      <div class="flex min-w-0 gap-1.5">
         {#if error}
           <p class="s-status error truncate" title={error}>{error}</p>
-        {:else if draft.id && (!draft.shipped || draft.edited)}
-          <button class="s-btn danger" onclick={remove} onblur={() => (confirmDelete = false)}>
-            {#if draft.shipped}
-              {confirmDelete ? "Confirm reset" : "Reset"}
-            {:else}
-              {confirmDelete ? "Confirm delete" : "Delete"}
-            {/if}
-          </button>
+        {:else if draft.id}
+          {#if !draft.shipped || draft.edited}
+            <button class="s-btn danger" onclick={remove} onblur={() => (confirmDelete = false)}>
+              {#if draft.shipped}
+                {confirmDelete ? "Confirm reset" : "Reset"}
+              {:else}
+                {confirmDelete ? "Confirm delete" : "Delete"}
+              {/if}
+            </button>
+          {/if}
+          <button class="s-btn" disabled={changed} onclick={exportFile}>Export</button>
         {/if}
       </div>
       <div class="flex shrink-0 gap-1.5">
