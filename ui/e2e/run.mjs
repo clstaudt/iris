@@ -54,6 +54,9 @@ fs.mkdirSync(OUT, { recursive: true });
 // ---------------------------------------------------------------- the core
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "iris-e2e-"));
+// Where the test breaks the room's speaker, as the core's stand-in reads it
+// (irisdev/e2e_core.py)
+const AUDIO_FAULTS = path.join(home, ".e2e-audio.json");
 // The steps keep setups' homes under that name; the core's is this one
 const coreHome = home;
 const realHome = os.homedir();
@@ -1759,6 +1762,57 @@ try {
     } finally {
       await rpc("e2e.reasoning", { on: false });
     }
+  });
+
+  await step("a speaker that cannot be opened is told once, and Iris goes on: Pause, Resume and a preview work after", async () => {
+    // As when AirPods disconnect under PortAudio
+    fs.writeFileSync(AUDIO_FAULTS, JSON.stringify({ speaker: "broken" }));
+    let since;
+    try {
+      await toConversation();
+      since = await ask("Reply with exactly: the speaker is quiet.");
+      const done = await replyEvent("chat.done", since);
+      check(done.data.text.trim(), "the reply did not come");
+      const told = await eventAfter(
+        "error",
+        since,
+        (data) => data.message.startsWith("The speaker could not be opened:"),
+        60_000
+      );
+      check(told.data.message.includes("PaErrorCode -9986"), `told: ${told.data.message}`);
+      await page.locator(".bubble.error", { hasText: "The speaker could not be opened" }).waitFor({ timeout: 5000 });
+      // The reply is shown all the same
+      await until("the reply in the conversation", async () =>
+        (await page.locator(".bubble.assistant").last().innerText()).trim()
+      );
+      // The next reply is not spoken either, and not told again
+      const again = await ask("Reply with exactly: still quiet.");
+      await replyEvent("chat.done", again);
+      await voiceDone();
+    } finally {
+      fs.rmSync(AUDIO_FAULTS, { force: true });
+    }
+    const errors = events.filter((e) => e.at >= since && e.type === "error").map((e) => e.data.message);
+    const speaker = errors.filter((message) => message.startsWith("The speaker could not be opened"));
+    check(speaker.length === 1, `told ${speaker.length} times`);
+    check(!errors.some((message) => message.startsWith("Assistant loop failed")), "the loop failed");
+    check((await rpc("app.info")).running, "Iris no longer runs");
+    // Pause and Resume still steer Iris
+    await boxButton("Pause the conversation").click();
+    await until("the paused state", async () => (await state()) === "paused");
+    await boxButton("Resume the conversation").click();
+    await until("the core to resume", () => config().paused === false);
+    await until("Iris no longer paused", async () => (await state()) !== "paused", 5000);
+    // The speaker works again: a preview plays, and a reply is spoken
+    await openStage("Voice");
+    const played = Date.now();
+    await inspector.locator('button[aria-label="Play"]').click();
+    await eventAfter("audio.output", played, (data) => data.rms > 0, 60_000);
+    await voiceDone();
+    const spoken = await ask("Reply with exactly: I can be heard again.");
+    await replyEvent("chat.done", spoken);
+    await eventAfter("audio.output", spoken, (data) => data.rms > 0.001, 60_000);
+    await voiceDone();
   });
 
   /** Whether a notice is in sight, below the conversation (not above it, where

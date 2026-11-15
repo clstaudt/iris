@@ -74,6 +74,9 @@ GREETING = (
     "know they can simply talk to you.)"
 )
 
+# Seconds the loop waits after a round of it failed, before the next
+LOOP_RETRY = 0.2
+
 # Told the user when an image (attached, or from the camera or the screen)
 # has no model to see it
 NO_VISION = (
@@ -363,6 +366,10 @@ class VoiceAssistant:
         self.tts_generator.on_failure = self._error
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
         self.speech_pipeline.on_reply_audio = self._reply_heard
+        # A reply the speaker cannot play is shown, and the user told why
+        self.speech_pipeline.on_speaker_error = lambda error: self._error(
+            f"The speaker could not be opened: {brief(error)}"
+        )
         # Told what language each piece of a reply is in, before the first
         language.prepare()
 
@@ -729,13 +736,21 @@ class VoiceAssistant:
             # Only audible when it was actually listening for follow-ups
             listening = not (self.pause_event.is_set() or self.suspend_event.is_set())
             if self.speak_replies and listening:
-                self.player.audio.play(_sleep_chime(), 24000)
+                self._play_chime(_sleep_chime())
         self._was_dormant = dormant
 
     def _chime(self):
         """Acknowledge the wake word when no request came with it."""
         if self.speak_replies:
-            self.player.audio.play(_wake_chime(), 24000)
+            self._play_chime(_wake_chime())
+
+    def _play_chime(self, sound: np.ndarray):
+        """Play a chime. A speaker that cannot be opened leaves it unheard:
+        the next reply tries it again, and says so if it fails too."""
+        try:
+            self.player.audio.play(sound, 24000)
+        except Exception:
+            logger.warning("The chime could not be played", exc_info=True)
 
     def _handle_heard(self, audio_path: str, dormant: bool):
         """Answer an utterance, or while dormant, check it for the wake word.
@@ -1355,8 +1370,45 @@ class VoiceAssistant:
             self.event_bus.emit("error", {"message": message})
         logger.error(message)
 
+    def _notice(self, message: str):
+        """Tell the app something it shows in passing, not a problem."""
+        if self.event_bus:
+            self.event_bus.emit("notice", {"message": message})
+        logger.info(message)
+
+    def _devices_in_use(self) -> dict:
+        """The speaker and the microphone Iris plays and listens through."""
+        try:
+            output = self.player.audio.query_devices(kind="output")["name"]
+        except Exception:
+            output = None
+        return {"output": output, "input": self.recorder.current_device_name()}
+
+    def _devices_changed(self):
+        """The devices were read anew (one came or went, or the system's
+        defaults changed): tell the user what Iris speaks or listens through
+        now, if that is another device. The microphone is told of only while
+        it is on."""
+        now = self._devices_in_use()
+        before, self._in_use = self._in_use, now
+        changes = []
+        if now["output"] and now["output"] != before.get("output"):
+            changes.append(f"speaking through {now['output']}")
+        if now["input"] != before.get("input") and not self.pause_event.is_set():
+            changes.append(f"listening through {now['input']}")
+        if changes:
+            self._notice("Now " + " and ".join(changes) + ".")
+        if self.event_bus:
+            self.event_bus.emit("config", self.config_info())
+
     def run_loop(self):
-        """Listen and answer until stop_event is set."""
+        """Listen and answer until stop_event is set.
+
+        Nothing that goes wrong in one round ends the loop: the error is
+        logged and the loop goes on, listening and answering. Should it end
+        all the same (the controller starts it again), Iris is shut down only
+        once stop_event is set.
+        """
         devices_ok, device_msg = self.recorder.check_audio_devices()
         if not devices_ok:
             # Typed messages are still answered; the microphone is off until
@@ -1364,148 +1416,171 @@ class VoiceAssistant:
             self._error(f"No microphone: {device_msg}")
             self._mic_lost()
 
+        # Told when the devices are read anew, to say where Iris speaks and
+        # listens now (a device of a test's own is never read anew)
+        audio = getattr(self.player, "audio", None)
+        watch = getattr(audio, "watch", None)
+        if watch is not None:
+            self._in_use = self._devices_in_use()
+            watch(self._devices_changed)
         try:
-            while True:
-                # External UI requested shutdown
-                if self.stop_event.is_set():
-                    break
-
-                # After parting words Iris falls asleep once the voice has
-                # died away (see _sleep_after_goodbye): until then the
-                # microphone stays closed, and the orb is already asleep
-                if time.monotonic() < self._quiet_until:
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                        self.status_manager.status_dormant = self.dormant
-                    time.sleep(0.05)
-                    continue
-
-                # Notice falling asleep whatever the loop is doing, so the UI
-                # learns it even with the mic off
-                self._note_dormancy(self.dormant)
-
-                # Stale barge-in from a turn that already ended
-                if self.interrupt_event.is_set():
-                    self.interrupt_event.clear()
-                    self.speech_pipeline.stop()
-
-                # Paused conversation: nothing starts until it is resumed
-                if self.suspend_event.is_set():
-                    self.recorder.close_microphone()
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                    time.sleep(0.05)
-                    continue
-
-                # Turns from an external UI come first, whether or not the mic
-                # is live, so a typed message never waits for the user to speak
-                turn = self._take_turn()
-                if turn is not None:
-                    try:
-                        if "audio" in turn:
-                            self._handle_heard(turn["audio"], self.dormant)
-                        elif turn.get("greet"):
-                            self._greet()
-                        else:
-                            self._run_text_turn(turn)
-                    except Exception:
-                        logger.exception("Turn failed")
-                    continue
-
-                # A voice is being previewed: the microphone would hear it as
-                # the user, and answer it. It stays closed until the room is
-                # quiet again.
-                if self.speech_pipeline.is_active:
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                    while self.speech_pipeline.is_active and not self.stop_event.is_set():
-                        time.sleep(0.05)
-                    time.sleep(PREVIEW_SETTLE)
-                    continue
-
-                # Paused, the user is typing, or nothing to recognize speech
-                # with: keep the microphone closed (models stay loaded) and
-                # keep watching for typed turns
-                closed = self.pause_event.is_set() or self.hold_event.is_set()
-                if closed or self.transcriber is None:
-                    self.recorder.close_microphone()
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                    time.sleep(0.05)
-                    continue
-
+            while not self.stop_event.is_set():
                 try:
-                    # 1. Listen for voice input with level visualization;
-                    # with a wake word set and no recent turn, only for that
-                    dormant = self.dormant
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = not dormant
-                        self.status_manager.status_dormant = dormant
-
-                    last_level_emit = [0.0]
-                    heard_speech = [False]
-
-                    def on_audio_level(level: float):
-                        """Update audio level display."""
-                        if level * 0.15 > self.recorder.silence_threshold:
-                            heard_speech[0] = True
-                            # Talk Iris is not part of (while dormant) is not
-                            # conversation: memory filing may use the time
-                            if not dormant:
-                                self._last_voice = time.monotonic()
-                                if self.wake_word:
-                                    self._keep_awake_while_speaking()
-                        # Throttle level events to ~15 Hz for external UIs
-                        if self.event_bus:
-                            now = time.monotonic()
-                            if now - last_level_emit[0] >= 1 / 15:
-                                last_level_emit[0] = now
-                                self.event_bus.emit("audio.level", {"rms": level})
-
-                    audio_path = self.recorder.listen(
-                        on_level=on_audio_level,
-                        should_stop=lambda: self.pause_event.is_set()
-                        or self.suspend_event.is_set()
-                        or self.hold_event.is_set()
-                        or self.stop_event.is_set()
-                        or not self.turn_queue.empty()
-                        # A voice preview started
-                        or self.speech_pipeline.is_active
-                        # The awake window ran out with nobody speaking
-                        or (not dormant and not heard_speech[0] and self.dormant)
-                        # The wake word was switched off: listen to everything
-                        or (dormant and not self.dormant),
-                        silence_duration=DORMANT_SILENCE if dormant else None,
-                    )
-
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                        self.status_manager.status_dormant = False
-
-                    # The microphone went away: typed messages are still
-                    # answered, and the microphone is off until switched on
-                    if self.recorder._device_error:
-                        self.speech_pipeline.stop()
-                        self._error(
-                            "The microphone was disconnected. Connect one and switch "
-                            "the microphone on again."
-                        )
-                        self._mic_lost()
-                        continue
-
-                    if not audio_path:
-                        continue
-
-                    # 2. Transcribe, then 3. answer (streams and speaks the
-                    # reply), listening on in case the user was not finished
-                    self._answer_listening(audio_path, dormant)
-
+                    self._loop_round()
                 except Exception:
-                    logger.exception("Listening failed")
+                    logger.exception("A round of the assistant's loop failed")
+                    time.sleep(LOOP_RETRY)
         finally:
+            if watch is not None:
+                audio.unwatch(self._devices_changed)
+            for close in (self.speech_pipeline.stop, self.recorder.close_microphone):
+                try:
+                    close()
+                except Exception:
+                    logger.exception("Could not close the audio")
+            if self.stop_event.is_set():
+                self.shut_down()
+
+    def shut_down(self):
+        """Release what Iris holds besides the audio: the tools' resources,
+        and memory's filing in the background."""
+        if self.tools:
+            self.tools.cleanup()
+        if self.memory:
+            self.memory.stop()
+
+    def _loop_round(self):
+        """One round of the loop: a turn taken, a listen, or a moment's wait
+        while there is nothing to listen for."""
+        # After parting words Iris falls asleep once the voice has
+        # died away (see _sleep_after_goodbye): until then the
+        # microphone stays closed, and the orb is already asleep
+        if time.monotonic() < self._quiet_until:
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+                self.status_manager.status_dormant = self.dormant
+            time.sleep(0.05)
+            return
+
+        # Notice falling asleep whatever the loop is doing, so the UI
+        # learns it even with the mic off
+        self._note_dormancy(self.dormant)
+
+        # Stale barge-in from a turn that already ended
+        if self.interrupt_event.is_set():
+            self.interrupt_event.clear()
             self.speech_pipeline.stop()
+
+        # Paused conversation: nothing starts until it is resumed
+        if self.suspend_event.is_set():
             self.recorder.close_microphone()
-            if self.tools:
-                self.tools.cleanup()
-            if self.memory:
-                self.memory.stop()
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+            time.sleep(0.05)
+            return
+
+        # Turns from an external UI come first, whether or not the mic
+        # is live, so a typed message never waits for the user to speak
+        turn = self._take_turn()
+        if turn is not None:
+            try:
+                if "audio" in turn:
+                    self._handle_heard(turn["audio"], self.dormant)
+                elif turn.get("greet"):
+                    self._greet()
+                else:
+                    self._run_text_turn(turn)
+            except Exception:
+                logger.exception("Turn failed")
+            return
+
+        # A voice is being previewed: the microphone would hear it as
+        # the user, and answer it. It stays closed until the room is
+        # quiet again.
+        if self.speech_pipeline.is_active:
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+            while self.speech_pipeline.is_active and not self.stop_event.is_set():
+                time.sleep(0.05)
+            time.sleep(PREVIEW_SETTLE)
+            return
+
+        # Paused, the user is typing, or nothing to recognize speech
+        # with: keep the microphone closed (models stay loaded) and
+        # keep watching for typed turns
+        closed = self.pause_event.is_set() or self.hold_event.is_set()
+        if closed or self.transcriber is None:
+            self.recorder.close_microphone()
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+            time.sleep(0.05)
+            return
+
+        try:
+            # 1. Listen for voice input with level visualization;
+            # with a wake word set and no recent turn, only for that
+            dormant = self.dormant
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = not dormant
+                self.status_manager.status_dormant = dormant
+
+            last_level_emit = [0.0]
+            heard_speech = [False]
+
+            def on_audio_level(level: float):
+                """Update audio level display."""
+                if level * 0.15 > self.recorder.silence_threshold:
+                    heard_speech[0] = True
+                    # Talk Iris is not part of (while dormant) is not
+                    # conversation: memory filing may use the time
+                    if not dormant:
+                        self._last_voice = time.monotonic()
+                        if self.wake_word:
+                            self._keep_awake_while_speaking()
+                # Throttle level events to ~15 Hz for external UIs
+                if self.event_bus:
+                    now = time.monotonic()
+                    if now - last_level_emit[0] >= 1 / 15:
+                        last_level_emit[0] = now
+                        self.event_bus.emit("audio.level", {"rms": level})
+
+            audio_path = self.recorder.listen(
+                on_level=on_audio_level,
+                should_stop=lambda: self.pause_event.is_set()
+                or self.suspend_event.is_set()
+                or self.hold_event.is_set()
+                or self.stop_event.is_set()
+                or not self.turn_queue.empty()
+                # A voice preview started
+                or self.speech_pipeline.is_active
+                # The awake window ran out with nobody speaking
+                or (not dormant and not heard_speech[0] and self.dormant)
+                # The wake word was switched off: listen to everything
+                or (dormant and not self.dormant),
+                silence_duration=DORMANT_SILENCE if dormant else None,
+            )
+
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+                self.status_manager.status_dormant = False
+
+            # The microphone went away: typed messages are still
+            # answered, and the microphone is off until switched on
+            if self.recorder._device_error:
+                self.speech_pipeline.stop()
+                self._error(
+                    "The microphone was disconnected. Connect one and switch "
+                    "the microphone on again."
+                )
+                self._mic_lost()
+                return
+
+            if not audio_path:
+                return
+
+            # 2. Transcribe, then 3. answer (streams and speaks the
+            # reply), listening on in case the user was not finished
+            self._answer_listening(audio_path, dormant)
+
+        except Exception:
+            logger.exception("Listening failed")
