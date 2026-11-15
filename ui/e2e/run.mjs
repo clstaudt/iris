@@ -221,7 +221,96 @@ const server = http.createServer((request, response) => {
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const url = `http://127.0.0.1:${server.address().port}/`;
 
-const browser = await chromium.launch({ channel: "chrome", headless: !process.env.E2E_HEADED });
+// About twenty seconds after it starts, Chrome wakes its updater, which on
+// macOS is GoogleUpdater. The updater's processes inherit Chrome's stdout and
+// stderr, and they, and Chrome's crash handler with them, live on after
+// Chrome quits for as long as the updater is busy. When two runs overlap that
+// is minutes: the second wake starts an updater service that cannot register,
+// and gives up only after about five minutes. Playwright's close waits for
+// those pipes to close, so the run hung at its end. The switch keeps the
+// updater asleep.
+const browser = await chromium.launch({
+  channel: "chrome",
+  headless: !process.env.E2E_HEADED,
+  args: ["--disable-updater-scheduler"],
+});
+
+/** The processes running, by PID, with their parent and command line; none
+ *  where there is no ps. */
+function processes() {
+  try {
+    const rows = execFileSync("ps", ["-A", "-o", "pid=,ppid=,command="], { encoding: "utf8" }).split("\n");
+    return new Map(
+      rows.map((row) => row.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
+        .map(([, pid, ppid, command]) => [Number(pid), { ppid: Number(ppid), command }])
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+/** The open files lsof lists for its arguments, as { pid, file }, where file
+ *  names the open file itself, the same in every process that inherited it;
+ *  none where there is no lsof. */
+function openFiles(args) {
+  let out = "";
+  try {
+    out = execFileSync("lsof", [...args, "-n", "-P", "-F", "pfdi"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 1 << 28,
+    });
+  } catch (error) {
+    // lsof exits with 1 when it misses something it was asked for
+    out = error.stdout ?? "";
+  }
+  const files = [];
+  let pid;
+  for (const line of out.split("\n")) {
+    if (line[0] === "p") pid = Number(line.slice(1));
+    else if (line[0] === "f") files.push({ pid, file: "" });
+    else if ((line[0] === "d" || line[0] === "i") && files.length) files.at(-1).file += line;
+  }
+  return files;
+}
+
+// This run's Chrome is the child of this process that Playwright drives
+// through a pipe; its stdout and stderr are kept for closeBrowser
+const chromePid = [...processes()].find(
+  ([, p]) => p.ppid === process.pid && p.command.includes("--remote-debugging-pipe")
+)?.[0];
+const browserOutput = new Set(
+  chromePid ? openFiles(["-a", "-p", String(chromePid), "-d", "1,2"]).map((f) => f.file).filter(Boolean) : []
+);
+
+/** Close the browser, but not for ever. Should a process Chrome started
+ *  still hold its output, close waits for it (see the switch above): after a
+ *  while, the processes that hold it are stopped. Only this run's Chrome can
+ *  have passed them its output, so no other Chrome is touched, the tester's
+ *  own nor another run's. */
+async function closeBrowser() {
+  const closed = browser.close().then(() => true, () => true);
+  const within = (ms) => Promise.race([closed, quiet(ms).then(() => false)]);
+  if (await within(20_000)) return;
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    // Node's pipes to a child are Unix sockets
+    const holders = new Set(
+      openFiles(["-U"]).filter((f) => browserOutput.has(f.file) && f.pid !== process.pid).map((f) => f.pid)
+    );
+    if (!holders.size) break;
+    const running = processes();
+    const named = [...holders].map((pid) => `${pid} ${running.get(pid)?.command.split(" --")[0].split("/").pop() ?? ""}`);
+    console.log(`  the browser is not closing: ${signal} to the processes it started that hold its output: ${named.join(", ")}`);
+    for (const pid of holders) {
+      try {
+        process.kill(pid, signal);
+      } catch {}
+    }
+    if (await within(5000)) return;
+  }
+  console.log("  the browser is not closing: going on without it");
+}
+
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const pageErrors = [];
 page.on("pageerror", (error) => pageErrors.push(String(error)));
@@ -300,7 +389,11 @@ function stubIris({ settings }) {
       rpc: async (method, params) => window.__irisRpc(method, structuredClone(params ?? {})),
       onEvent: (callback) => {
         listeners.push(callback);
-        return () => listeners.splice(listeners.indexOf(callback), 1);
+        window.__irisListeners = listeners.length;
+        return () => {
+          listeners.splice(listeners.indexOf(callback), 1);
+          window.__irisListeners = listeners.length;
+        };
       },
       micStatus: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
       askMicrophone: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
@@ -1572,6 +1665,10 @@ try {
     check(!error, `the reply failed: ${error?.data.message}`);
     check(done.data.text.trim().length > 0, "the reply is empty");
     await until("the reply in the conversation", () => page.getByText(done.data.text.trim().slice(0, 12)).count());
+    // Each message once: a second listener for the core's events would show it twice
+    const asked = await page.getByText("Say hello in five words.", { exact: true }).count();
+    const replied = await page.getByText(done.data.text.trim(), { exact: true }).count();
+    check(asked === 1 && replied === 1, `the message shows ${asked} times and the reply ${replied} times`);
     await checkHeard(since, "the reply");
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
   });
@@ -3550,7 +3647,7 @@ try {
     check(pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
   });
 } finally {
-  await browser.close().catch(() => {});
+  await closeBrowser();
   server.close();
   stub.close();
   await rpc("assistant.stop").catch(() => {});
