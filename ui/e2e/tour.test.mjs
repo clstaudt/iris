@@ -79,7 +79,7 @@ test("each place lights its controls, and names those that go on", () => {
     "role: settings-roles > settings-roles",
     "role: settings-roles+roles > Next",
     "thread: threads > threads",
-    "thread: new-thread > new-thread",
+    "thread: thread-list > new-thread",
     "memory: memory > memory",
     "pipeline: settings > settings",
     "pipeline: settings-pipeline > settings-pipeline",
@@ -109,7 +109,7 @@ test("read with Next, it opens what each step shows, counts the steps, and leave
     "6 role:settings-roles [voices]",
     "6 role:settings-roles+roles [roles]",
     "7 thread:threads [conversation]",
-    "7 thread:new-thread [conversation, threads]",
+    "7 thread:thread-list [conversation, threads]",
     "8 memory:memory [conversation, threads]",
     "9 pipeline:settings [conversation, threads]",
     "9 pipeline:settings-pipeline+pipeline [pipeline, threads]",
@@ -161,7 +161,7 @@ test("used, each lit control goes on, compact mode once the user is back, and wh
     "role:settings-roles+roles",
     // The thread needs the conversation: the tour closes the settings
     "thread:threads",
-    "thread:new-thread",
+    "thread:thread-list",
     "memory:memory",
     "pipeline:settings",
     "pipeline:settings-pipeline+pipeline",
@@ -186,7 +186,7 @@ test("run from Settings, a skip midway puts back what the tour changed, and keep
   while (guide.step.id !== "thread") guide.next();
   assert.equal(fake.shown.settingsPage, null);
   click("threads");
-  assert.equal(where(), "thread:new-thread");
+  assert.equal(where(), "thread:thread-list");
   guide.skip();
   assert.equal(guide.active, false);
   assert.deepEqual(fake.shown, { settingsPage: "pipeline", sidebar: true, panel: null });
@@ -196,7 +196,7 @@ test("a skip closes the threads and settings the tour opened, and brings back th
   const found = { settingsPage: null, sidebar: false, panel: "memory" };
   const { fake, guide, where } = app(found);
   guide.start();
-  while (where() !== "thread:new-thread") guide.next();
+  while (where() !== "thread:thread-list") guide.next();
   assert.equal(fake.shown.sidebar, true);
   guide.skip();
   assert.deepEqual(fake.shown, found);
@@ -279,6 +279,15 @@ test("the sentence stands beside its controls, in the window, never over them, a
   assert.equal(narrow.width, 180);
   assert.ok(inside(narrow), JSON.stringify(narrow));
   for (const hole of [entry, page]) assert.ok(!overlaps(narrow, hole), JSON.stringify(narrow));
+  // What else it speaks of stays in sight where there is room: above a
+  // row, not over the rows below it
+  const row = { left: 249, top: 392, width: 780, height: 60 };
+  const below = [{ left: 270, top: 455, width: 600, height: 110 }];
+  const above = calloutAt([row], sizes, space, below);
+  assert.equal(above.top + above.height, 392 - 14);
+  // and where there is none, it is covered rather than a lit control
+  const everywhere = [{ left: 0, top: 0, width: 1100, height: 750 }];
+  assert.ok(!overlaps(calloutAt([row], sizes, space, everywhere), row));
   // Wherever the controls are, never over them
   for (let i = 0; i < 200; i++) {
     const holes = Array.from({ length: 1 + (i % 3) }, (_, j) => ({

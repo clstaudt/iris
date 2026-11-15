@@ -9,13 +9,15 @@
   const PAD = 6;
   /** The callout's widths, the widest first: narrower where there is no
    *  room beside the lit controls at its width */
-  const WIDTHS = [300, 240, 180];
+  const WIDTHS = [300, 240, 190];
 
   type Hole = Box & { name: string; radius: number };
 
   let { delay = 0 }: { delay?: number } = $props();
 
   let holes = $state<Hole[]>([]);
+  /** What else the sentence speaks of, to leave in sight */
+  let avoid = $state<Box[]>([]);
   let innerWidth = $state(0);
   let innerHeight = $state(0);
   let heights = $state(WIDTHS.map(() => 0));
@@ -26,7 +28,8 @@
     calloutAt(
       holes,
       WIDTHS.map((width, i) => ({ width, height: heights[i] })),
-      { width: innerWidth, height: innerHeight }
+      { width: innerWidth, height: innerHeight },
+      avoid
     )
   );
 
@@ -87,6 +90,11 @@
         (["name", "left", "top", "width", "height", "radius"] as const).every((k) => h[k] === holes[i][k])
       );
     if (!same) holes = found;
+    const kept = (tour.place.avoid ?? [])
+      .flatMap((selector) => [...document.querySelectorAll<HTMLElement>(selector)])
+      .map(shown)
+      .filter((box) => box.width && box.height);
+    if (JSON.stringify(kept) !== JSON.stringify(avoid)) avoid = kept;
   }
 
   // A click on a lit control does what it does; then the tour learns what

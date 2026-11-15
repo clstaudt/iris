@@ -201,7 +201,7 @@
 {#if !config}
   <p class="s-status">Loading models</p>
 {:else}
-  <div data-tour="pipeline">
+  <div class="max-w-[860px]" data-tour="pipeline">
     <PipelineChain sections={timed} timings active={store.stage} onselect={open} />
   </div>
 {/if}

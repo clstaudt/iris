@@ -594,12 +594,13 @@ const NEVER = new Set([
 ]);
 // The app's default window, and a smaller one
 const WINDOW = { width: 1280, height: 800 };
-const SMALL = { width: 1100, height: 750 };
+const SMALL = { width: 1024, height: 700 };
 
 /** The light on these controls alone, what shows of each (inside what clips
- *  it, a page that scrolls) in a hole of it, and the callout clear of them. */
-const litOn = (names) =>
-  page.evaluate((names) => {
+ *  it, a page that scrolls) in a hole of it, and the callout clear of them
+ *  and of what else it speaks of (avoid, by CSS selector). */
+const litOn = (names, avoid = []) =>
+  page.evaluate(([names, avoid]) => {
     const holes = [...document.querySelectorAll("[data-hole]")];
     if (holes.length !== names.length) return false;
     const box = (hole) => {
@@ -622,11 +623,13 @@ const litOn = (names) =>
       return right > left && bottom > top && b.left <= left && b.top <= top && b.right >= right && b.bottom >= bottom;
     });
     const callout = document.querySelector('[aria-label="Tour"] .callout')?.getBoundingClientRect();
+    const kept = avoid.flatMap((selector) => [...document.querySelectorAll(selector)])
+      .map((el) => el.getBoundingClientRect()).filter((b) => b.width && b.height && b.top < innerHeight);
     const clear = callout && callout.left >= 0 && callout.top >= 0 && callout.right <= innerWidth &&
-      callout.bottom <= innerHeight && holes.map(box).every((b) =>
+      callout.bottom <= innerHeight && [...holes.map(box), ...kept].every((b) =>
         callout.right <= b.left || b.right <= callout.left || callout.bottom <= b.top || b.bottom <= callout.top);
     return lit && clear;
-  }, names);
+  }, [names, avoid]);
 
 /** Until the tour's light and callout have stopped moving and fading, and
  *  the page is drawn at its size. */
@@ -640,15 +643,16 @@ const settled = () =>
   }));
 
 /** The tour at this step, of its chapter, lit on these controls alone, the
- *  callout beside them and clear of them, in a smaller window and the app's
- *  own; pictures of both, if named. */
-async function tourAt(number, names, shot) {
+ *  callout beside them and clear of them and of what else it speaks of, in
+ *  a smaller window and the app's own; pictures of both, if named. */
+async function tourAt(number, names, shot, avoid = []) {
   await tourDialog.locator(".count", { hasText: `· ${number} of 10` }).waitFor({ timeout: 5000 });
   for (const size of [SMALL, WINDOW]) {
     await page.setViewportSize(size);
-    await until(`step ${number} lit on ${names.join(" and ")} at ${size.width}x${size.height}`, () => litOn(names), 5000);
+    await until(`step ${number} lit on ${names.join(" and ")}, its callout clear, at ${size.width}x${size.height}`,
+      () => litOn(names, avoid), 5000);
     await settled();
-    check(await litOn(names), `step ${number} moved at ${size.width}x${size.height}`);
+    check(await litOn(names, avoid), `step ${number} moved at ${size.width}x${size.height}`);
     const small = size === SMALL ? "-small" : "";
     if (shot) await page.screenshot({ path: path.join(OUT, `tour-${number}-${shot}${small}.png`) });
   }
@@ -958,7 +962,7 @@ try {
       await silentFor(3000);
       const since = Date.now();
       // Talking: the orb pauses, and Pause resumes
-      await tourAt(1, ["composer", "orb"], "conversation");
+      await tourAt(1, ["composer", "orb"], "conversation", [".bubble"]);
       let at = Date.now();
       await clickLit("orb");
       await eventAfter("state", at, (data) => data.state === "paused", 5000);
@@ -1000,7 +1004,7 @@ try {
       await tourAt(7, ["threads"]);
       check(!(await page.locator('nav[aria-label="Settings"]').count()), "the settings stay over the conversation");
       await tourButton("Next").click();
-      await tourAt(7, ["new-thread"], "thread");
+      await tourAt(7, ["thread-list"], "thread");
       await tourButton("Next").click();
       await tourAt(8, ["memory"], "memory");
       await clickLit("memory");
@@ -1009,9 +1013,10 @@ try {
       await tourAt(9, ["settings"]);
       await clickLit("settings");
       await until("the pipeline", pipelineShown, 5000);
-      await tourAt(9, ["settings-pipeline", "pipeline"], "pipeline");
+      await tourAt(9, ["settings-pipeline", "pipeline"], "pipeline", ['nav[aria-label="Settings"] button']);
       await tourButton("Next").click();
-      await tourAt(10, ["stage-llm"], "stages");
+      await tourAt(10, ["stage-llm"], "stages",
+        ["[data-stage] .label", '[data-stage="persona"]', '[data-stage="tools"]', '[data-stage="memory"]', "[data-stage] .tag"]);
       check(await tourButton("Done").count(), "the last step's button does not read Done");
       await clickLit("stage-llm");
       await page.locator('[data-tour="stage-llm"][aria-expanded="true"]').waitFor({ timeout: 5000 });
@@ -3606,7 +3611,7 @@ try {
       await tourAt(7, ["threads"]);
       await clickLit("threads");
       await page.locator('aside[aria-label="Threads"]').waitFor({ timeout: 5000 });
-      await tourAt(7, ["new-thread"]);
+      await tourAt(7, ["thread-list"]);
       await clickLit("new-thread");
       await page.locator('[role="radiogroup"][aria-label="Persona"]').waitFor({ timeout: 5000 });
       await tourAt(8, ["memory"]);

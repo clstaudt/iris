@@ -37,6 +37,9 @@ export interface TourPlace {
   /** Its control takes the user away (presence): the tour goes on once
    *  they are back */
   away?: boolean;
+  /** What the sentence speaks of besides, by CSS selector, which the
+   *  callout leaves in sight where there is room */
+  avoid?: string[];
 }
 
 export interface TourStep {
@@ -49,11 +52,11 @@ export interface TourStep {
 const CONVERSATION: TourWant = { settings: null };
 
 /** A step in Settings: the tab's entry, which opens it, then the tab. */
-function tab(page: SettingsPage, content: string, go: string[] = []): TourPlace[] {
+function tab(page: SettingsPage, content: string, go: string[] = [], avoid?: string[]): TourPlace[] {
   const entry = `settings-${page}`;
   return [
     { targets: [entry], go: [entry], needs: { settings: "open" }, opens: { settings: page } },
-    { targets: [entry, content], go, needs: { settings: page } },
+    { targets: [entry, content], go, needs: { settings: page }, avoid },
   ];
 }
 
@@ -67,7 +70,7 @@ export const TOUR: TourStep[] = [
     text:
       "This is your conversation with Iris. Speak or type, and Iris answers aloud; the orb shows " +
       "what it is doing: listening, thinking, looking or speaking.",
-    places: [{ targets: ["composer", "orb"], go: ["orb", "send"], needs: CONVERSATION }],
+    places: [{ targets: ["composer", "orb"], go: ["orb", "send"], needs: CONVERSATION, avoid: [".bubble"] }],
   },
   {
     id: "pause",
@@ -81,8 +84,8 @@ export const TOUR: TourStep[] = [
     id: "compact",
     chapter: "Talking",
     text:
-      "Try compact mode: Iris shrinks to its orb, floating above your other windows. The mark on " +
-      "the orb brings you back, and the tour goes on.",
+      "Try compact mode: Iris shrinks to its orb, floating above your other windows. The small " +
+      "arrows on the orb bring you back, and the tour goes on.",
     places: [{ targets: ["presence"], go: ["presence"], away: true }],
   },
   {
@@ -117,7 +120,7 @@ export const TOUR: TourStep[] = [
       "like, a role; both stay with that thread. Switch between threads here.",
     places: [
       { targets: ["threads"], go: ["threads"], needs: CONVERSATION, opens: { sidebar: true } },
-      { targets: ["new-thread"], go: ["new-thread"], needs: { settings: null, sidebar: true } },
+      { targets: ["thread-list"], go: ["new-thread"], needs: { settings: null, sidebar: true } },
     ],
   },
   {
@@ -134,7 +137,8 @@ export const TOUR: TourStep[] = [
     text:
       "The Pipeline tab shows how Iris works, from your voice to its answer: it hears you, thinks " +
       "with a language model, and speaks. The times show how long each stage took in your last turn.",
-    places: [SETTINGS, ...tab("pipeline", "pipeline")],
+    // The other tabs' entries stay in sight
+    places: [SETTINGS, ...tab("pipeline", "pipeline", [], ['nav[aria-label="Settings"] button'])],
   },
   {
     id: "stages",
@@ -142,7 +146,22 @@ export const TOUR: TourStep[] = [
     text:
       "Click a stage to change it, such as the microphone or the language model. A value tagged " +
       "with a persona or a thread is set there instead.",
-    places: [{ targets: ["stage-llm"], go: ["stage-llm"], needs: { settings: "pipeline" } }],
+    places: [
+      {
+        targets: ["stage-llm"],
+        go: ["stage-llm"],
+        needs: { settings: "pipeline" },
+        // The stages' names, and the values set by a persona or a thread,
+        // tagged so
+        avoid: [
+          "[data-stage] .label",
+          '[data-stage="persona"]',
+          '[data-stage="tools"]',
+          '[data-stage="memory"]',
+          "[data-stage] .tag",
+        ],
+      },
+    ],
   },
 ];
 
@@ -369,16 +388,41 @@ const overlaps = (a: Box, b: Box) =>
   a.left < b.left + b.width && b.left < a.left + a.width && a.top < b.top + b.height && b.top < a.top + a.height;
 
 /** Where the sentence stands in the window (space), never over a lit
- *  control: beside the controls, below, above, right or left of them all or
+ *  control (holes), and clear of what else it speaks of (avoid) where there
+ *  is room: beside the controls, below, above, right or left of them all or
  *  of one, else wherever there is room, nearest them; narrower when there is
  *  no room at its width. `sizes` are the callout's, widest first. */
 export function calloutAt(
   holes: Box[],
   sizes: { width: number; height: number }[],
   space: { width: number; height: number },
-  margin = 12,
-  gap = 14
+  avoid: Box[] = []
 ): Box {
+  if (avoid.length) {
+    const clear = place(holes, [...holes, ...avoid], sizes, space);
+    if (clear) return clear;
+  }
+  const at = place(holes, holes, sizes, space);
+  if (at) return at;
+  const narrowest = sizes[sizes.length - 1];
+  return {
+    left: space.width - MARGIN - narrowest.width,
+    top: space.height - MARGIN - narrowest.height,
+    ...narrowest,
+  };
+}
+
+const MARGIN = 12;
+const GAP = 14;
+
+/** The first place for the callout beside the holes, clear of the
+ *  obstacles, at the widest size that has one; null if none. */
+function place(
+  holes: Box[],
+  obstacles: Box[],
+  sizes: { width: number; height: number }[],
+  space: { width: number; height: number }
+): Box | null {
   const widest = sizes[0];
   if (!holes.length) {
     return { left: (space.width - widest.width) / 2, top: (space.height - widest.height) / 2, ...widest };
@@ -390,22 +434,22 @@ export function calloutAt(
     bottom: Math.max(...holes.map((h) => h.top + h.height)),
   };
   const fits = (box: Box) =>
-    box.left >= margin &&
-    box.top >= margin &&
-    box.left + box.width <= space.width - margin &&
-    box.top + box.height <= space.height - margin &&
-    !holes.some((hole) => overlaps(box, hole));
+    box.left >= MARGIN &&
+    box.top >= MARGIN &&
+    box.left + box.width <= space.width - MARGIN &&
+    box.top + box.height <= space.height - MARGIN &&
+    !obstacles.some((obstacle) => overlaps(box, obstacle));
   for (const size of sizes) {
-    const clampX = (x: number) => Math.max(margin, Math.min(x, space.width - margin - size.width));
-    const clampY = (y: number) => Math.max(margin, Math.min(y, space.height - margin - size.height));
+    const clampX = (x: number) => Math.max(MARGIN, Math.min(x, space.width - MARGIN - size.width));
+    const clampY = (y: number) => Math.max(MARGIN, Math.min(y, space.height - MARGIN - size.height));
+    // Below or above, centred; right or left, level with the top
     const around = (r: { left: number; top: number; right: number; bottom: number }) => {
       const x = clampX((r.left + r.right - size.width) / 2);
-      const y = clampY((r.top + r.bottom - size.height) / 2);
       return [
-        { left: x, top: r.bottom + gap },
-        { left: x, top: r.top - gap - size.height },
-        { left: r.right + gap, top: y },
-        { left: r.left - gap - size.width, top: y },
+        { left: x, top: r.bottom + GAP },
+        { left: x, top: r.top - GAP - size.height },
+        { left: r.right + GAP, top: clampY(r.top) },
+        { left: r.left - GAP - size.width, top: clampY(r.top) },
       ];
     };
     const sides = [union, ...holes.map((h) => ({ ...h, right: h.left + h.width, bottom: h.top + h.height }))];
@@ -415,8 +459,8 @@ export function calloutAt(
     // Wherever there is room, nearest the controls
     let best: Box | null = null;
     let nearest = Infinity;
-    for (let top = margin; top + size.height <= space.height - margin; top += 8) {
-      for (let left = margin; left + size.width <= space.width - margin; left += 8) {
+    for (let top = MARGIN; top + size.height <= space.height - MARGIN; top += 8) {
+      for (let left = MARGIN; left + size.width <= space.width - MARGIN; left += 8) {
         const box = { left, top, ...size };
         if (!fits(box)) continue;
         const dx = Math.max(union.left - (left + size.width), 0, left - union.right);
@@ -426,10 +470,5 @@ export function calloutAt(
     }
     if (best) return best;
   }
-  const narrowest = sizes[sizes.length - 1];
-  return {
-    left: space.width - margin - narrowest.width,
-    top: space.height - margin - narrowest.height,
-    ...narrowest,
-  };
+  return null;
 }
