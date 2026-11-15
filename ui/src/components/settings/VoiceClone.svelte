@@ -10,14 +10,16 @@
 
   // Cloning a voice for a persona, with Kyutai's Pocket TTS: Hugging Face
   // access to its cloning model, the model's download, a sample recorded or
-  // chosen, and the voice made of it, for English and the languages chosen
-  // with it (each language's cloning model downloaded first): the voice is
-  // cloned once it is made for all of them. The voice made is one of the
-  // engine's voices from then on, listed with the others; this offers to
-  // make one. Every voice made stays, saved with a persona or not, until it
-  // is deleted on the Voices page. There (keep), a cloned voice cloned
-  // again is made again in place, keeping its name and its personas; for a
-  // persona, cloning again makes another voice.
+  // chosen, which is prepared (trimmed and levelled) and heard, then the
+  // languages to make the voice for, confirmed: only then is the voice made,
+  // for English and the languages picked (each language's cloning model
+  // downloaded first, shown as it goes). Back or Cancel before that leave no
+  // voice behind. The voice made is one of the engine's voices from then on,
+  // listed with the others; this offers to make one. Every voice made stays,
+  // saved with a persona or not, until it is deleted on the Voices page.
+  // There (keep), a cloned voice cloned again is made again in place,
+  // keeping its name and its personas; for a persona, cloning again makes
+  // another voice.
 
   let {
     draft,
@@ -38,20 +40,48 @@
   const BARS = 24;
   const AUDIO = ".wav,.mp3,.m4a,.aac,.flac,.ogg,.aiff,audio/*";
 
-  type Step = "closed" | "checking" | "connect" | "download" | "sample" | "recording" | "making";
+  type Step =
+    | "closed"
+    | "checking"
+    | "connect"
+    | "download"
+    | "sample"
+    | "recording"
+    | "preparing"
+    | "confirm"
+    | "making";
   /** Pocket TTS's languages, which a cloned voice speaks */
   const pocket = $derived(
     (store.voices?.languages ?? []).filter((l) =>
       (store.voices?.engines.kyutai ?? []).some((v) => spokenBy(v).includes(l.code))
     )
   );
-  /** The languages to make the voice for: English and Iris's languages,
-   *  which its personas will speak */
+  /** The languages to make the voice for: English, which it is made with
+   *  first, and those picked, Iris's own unless others are */
   let picked = $state<string[]>([]);
+  /** The languages whose cloning model is downloaded; the others download
+   *  it first, once the clone is confirmed */
+  let downloaded = $state<string[]>([]);
+  const downloads = $derived(
+    Object.fromEntries(
+      pocket
+        .filter((l) => l.code !== "en" && !downloaded.includes(l.code))
+        .map((l) => [l.code, `Downloads Kyutai's cloning model for ${l.name} first`])
+    )
+  );
+  /** The sample prepared, to hear and confirm: nothing is made of it before */
+  type Sample = { id: string; seconds: number; name: string };
+  let sample = $state<Sample | null>(null);
   /** The jobs making the voice for its other languages, once made for English */
   let making = $state<VoiceJob[]>([]);
   let madeVoice = "";
-  type Access = { state: "login" | "terms" | "ready"; cached: boolean; error?: string };
+  type Access = {
+    state: "login" | "terms" | "ready";
+    cached: boolean;
+    error?: string;
+    downloaded?: string[];
+  };
+  type Prepared = { ok: boolean; error?: string; sample?: string; seconds?: number };
 
   let step = $state<Step>("closed");
   let access = $state<Access["state"]>("login");
@@ -64,6 +94,8 @@
   let level = $state(0);
   let seconds = $state(0);
   let picker = $state<HTMLInputElement | null>(null);
+  /** Samples asked to be prepared so far: only the latest is taken */
+  let preparing = 0;
 
   const cloned = $derived(draft.voice.startsWith(PREFIX));
   const TITLES: Record<Step, string> = {
@@ -73,6 +105,8 @@
     download: "Downloading the cloning model",
     sample: "Clone a voice",
     recording: "Recording",
+    preparing: "Clone a voice",
+    confirm: "Clone a voice",
     making: "Making the voice",
   };
   /** The level on a decibel scale, as the sound check shows it */
@@ -80,8 +114,10 @@
     const rms = level * 0.15;
     return rms <= 0 ? 0 : Math.max(0, Math.min(1, (20 * Math.log10(rms) + 60) / 50));
   });
-  const clock = $derived(`${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`);
+  const minutes = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const clock = $derived(minutes(seconds));
   const mb = (bytes: number) => Math.round(bytes / 1e6);
+  const playing = $derived(!!sample && store.previewing === `sample:${sample.id}`);
 
   let unsubscribe = () => {};
   onMount(() => {
@@ -99,6 +135,7 @@
   onDestroy(() => {
     unsubscribe();
     if (step === "recording") rpc("voice.record", { on: false, keep: false }).catch(() => {});
+    if (step !== "making") forget();
   });
 
   // Cloning is Kyutai's: another engine closes it
@@ -106,10 +143,19 @@
     if (draft.engine !== "kyutai" && step !== "closed") close();
   });
 
+  /** English, Iris's languages, and for a voice cloned again in place the
+   *  ones it is made for now, which its new sample replaces */
+  function defaults() {
+    const voice = store.voices?.engines.kyutai?.find((v) => v.id === draft.voice);
+    const before = keep && cloned ? (voice?.cloned?.made ?? []) : [];
+    const wanted = new Set(["en", ...store.languages, ...before]);
+    return pocket.map((l) => l.code).filter((code) => wanted.has(code));
+  }
+
   /** A request of the clone's. One that fails (the window could not send
    *  it, or the core answered with an error) says why here and gives null:
    *  the panel never waits for an answer that will not come. */
-  async function ask<T>(method: string, params: Record<string, unknown> = {}): Promise<T | null> {
+  async function request<T>(method: string, params: Record<string, unknown> = {}): Promise<T | null> {
     try {
       return await rpc<T>(method, params);
     } catch (err) {
@@ -121,29 +167,35 @@
   async function open() {
     error = "";
     making = [];
-    const wanted = new Set(["en", ...store.languages]);
-    picked = pocket.map((l) => l.code).filter((code) => wanted.has(code));
+    sample = null;
+    picked = defaults();
     step = "checking";
-    const result = await ask<Access>("voice.clone_access");
+    await ask();
+  }
+
+  async function ask() {
+    const result = await request<Access>("voice.clone_access");
     if (result) follow(result);
     else step = "connect";
   }
 
-  /** On from the access there is: connect, download, or the sample. */
+  /** On from the access there is: connect, download, or the sample, which
+   *  is confirmed next once there is one. */
   function follow(result: Access) {
     access = result.state;
     error = result.error ?? "";
+    if (result.downloaded) downloaded = result.downloaded;
     if (result.state !== "ready") step = "connect";
     else if (!result.cached) download();
-    else step = "sample";
+    else step = sample ? "confirm" : "sample";
   }
 
   async function check() {
     busy = true;
     try {
       const result = token.trim()
-        ? await ask<Access>("voice.clone_connect", { token: token.trim() })
-        : await ask<Access>("voice.clone_access");
+        ? await request<Access>("voice.clone_connect", { token: token.trim() })
+        : await request<Access>("voice.clone_access");
       token = "";
       if (result) follow(result);
     } finally {
@@ -155,35 +207,42 @@
     step = "download";
     error = "";
     progress = { done: 0, total: 0 };
-    const result = await ask<{ ok: boolean; error?: string; access?: boolean }>("voice.clone_fetch");
+    const result = await request<{ ok: boolean; error?: string; access?: boolean }>("voice.clone_fetch");
     if (!result) return;
-    if (result.ok) step = "sample";
-    else if (result.access) await open();
-    else error = result.error ?? "The cloning model could not be downloaded";
+    if (result.ok) {
+      downloaded = [...new Set(["en", ...downloaded])];
+      step = sample ? "confirm" : "sample";
+    } else if (result.access) {
+      step = "checking";
+      await ask();
+    } else error = result.error ?? "The cloning model could not be downloaded";
   }
 
   async function record() {
     error = "";
     level = 0;
     seconds = 0;
-    const result = await ask<{ ok: boolean; error?: string }>("voice.record", { on: true });
+    const result = await request<{ ok: boolean; error?: string }>("voice.record", { on: true });
     if (!result) return;
     if (result.ok) step = "recording";
     else error = result.error ?? "The microphone could not be opened";
   }
 
   async function redo() {
-    if ((await ask("voice.record", { on: false, keep: false })) === null) return back(error);
+    if ((await request("voice.record", { on: false, keep: false })) === null) {
+      step = "sample";
+      return;
+    }
     await record();
   }
 
   async function stop() {
     if (step !== "recording") return;
-    step = "making";
+    step = "preparing";
     doing = "Reading the sample";
-    const result = await ask<{ ok: boolean; error?: string }>("voice.record", { on: false });
-    if (result?.ok) await make();
-    else back(result ? result.error : error);
+    const mine = ++preparing;
+    const result = await request<Prepared>("voice.record", { on: false });
+    took(result ?? { ok: false, error }, "Recording", mine);
   }
 
   function choose() {
@@ -196,42 +255,104 @@
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
-    step = "making";
+    step = "preparing";
     doing = "Reading the sample";
+    const mine = ++preparing;
     const data = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(file);
     }).catch(() => "");
-    const result = await ask<{ ok: boolean; error?: string }>("voice.sample", { data, name: file.name });
-    if (result?.ok) await make();
-    else back(result ? result.error : error);
+    const result = await request<Prepared>("voice.sample", { data, name: file.name });
+    took(result ?? { ok: false, error }, file.name, mine);
+  }
+
+  /** The sample prepared: heard and confirmed next. One that comes once the
+   *  clone is closed, or another was asked for, is dropped. */
+  function took(result: Prepared, name: string, mine: number) {
+    if (step !== "preparing" || mine !== preparing) {
+      if (result.sample) rpc("voice.sample_drop", { sample: result.sample }).catch(() => {});
+      return;
+    }
+    if (!result.ok || !result.sample) {
+      error = result.error ?? "The sample could not be prepared";
+      step = "sample";
+      return;
+    }
+    error = "";
+    sample = { id: result.sample, seconds: result.seconds ?? 0, name };
+    step = "confirm";
+  }
+
+  async function listen() {
+    if (!sample) return;
+    if (playing) await store.stopSample();
+    else error = (await store.playSample(sample.id)) ?? "";
+  }
+
+  /** Drop the sample, which is not to be cloned: nothing of it stays. */
+  function forget() {
+    if (playing) store.stopSample();
+    if (sample) rpc("voice.sample_drop", { sample: sample.id }).catch(() => {});
+    sample = null;
+  }
+
+  /** Back to the sample, to record or choose another */
+  function retake() {
+    forget();
+    error = "";
+    step = "sample";
   }
 
   /** Make the voice of the sample, for English and each language picked,
    *  then choose it, and say the preview in it. */
-  async function make() {
+  async function confirm() {
+    if (!sample) return;
+    if (playing) store.stopSample();
+    const id = sample.id;
+    error = "";
+    step = "making";
     const replace = keep && cloned ? draft.voice : "";
     doing = "Making the voice for English";
     progress = { done: 0, total: 0 };
-    const result = await ask<{
+    const result = await request<{
       ok: boolean;
       error?: string;
       access?: boolean;
       voice?: VoiceInfo;
       jobs?: VoiceJob[];
-    }>("voice.clone", { name: draft.name.trim(), replace, languages: $state.snapshot(picked) });
-    if (!result) return back(error);
-    if (!result.ok || !result.voice) {
-      if (result.access) {
-        await open();
-        error = result.error ?? "";
-      } else back(result.error);
+    }>("voice.clone", {
+      name: draft.name.trim(),
+      replace,
+      // Plain, not the state's proxy, which the window's IPC cannot copy
+      languages: $state.snapshot(picked),
+      sample: id,
+    });
+    // Closed meanwhile: a voice made is listed, a sample not cloned dropped
+    if (step !== "making" || sample?.id !== id) {
+      if (result?.ok) await store.loadVoices().catch(() => {});
+      else rpc("voice.sample_drop", { sample: id }).catch(() => {});
       return;
     }
-    const voice = result.voice.id;
-    madeVoice = voice;
+    // The request failed, and says why: the sample is there to try again
+    if (!result) {
+      step = "confirm";
+      return;
+    }
+    if (!result.ok || !result.voice) {
+      if (result.access) {
+        step = "checking";
+        await ask();
+        error = result.error ?? "";
+      } else {
+        error = result.error ?? "The voice could not be made";
+        step = "confirm";
+      }
+      return;
+    }
+    sample = null;
+    madeVoice = result.voice.id;
     making = result.jobs ?? [];
     if (!making.length) await finish();
   }
@@ -256,13 +377,9 @@
     await store.previewVoice({ ...$state.snapshot(draft), name: draft.name.trim() || named, voice });
   }
 
-  function back(message?: string) {
-    error = message ?? "The voice could not be made";
-    step = "sample";
-  }
-
   function close() {
     if (step === "recording") rpc("voice.record", { on: false, keep: false }).catch(() => {});
+    if (step !== "making") forget();
     making = [];
     madeVoice = "";
     step = "closed";
@@ -303,9 +420,9 @@
         <span class="text-[11.5px] tabular-nums text-ink-3">
           Downloading Kyutai's cloning model for English: {mb(progress.done)} of {mb(progress.total)} MB
         </span>
-      {:else if step === "checking" || step === "making"}
+      {:else if step === "checking" || step === "making" || step === "preparing"}
         <div class="waiting" aria-hidden="true"></div>
-        {#if step === "making" && doing}
+        {#if (step === "making" || step === "preparing") && doing}
           <span class="text-[11.5px] text-ink-3">{doing}</span>
         {/if}
       {:else if step === "connect"}
@@ -364,20 +481,6 @@
             onchange={chosen}
           />
         </div>
-        {#if pocket.length > 1}
-          <div class="flex flex-col gap-1.5">
-            <span class="text-[11.5px] text-ink-3">Make it for</span>
-            <LanguageFilter
-              languages={pocket}
-              asked={picked}
-              addable={new Set(pocket.map((l) => l.code))}
-              onwant={(code) => {
-                if (code !== "en") picked = toggled(picked, code);
-              }}
-              label="Languages to make the voice for"
-            />
-          </div>
-        {/if}
         <p class="line">Only clone a voice you have permission to use.</p>
       {:else if step === "recording"}
         <p class="script">{SCRIPT}</p>
@@ -394,6 +497,43 @@
             <Icon name="stop" size={12} />
             Stop
           </button>
+        </div>
+      {:else if step === "confirm" && sample}
+        <div class="sample" data-sample={sample.id}>
+          <button
+            class="s-play {playing ? 'playing' : ''}"
+            onclick={listen}
+            aria-label={playing ? "Stop the sample" : "Play the sample"}
+          >
+            <Icon name={playing ? "stop" : "play"} size={10} />
+          </button>
+          <span class="name truncate" title={sample.name}>{sample.name}</span>
+          <span class="length tabular-nums">{minutes(sample.seconds)}</span>
+        </div>
+        {#if pocket.length > 1}
+          <div class="flex flex-col gap-1.5">
+            <span class="text-[11.5px] text-ink-3">Make it for</span>
+            <LanguageFilter
+              languages={pocket}
+              asked={picked}
+              addable={new Set(pocket.map((l) => l.code))}
+              fixed={["en"]}
+              {downloads}
+              onwant={(code) => {
+                if (code !== "en") picked = toggled(picked, code);
+              }}
+              label="Languages to make the voice for"
+            />
+          </div>
+        {/if}
+        <div class="flex items-center gap-2">
+          <button class="s-btn" onclick={retake}>
+            <Icon name="back" size={12} />
+            Back
+          </button>
+          <span class="flex-1"></span>
+          <button class="s-btn" onclick={close}>Cancel</button>
+          <button class="s-btn primary" onclick={confirm}>Clone voice</button>
         </div>
       {/if}
 
@@ -424,6 +564,23 @@
     min-width: 12rem;
     flex: 1;
     height: 1.9rem;
+  }
+  /* The sample prepared, heard before a voice is made of it */
+  .sample {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.55rem;
+  }
+  .sample .name {
+    min-width: 0;
+    font-size: 12.5px;
+    color: var(--color-ink);
+  }
+  .sample .length {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--color-ink-3);
   }
   .script {
     padding: 0.6rem 0.8rem;

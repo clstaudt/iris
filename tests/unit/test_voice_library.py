@@ -173,7 +173,9 @@ def test_a_voice_that_cannot_be_made_again_stays_as_it_was(kyutai, heard_by_ener
 
 
 @pytest.mark.readiness
-def test_a_voice_cloned_is_made_ready_for_the_languages_chosen_with_it(kyutai, heard_by_energy):
+def test_a_voice_cloned_is_made_ready_for_the_languages_confirmed_with_it(kyutai, heard_by_energy):
+    """The languages picked as the clone is confirmed are the ones made,
+    English always: one of Iris's left out is not made."""
     controller = AssistantController(EventBus())
     controller.languages = ["en", "fr"]
     _sampled(controller.cloning)
@@ -181,10 +183,37 @@ def test_a_voice_cloned_is_made_ready_for_the_languages_chosen_with_it(kyutai, h
     result = controller.voice_clone({"name": "Ada", "languages": ["de"]})
 
     assert result["ok"] and result["voice"]["id"] == "clone:ada"
-    assert sorted(job["language"] for job in result["jobs"]) == ["de", "fr"]
-    for job in result["jobs"]:
-        assert controller.readier.wait(job["id"], 5)
-    assert made_for(voice_folder("clone:ada")) == ["english", "french", "german"]
+    assert [job["language"] for job in result["jobs"]] == ["de"]
+    assert result["jobs"][0]["origin"] == "clone"
+    # German's cloning model is not here: it downloads first, as its job shows
+    assert controller.readier.wait(result["jobs"][0]["id"], 5)
+    assert "german" in kyutai.fetched
+    assert made_for(voice_folder("clone:ada")) == ["english", "german"]
+
+
+@pytest.mark.readiness
+def test_a_voice_cloned_without_languages_named_is_made_for_iriss(kyutai, heard_by_energy):
+    controller = AssistantController(EventBus())
+    controller.languages = ["en", "fr"]
+    _sampled(controller.cloning)
+
+    result = controller.voice_clone({"name": "Ada"})
+
+    assert [job["language"] for job in result["jobs"]] == ["fr"]
+    assert controller.readier.wait(result["jobs"][0]["id"], 5)
+    assert made_for(voice_folder("clone:ada")) == ["english", "french"]
+
+
+@pytest.mark.readiness
+def test_english_alone_needs_no_job_beside_the_clone(kyutai, heard_by_energy):
+    controller = AssistantController(EventBus())
+    controller.languages = ["en", "fr"]
+    _sampled(controller.cloning)
+
+    result = controller.voice_clone({"name": "Ada", "languages": []})
+
+    assert result["ok"] and result["jobs"] == []
+    assert made_for(voice_folder("clone:ada")) == ["english"]
 
 
 def test_a_generator_drops_a_voice_made_again(kyutai):

@@ -1,8 +1,10 @@
 <script lang="ts">
   import type { LanguageInfo } from "../../lib/state.svelte";
+  import Icon from "../Icon.svelte";
 
   // Iris's languages as a row of pills: the voices shown speak every one
-  // picked. A language none of them also speaks cannot be added.
+  // picked. A language none of them also speaks cannot be added. Some may
+  // be picked always, and some marked as downloading something first.
 
   let {
     languages,
@@ -10,24 +12,39 @@
     addable,
     onwant,
     label = "Voices that speak",
+    fixed = [],
+    downloads = {},
   }: {
     languages: LanguageInfo[];
     asked: string[];
     addable: Set<string>;
     onwant: (code: string) => void;
     label?: string;
+    /** Picked whatever else is: they cannot be taken out */
+    fixed?: string[];
+    /** The languages that download something first, with what, by code */
+    downloads?: Record<string, string>;
   } = $props();
 </script>
 
 <div class="langs" role="group" aria-label={label}>
   {#each languages as language}
+    {@const download = downloads[language.code]}
     <button
       class="lang {asked.includes(language.code) ? 'active' : ''}"
+      class:always={fixed.includes(language.code)}
       aria-pressed={asked.includes(language.code)}
-      disabled={!asked.includes(language.code) && !addable.has(language.code)}
+      disabled={fixed.includes(language.code) ||
+        (!asked.includes(language.code) && !addable.has(language.code))}
+      title={download}
+      data-language={language.code}
+      data-download={download ? "" : undefined}
       onclick={() => onwant(language.code)}
     >
       {language.name}
+      {#if download}
+        <Icon name="download" size={10} class="mark" />
+      {/if}
     </button>
   {/each}
 </div>
@@ -39,6 +56,9 @@
     gap: 4px;
   }
   .lang {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
     height: 1.5rem;
     padding: 0 0.55rem;
     border-radius: 9999px;
@@ -60,5 +80,12 @@
   }
   .lang:disabled {
     opacity: 0.35;
+  }
+  .lang.always:disabled {
+    opacity: 1;
+    cursor: default;
+  }
+  .lang :global(.mark) {
+    color: var(--color-ink-3);
   }
 </style>
