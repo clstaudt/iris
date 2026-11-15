@@ -221,7 +221,20 @@ const server = http.createServer((request, response) => {
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const url = `http://127.0.0.1:${server.address().port}/`;
 
-const browser = await chromium.launch({ channel: "chrome", headless: !process.env.E2E_HEADED });
+// About twenty seconds after it starts, Chrome wakes its updater, which on
+// macOS is GoogleUpdater. The updater's processes inherit Chrome's stdout and
+// stderr, and they, and Chrome's crash handler with them, live on after
+// Chrome quits for as long as the updater is busy. When two runs overlap that
+// is minutes: the second wake starts an updater service that cannot register,
+// and gives up only after about five minutes. Playwright's close waits for
+// those pipes to close, so the run hung at its end. The switch keeps the
+// updater asleep.
+const browser = await chromium.launch({
+  channel: "chrome",
+  headless: !process.env.E2E_HEADED,
+  args: ["--disable-updater-scheduler"],
+});
+
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const pageErrors = [];
 page.on("pageerror", (error) => pageErrors.push(String(error)));
