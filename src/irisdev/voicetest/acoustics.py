@@ -14,6 +14,12 @@ Every speaker records each clip it is given: when it started being heard and
 when it was cut off. So a test knows exactly when a user stopped speaking,
 when the assistant's first word was heard and when its voice fell silent.
 
+As a real device's, a speaker's sound does not come out exactly when the
+device says: a stream started after a silence (a device waking up) comes
+out later than reported, by an amount that differs each time
+(Space(wake_latency=...)). An echo canceller then finds the voice in a new
+place at the start of every reply, and lets it through while it adapts.
+
 An endpoint is an audio device as Iris takes it (iris.audio.SoundDevice):
 input_stream, query_devices, play, stop and playing. Any assistant whose
 audio goes through such an object can be tested in a space.
@@ -35,6 +41,15 @@ from scipy.signal import butter, fftconvolve, resample_poly, sosfilt
 RATE = 16000
 # What a virtual speaker reports as its output latency
 OUTPUT_LATENCY = 0.05
+# A speaker whose stream starts after this many seconds of silence wakes up:
+# its sound comes out up to Space.wake_latency later than it reports, by an
+# amount drawn anew; within a reply its clips follow one another, and keep
+# the latency the first of them had
+WAKE_IDLE = 2.0
+# How much later than reported a waking speaker's sound may come out
+# (seconds), unless the space is told otherwise: a Bluetooth speaker's
+# latency moves by as much from one stream to the next
+WAKE_LATENCY = 0.3
 # Above this a sample counts as sound
 AUDIBLE = 0.01
 # Seconds of what a microphone heard kept for listening back, so a long
@@ -238,24 +253,38 @@ class Speaker:
     As a sounddevice stream does, it plays in blocks (blocksize): the last
     one is filled up with silence, and the stream is playing until that has
     been played too.
+
+    It always reports OUTPUT_LATENCY. Woken after WAKE_IDLE seconds of
+    silence, it plays up to wake_latency later than that, by an amount the
+    random generator draws (none if wake_latency is 0); clips that follow
+    one another keep it.
     """
 
-    def __init__(self):
+    def __init__(self, wake_latency: float = 0.0, rng: Optional[np.random.Generator] = None):
         self.clips: list[Clip] = []
         self._lock = threading.Lock()
         # Until when the last clip's stream plays (its last block played)
         self._stream_end = 0.0
+        self.wake_latency = wake_latency
+        self._rng = rng if rng is not None else np.random.default_rng()
+        # How much later than reported its sound comes out, since it woke
+        self.late = 0.0
+        # When its last stream stopped playing (None: it never played)
+        self._quiet_since: Optional[float] = None
 
     def play(self, data, samplerate, blocksize=None, **options) -> float:
         now = time.monotonic()
         with self._lock:
             self._cut(now)
-            clip = Clip(to_rate(data, int(samplerate)), now + OUTPUT_LATENCY)
+            if self._quiet_since is None or now - self._quiet_since >= WAKE_IDLE:
+                self.late = float(self._rng.uniform(0.0, self.wake_latency)) if self.wake_latency else 0.0
+            clip = Clip(to_rate(data, int(samplerate)), now + OUTPUT_LATENCY + self.late)
             self.clips.append(clip)
             frames = len(data)
             if blocksize:
                 frames = -(-frames // int(blocksize)) * int(blocksize)
             self._stream_end = clip.started + frames / int(samplerate)
+            self._quiet_since = self._stream_end
         return OUTPUT_LATENCY
 
     def stop(self):
@@ -266,6 +295,8 @@ class Speaker:
         last = self.clips[-1] if self.clips else None
         if last is not None and last.stopped is None and last.end > now:
             last.stopped = max(now, last.started)
+        if self._quiet_since is not None:
+            self._quiet_since = min(self._quiet_since, max(now, self.clips[-1].started))
 
     def playing(self) -> bool:
         """Whether the last clip's stream is still playing, its last block
@@ -339,10 +370,10 @@ def _mix(block: np.ndarray, block_start: float, audio: np.ndarray, audio_start: 
 class Endpoint:
     """A microphone and a speaker in the space, as one audio device."""
 
-    def __init__(self, space: "Space", name: str):
+    def __init__(self, space: "Space", name: str, rng: Optional[np.random.Generator] = None):
         self.space = space
         self.name = name
-        self.speaker = Speaker()
+        self.speaker = Speaker(space.wake_latency, rng)
         # What the microphone delivered, its last HEARD_KEPT seconds:
         # (first sample's time, block)
         self._heard: deque = deque()
@@ -432,6 +463,7 @@ class Space:
         echo_low_cut: Optional[float] = None,
         echo_late: float = 0.0,
         room: Optional[Room] = None,
+        wake_latency: float = WAKE_LATENCY,
     ):
         """
         Args:
@@ -453,12 +485,18 @@ class Space:
             room: A room to take all of the echo's character from at once
                 (overrides echo_room, echo_drive, echo_drr, echo_low_cut and
                 echo_late)
+            wake_latency: A speaker woken from a silence plays up to this
+                many seconds later than it reports, by an amount that
+                differs each time (see Speaker); 0 for exactly when it
+                reports
         """
         self.echo_gain = echo_gain
         self.echo_delay = echo_delay
         self.across_gain = across_gain
         self.across_delay = across_delay
         self.noise = noise
+        self.wake_latency = wake_latency
+        self._seed = seed
         self.endpoints: list[Endpoint] = []
         self.utterances: list[Utterance] = []
         self.sources: list[Source] = []
@@ -522,7 +560,9 @@ class Space:
             return [u for u in self.utterances if u.start < end and u.start + len(u.audio) / RATE > start]
 
     def endpoint(self, name: str) -> Endpoint:
-        endpoint = Endpoint(self, name)
+        # Each speaker draws its latencies from a generator of its own, so
+        # they do not depend on how much noise the microphones drew
+        endpoint = Endpoint(self, name, np.random.default_rng([self._seed, len(self.endpoints)]))
         self.endpoints.append(endpoint)
         return endpoint
 

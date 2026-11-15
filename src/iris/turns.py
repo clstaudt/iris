@@ -46,6 +46,23 @@ HOLD_TRIGGER = 0.13
 # Speech that holds the voice again after a hold heard only its echo; after
 # a second such hold the voice is not held again until it has ended
 HOLD_TRIGGER_AFTER_ECHO = 1.0
+# Over the voice, speech is weighed against how loud the voice's echo could
+# be (dB). Iris's own echo, let through by a canceller that is finding the
+# voice again at the start of a reply, came to at most 6 dB over it in the
+# voice tests' room (and 7.4 dB for a test's harsher, synthetic voice), the
+# user's first syllables mostly to 8 or more: speech standing out this much
+# holds the voice after HOLD_TRIGGER. Speech that does not stand out holds
+# it only after HOLD_TRIGGER_NEAR_ECHO: the echo let through was sure to be
+# speech for up to 0.5 s at a time, and a user who speaks about as loud as
+# the echo is still heard within the second. Once such a hold heard only
+# the echo, such speech needs HOLD_TRIGGER_AFTER_ECHO, in later replies too,
+# until a hold hears the user
+HOLD_STANDS_OUT = 8.0
+HOLD_TRIGGER_NEAR_ECHO = 0.6
+# Speech the VAD is sure of while the canceller leaves this much less than
+# the echo (dB) is what the canceller leaves of the voice: it holds nothing,
+# and speech over the voice starts over
+HOLD_RESIDUAL = -10.0
 # Held, the voice is listened to this long in the quiet. Once the device has
 # played out what it had (about 0.15 s) and the room is still, speech in at
 # least this share of the time is the user's; anything less was the echo.

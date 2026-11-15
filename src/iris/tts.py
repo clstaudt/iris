@@ -1293,9 +1293,10 @@ class SpeechPipeline:
         """Hold speech mid-sentence; queued text keeps being synthesized."""
         self.player.pause()
 
-    def resume(self):
-        """Continue speech from where pause() held it."""
-        self.player.resume()
+    def resume(self, rewind: bool = True):
+        """Continue speech from where pause() held it: a little before it
+        (rewind), or exactly there (see AudioPlayer.resume)."""
+        self.player.resume(rewind)
 
     def stop(self):
         """Stop the speech pipeline immediately: what plays, what waits, and

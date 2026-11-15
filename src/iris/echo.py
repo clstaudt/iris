@@ -11,6 +11,7 @@ against what was played at the time it was captured.
 import atexit
 import threading
 from collections import deque
+from dataclasses import dataclass
 from math import gcd
 
 import numpy as np
@@ -59,6 +60,32 @@ ABOVE_NOISE = 4.0
 # (Not the microphone while nothing played: a voice that comes out later
 # than the canceller is told is heard then.)
 NOISE_WINDOWS = 80
+# What the microphone hears at a moment holds the voice's echo of what was
+# played up to ECHO_WITHIN seconds before (a device that plays later than it
+# says, the room's reverberation) and up to LEAD after (one that plays
+# early). When the voice really comes out is not known, so its echo is
+# taken to be as loud as the loudest of that, through the room's coupling
+ECHO_WITHIN = 0.5
+# The coupling (how loud the microphone hears the voice, against what was
+# played) is the median over the last COUPLING_WINDOWS windows of voice
+# heard over the room's noise: the user speaking over the voice is in a few
+COUPLING_WINDOWS = 40
+# Seconds of the microphone's levels kept, for what was heard to be weighed
+# against the voice's echo (against_echo)
+LEVELS_KEPT = 3.0
+
+
+@dataclass(frozen=True)
+class EchoLevels:
+    """What the microphone heard over a stretch, against the voice's echo
+    as loud as it could have been then (dB): all of it (heard), and what the
+    canceller left of it (left). Speech that is the user's is louder than
+    the echo, or at least near it; what a working canceller leaves of the
+    voice is far below it, and a canceller that has lost the voice leaves
+    about as much as the echo."""
+
+    heard: float
+    left: float
 
 
 def _int16(audio: np.ndarray) -> bytes:
@@ -86,6 +113,16 @@ class EchoCanceller:
         # The microphone's energy by window, and in the window so far
         self._levels: deque[float] = deque(maxlen=NOISE_WINDOWS)
         self._level = [0.0, 0]
+        # The energy of each step of what was played lately: (when it was
+        # played, energy)
+        self._recent: deque[tuple[float, float]] = deque()
+        # The coupling by window of voice, and the energy heard and the most
+        # the echo could have had in the window so far
+        self._couplings: deque[float] = deque(maxlen=COUPLING_WINDOWS)
+        self._coupling = [0.0, 0.0, 0]
+        # By step, lately: (when it was captured, its energy, the energy the
+        # canceller left of it, the most its echo could have had)
+        self._steps: deque[tuple[float, float, float, float]] = deque()
 
     @property
     def settled(self) -> bool:
@@ -101,6 +138,37 @@ class EchoCanceller:
             return None
         ordered = sorted(self._suppressions)
         return ordered[min(CANCELLING_SPARED, len(ordered) - 1)]
+
+    @property
+    def coupling(self) -> float | None:
+        """How loud the microphone hears the voice: its energy against the
+        energy of the loudest of what was played within ECHO_WITHIN before
+        (the median over recent windows of voice); None before the voice was
+        heard over the room's noise."""
+        if not self._couplings:
+            return None
+        ordered = sorted(self._couplings)
+        return ordered[len(ordered) // 2]
+
+    def against_echo(self, start: float, end: float) -> EchoLevels | None:
+        """What the microphone heard between two moments (time.monotonic(),
+        within the last LEVELS_KEPT seconds), against the voice's echo as
+        loud as it could have been then. None if nothing was played then,
+        or before the coupling is known."""
+        coupling = self.coupling
+        if coupling is None:
+            return None
+        heard = left = bound = 0.0
+        for at, energy, cleaned, most in self._steps:
+            if start <= at < end:
+                heard, left, bound = heard + energy, left + cleaned, bound + most
+        echo = coupling * bound
+        if bound < PLAYING**2 or echo <= 0.0:
+            return None
+        return EchoLevels(
+            10.0 * float(np.log10(max(heard, 1e-12) / echo)),
+            10.0 * float(np.log10(max(left, 1e-12) / echo)),
+        )
 
     @property
     def cancelling(self) -> bool:
@@ -163,6 +231,7 @@ class EchoCanceller:
             self._apm.process_stream(capture)
             cleaned[i : i + STEP] = np.frombuffer(capture.data, dtype=np.int16) / 32768.0
             self._listen_to_the_room(audio[i : i + STEP])
+            self._weigh(at, audio[i : i + STEP], cleaned[i : i + STEP], reference)
             # What was played reaches the microphone a little later
             lately = self._reference(at - HEARD_WITHIN, int(HEARD_WITHIN * RATE) + STEP)
             if float(np.sqrt(np.mean(lately**2))) >= PLAYING:
@@ -177,6 +246,32 @@ class EchoCanceller:
         if level[1] * STEP >= WINDOW * RATE:
             self._levels.append(level[0] / level[1])
             self._level = [0.0, 0]
+
+    def _weigh(self, at: float, heard: np.ndarray, cleaned: np.ndarray, reference: np.ndarray):
+        """Keep a step's levels, and the most its echo could have had: the
+        loudest step of what was played from ECHO_WITHIN before it to LEAD
+        after (reference is what is played LEAD after it)."""
+        recent = self._recent
+        recent.append((at + LEAD, float(np.mean(reference**2))))
+        while recent and recent[0][0] < at - ECHO_WITHIN:
+            recent.popleft()
+        most = max(played for _, played in recent)
+        energy = float(np.mean(heard**2))
+        steps = self._steps
+        steps.append((at, energy, float(np.mean(cleaned**2)), most))
+        while steps and steps[0][0] < at - LEVELS_KEPT:
+            steps.popleft()
+        if most < PLAYING**2:
+            return
+        window = self._coupling
+        window[0] += energy
+        window[1] += most
+        window[2] += 1
+        if window[2] * STEP >= WINDOW * RATE:
+            noise = min(self._levels) if self._levels else 0.0
+            if window[0] / window[2] >= ABOVE_NOISE * noise:
+                self._couplings.append(window[0] / window[1])
+            self._coupling = [0.0, 0.0, 0]
 
     def _measure(self, heard: np.ndarray, cleaned: np.ndarray):
         """Count a step of the voice towards how much it is taken out."""
