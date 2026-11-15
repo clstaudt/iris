@@ -51,7 +51,7 @@ export const TOUR: TourStep[] = [
   },
   {
     id: "personas",
-    text: "Personas are the characters you can talk to, each with its own personality, voice and wake word. Make your own here.",
+    text: "A persona shapes your assistant's character and style: its personality, voice and wake word. Make your own here.",
     places: [
       { targets: ["settings"], click: true },
       { targets: ["settings-personas", "personas"], settings: "personas" },

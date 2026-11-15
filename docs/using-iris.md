@@ -82,7 +82,7 @@ Iris keeps one continuous conversation that survives restarts and is remembered 
 
 ### Personas
 
-A persona is a character you can talk to: a name, a personality, a voice, and the words that wake it and send it to sleep. Iris ships one, **Iris**, friendly and helpful. Under Settings > Personas you edit it or create others: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited Iris can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`); a change to the file of the persona in use is taken on while Iris runs, from its next reply:
+A persona shapes your assistant's character and style: a name, a personality, a voice, and the words that wake it and send it to sleep. Iris ships one, **Iris**, friendly and helpful. Under Settings > Personas you edit it or create others: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited Iris can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`); a change to the file of the persona in use is taken on while Iris runs, from its next reply:
 
 ```yaml
 name: "Juno"
