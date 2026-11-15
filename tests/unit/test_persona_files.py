@@ -61,7 +61,7 @@ def voice_state(path: Path, frames: int = 4) -> Path:
     return path
 
 
-def cloned(name="Noam", languages=("english", "german")) -> Path:
+def cloned(name="Robin", languages=("english", "german")) -> Path:
     """A voice cloned here, made for these languages."""
     folder = a_voice(name)
     for language in languages:
@@ -69,21 +69,21 @@ def cloned(name="Noam", languages=("english", "german")) -> Path:
     return folder
 
 
-NOAM = {
-    "name": "Noam",
+ROBIN = {
+    "name": "Robin",
     "engine": "kyutai",
     "voice": "alba",
     "speed": 1.1,
     "audio_filter": "radio",
-    "description": "You are Noam.\nYou take your time.",
-    "wake_word": "Hey Noam",
+    "description": "You are Robin.\nYou take your time.",
+    "wake_word": "Hey Robin",
     "sleep_word": "Goodnight",
 }
 
 
 def saved(**changes) -> personas.Persona:
     """A persona of the user's, saved."""
-    return personas.find_persona(personas.save_persona({**NOAM, **changes}))
+    return personas.find_persona(personas.save_persona({**ROBIN, **changes}))
 
 
 def exported(persona, folder: Path) -> Path:
@@ -123,19 +123,19 @@ def test_a_persona_with_a_voice_of_its_engine_goes_to_a_file_and_back(tmp_path):
     with zipfile.ZipFile(path) as archive:
         data = yaml.safe_load(archive.read("persona.yaml"))
     assert data["format"] == persona_files.FORMAT
-    assert data["voice"] == "alba" and data["wake_word"] == "Hey Noam"
+    assert data["voice"] == "alba" and data["wake_word"] == "Hey Robin"
 
     personas.delete_persona(persona.id)
     persona_id = import_persona(path)
 
-    assert persona_id == "noam"
+    assert persona_id == "robin"
     assert personas.find_persona(persona_id).to_dict() == before
     assert library() == []
 
 
 def test_a_persona_with_a_cloned_voice_takes_it_along_with_the_languages_made_of_it(tmp_path):
-    folder = cloned("Noam")
-    persona = saved(voice="clone:noam")
+    folder = cloned("Robin")
+    persona = saved(voice="clone:robin")
     sample = (folder / "sample.wav").read_bytes()
     states = {p.name: p.read_bytes() for p in folder.glob("*.safetensors")}
 
@@ -151,32 +151,32 @@ def test_a_persona_with_a_cloned_voice_takes_it_along_with_the_languages_made_of
 
     # Gone from here, the persona and its voice, and back from the file
     personas.delete_persona(persona.id)
-    assert cloning.forget_voice("clone:noam")
+    assert cloning.forget_voice("clone:robin")
     persona_id = import_persona(path)
 
     imported = personas.find_persona(persona_id)
-    assert imported.name == "Noam"
+    assert imported.name == "Robin"
     # The folder of a voice deleted while Iris runs is not taken again
-    assert imported.voice == "clone:noam-2"
+    assert imported.voice == "clone:robin-2"
     folder = cloning.voice_folder(imported.voice)
     assert (folder / "sample.wav").read_bytes() == sample
     assert {p.name: p.read_bytes() for p in folder.glob("*.safetensors")} == states
-    assert cloning.cloned_voices() == [{"id": "clone:noam-2", "name": "Noam", "language": "Cloned"}]
+    assert cloning.cloned_voices() == [{"id": "clone:robin-2", "name": "Robin", "language": "Cloned"}]
     voice = next(
         v
         for v in AssistantController(EventBus()).voice_list()["engines"]["kyutai"]
-        if v["id"] == "clone:noam-2"
+        if v["id"] == "clone:robin-2"
     )
     assert voice["cloned"]["made"] == ["en", "de"]
-    assert voice["personas"] == [{"id": "noam", "name": "Noam"}]
-    assert library() == ["noam-2"]
+    assert voice["personas"] == [{"id": "robin", "name": "Robin"}]
+    assert library() == ["robin-2"]
 
 
 def test_an_imported_voice_speaks_the_languages_made_of_it_at_once(tmp_path, kyutai):
-    cloned("Noam")
-    path = exported(saved(voice="clone:noam"), tmp_path)
-    personas.delete_persona("noam")
-    cloning.forget_voice("clone:noam")
+    cloned("Robin")
+    path = exported(saved(voice="clone:robin"), tmp_path)
+    personas.delete_persona("robin")
+    cloning.forget_voice("clone:robin")
     voice = personas.find_persona(import_persona(path)).voice
 
     with patch("iris.tts.TTSModel") as models:
@@ -191,19 +191,19 @@ def test_an_imported_voice_speaks_the_languages_made_of_it_at_once(tmp_path, kyu
 
 
 def test_imported_where_its_name_and_voice_are_taken_both_get_a_number(tmp_path):
-    cloned("Noam")
-    path = exported(saved(voice="clone:noam", wake_word=""), tmp_path)
+    cloned("Robin")
+    path = exported(saved(voice="clone:robin", wake_word=""), tmp_path)
 
     second = import_persona(path)
     third = import_persona(path)
 
-    assert (second, third) == ("noam-2", "noam-3")
-    found = [personas.find_persona(persona_id) for persona_id in ("noam", second, third)]
-    assert [p.name for p in found] == ["Noam", "Noam 2", "Noam 3"]
+    assert (second, third) == ("robin-2", "robin-3")
+    found = [personas.find_persona(persona_id) for persona_id in ("robin", second, third)]
+    assert [p.name for p in found] == ["Robin", "Robin 2", "Robin 3"]
     # Woken by its name, as the persona it came from
-    assert [p.wake_word for p in found] == ["Noam", "Noam 2", "Noam 3"]
-    assert [p.voice for p in found] == ["clone:noam", "clone:noam-2", "clone:noam-3"]
-    assert [v["name"] for v in cloning.cloned_voices()] == ["Noam", "Noam 2", "Noam 3"]
+    assert [p.wake_word for p in found] == ["Robin", "Robin 2", "Robin 3"]
+    assert [p.voice for p in found] == ["clone:robin", "clone:robin-2", "clone:robin-3"]
+    assert [v["name"] for v in cloning.cloned_voices()] == ["Robin", "Robin 2", "Robin 3"]
 
 
 def test_a_persona_named_as_one_iris_ships_gets_a_number(tmp_path):
@@ -217,18 +217,18 @@ def test_a_persona_named_as_one_iris_ships_gets_a_number(tmp_path):
 
 
 def test_a_voice_whose_name_another_voice_has_gets_a_number(tmp_path):
-    cloned("Noam")
-    path = exported(saved(voice="clone:noam"), tmp_path)
-    personas.delete_persona("noam")
-    # Another voice, called Noam since, in another folder
-    cloning.rename_voice("clone:noam", "Someone")
+    cloned("Robin")
+    path = exported(saved(voice="clone:robin"), tmp_path)
+    personas.delete_persona("robin")
+    # Another voice, called Robin since, in another folder
+    cloning.rename_voice("clone:robin", "Someone")
     cloned("Other")
-    cloning.rename_voice("clone:other", "Noam")
+    cloning.rename_voice("clone:other", "Robin")
 
     voice = personas.find_persona(import_persona(path)).voice
 
-    assert voice == "clone:noam-2"
-    assert cloning.voice_name(cloning.voice_folder(voice)) == "Noam 2"
+    assert voice == "clone:robin-2"
+    assert cloning.voice_name(cloning.voice_folder(voice)) == "Robin 2"
 
 
 # ---------------------------------------------------------------------------
@@ -239,11 +239,11 @@ def test_a_voice_whose_name_another_voice_has_gets_a_number(tmp_path):
 def persona_yaml(**changes) -> bytes:
     data = {
         "format": 1,
-        "name": "Noam",
+        "name": "Robin",
         "engine": "kyutai",
-        "voice": "clone:noam",
+        "voice": "clone:robin",
         "speed": 1.0,
-        "description": "You are Noam.\n",
+        "description": "You are Robin.\n",
     }
     data.update(changes)
     return yaml.safe_dump({k: v for k, v in data.items() if v is not ...}).encode()
@@ -268,7 +268,7 @@ def files(state_bytes) -> dict:
     """What a persona file with a cloned voice holds, as Iris writes it."""
     return {
         "persona.yaml": persona_yaml(),
-        "voice/voice.yaml": b"name: Noam\n",
+        "voice/voice.yaml": b"name: Robin\n",
         "voice/sample.wav": sample_wav(),
         "voice/english.safetensors": state_bytes,
     }
@@ -303,8 +303,8 @@ def refused(path: Path, message: str):
 def test_a_crafted_file_as_iris_writes_it_is_taken(tmp_path, files):
     persona_id = import_persona(written(tmp_path, files))
 
-    assert personas.find_persona(persona_id).voice == "clone:noam"
-    assert cloning.made_for(cloning.voices_dir() / "noam") == ["english"]
+    assert personas.find_persona(persona_id).voice == "clone:robin"
+    assert cloning.made_for(cloning.voices_dir() / "robin") == ["english"]
 
 
 def _link(name: str) -> zipfile.ZipInfo:
@@ -432,7 +432,7 @@ def test_a_voice_missing_its_sample_or_name_is_refused(tmp_path, files, missing)
     refused(written(tmp_path, files), VOICE_DAMAGED)
 
 
-@pytest.mark.parametrize("info", [b"name: [unclosed", b"- Noam\n", b"name: ''\n", b"name: 12\n"])
+@pytest.mark.parametrize("info", [b"name: [unclosed", b"- Robin\n", b"name: ''\n", b"name: 12\n"])
 def test_a_voice_whose_name_cannot_be_read_is_refused(tmp_path, files, info):
     files["voice/voice.yaml"] = info
     refused(written(tmp_path, files), VOICE_DAMAGED)
@@ -493,10 +493,10 @@ def test_a_file_of_the_version_this_iris_writes_is_taken(tmp_path):
 
 
 def test_an_imported_voice_is_made_ready_for_iriss_other_languages(tmp_path):
-    cloned("Noam", languages=("english",))
-    path = exported(saved(voice="clone:noam"), tmp_path)
-    personas.delete_persona("noam")
-    cloning.forget_voice("clone:noam")
+    cloned("Robin", languages=("english",))
+    path = exported(saved(voice="clone:robin"), tmp_path)
+    personas.delete_persona("robin")
+    cloning.forget_voice("clone:robin")
     controller = AssistantController(EventBus())
     controller.languages = ["en", "fr"]
     asked = []
@@ -504,31 +504,31 @@ def test_an_imported_voice_is_made_ready_for_iriss_other_languages(tmp_path):
 
     result = controller.persona_import(str(path))
 
-    assert result["ok"] and result["id"] == "noam"
-    assert "noam" in result["personas"] and result["names"]["noam"] == "Noam"
-    assert ("kyutai", "clone:noam-2", "fr", "Noam", ["Noam"], readiness.VOICES) in asked
+    assert result["ok"] and result["id"] == "robin"
+    assert "robin" in result["personas"] and result["names"]["robin"] == "Robin"
+    assert ("kyutai", "clone:robin-2", "fr", "Robin", ["Robin"], readiness.VOICES) in asked
 
 
 def test_the_app_exports_a_persona_as_saved(tmp_path):
     saved()
     controller = AssistantController(EventBus())
-    path = tmp_path / "Noam.irispersona"
+    path = tmp_path / "Robin.irispersona"
 
-    assert controller.persona_export("noam", str(path)) == {"ok": True}
+    assert controller.persona_export("robin", str(path)) == {"ok": True}
     assert held(path) == ["persona.yaml"]
     assert controller.persona_export("nobody", str(path))["ok"] is False
 
 
 def test_a_persona_whose_cloned_voice_is_gone_is_not_exported(tmp_path):
-    personas.save_persona({**NOAM, "voice": "clone:gone"})
-    result = AssistantController(EventBus()).persona_export("noam", str(tmp_path / "x.irispersona"))
+    personas.save_persona({**ROBIN, "voice": "clone:gone"})
+    result = AssistantController(EventBus()).persona_export("robin", str(tmp_path / "x.irispersona"))
     assert result == {"ok": False, "error": "The voice Gone cannot be found"}
     assert list(tmp_path.iterdir()) == []
 
 
 def test_a_file_that_cannot_be_written_leaves_nothing(tmp_path):
     saved()
-    path = tmp_path / "gone" / "Noam.irispersona"
-    result = AssistantController(EventBus()).persona_export("noam", str(path))
+    path = tmp_path / "gone" / "Robin.irispersona"
+    result = AssistantController(EventBus()).persona_export("robin", str(path))
     assert result["ok"] is False and result["error"].startswith("The file could not be written")
     assert list(tmp_path.iterdir()) == []

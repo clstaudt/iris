@@ -586,7 +586,7 @@ class TestLanguageOf:
     @pytest.mark.parametrize(
         "text",
         [
-            "Werner Herzog is a German director, born in Munich in 1942.",
+            "Albert Einstein was a German physicist, born in Ulm in 1879.",
             "Who is Jürgen Klopp?",
             "Look up tickets for the Musée d'Orsay.",
             "Search for the opening hours of Schloss Neuschwanstein.",

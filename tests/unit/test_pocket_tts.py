@@ -302,7 +302,7 @@ def test_sentences_end_at_sentence_marks_not_abbreviations():
 
 
 def test_dashes_become_pauses_and_hyphens_plain():
-    assert pocket_sentences("Ich bin Klaus—direkt und klar.") == ["Ich bin Klaus, direkt und klar."]
+    assert pocket_sentences("Ich bin Felix—direkt und klar.") == ["Ich bin Felix, direkt und klar."]
     assert pocket_sentences("Kurz – und gut.") == ["Kurz, und gut."]
     assert pocket_sentences("graphics‑heavy tasks, 10–20 times") == [
         "graphics-heavy tasks, 10-20 times"

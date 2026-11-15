@@ -600,7 +600,7 @@ def test_a_chosen_file_makes_a_voice(kyutai, heard_by_energy):
     data = base64.b64encode(wav(np.concatenate([speech(6), silence(1), speech(4)]))).decode()
 
     assert service.use_file(data, "grandpa.wav")["ok"]
-    assert service.clone("Klaus")["voice"]["id"] == "clone:klaus"
+    assert service.clone("Felix")["voice"]["id"] == "clone:felix"
 
 
 def _prepared(service, seconds=8.0) -> dict:
@@ -807,31 +807,31 @@ def test_a_cloned_voice_that_is_not_here_is_not_given_to_a_persona():
     """The editor offered a voice removed meanwhile, and the persona saved
     with it named a voice that was not there."""
     controller = AssistantController(EventBus())
-    noam = {"name": "Noam", "engine": "kyutai", "description": "", "speed": 1.0}
+    robin = {"name": "Robin", "engine": "kyutai", "description": "", "speed": 1.0}
 
-    refused = controller.persona_save({**noam, "voice": "clone:noam-2"})
+    refused = controller.persona_save({**robin, "voice": "clone:robin-2"})
 
     assert refused["ok"] is False
-    assert refused["error"] == "The voice Noam 2 cannot be found: choose another voice"
-    assert "noam" not in personas.load_all_personas()
+    assert refused["error"] == "The voice Robin 2 cannot be found: choose another voice"
+    assert "robin" not in personas.load_all_personas()
     # Nor in place of the voice a persona speaks with
-    persona_id = controller.persona_save({**noam, "voice": "anna"})["id"]
-    instead = controller.persona_save({**noam, "id": persona_id, "voice": "clone:noam-2"})
+    persona_id = controller.persona_save({**robin, "voice": "anna"})["id"]
+    instead = controller.persona_save({**robin, "id": persona_id, "voice": "clone:robin-2"})
     assert instead["ok"] is False
     assert personas.load_all_personas()[persona_id].voice == "anna"
 
 
 def test_a_persona_whose_cloned_voice_is_not_here_still_saves_its_other_changes():
     """Its wake word, say: its voice is for the user to choose again."""
-    noam = {"name": "Noam", "engine": "kyutai", "voice": "clone:noam-2", "description": ""}
-    persona_id = personas.save_persona(noam)
+    robin = {"name": "Robin", "engine": "kyutai", "voice": "clone:robin-2", "description": ""}
+    persona_id = personas.save_persona(robin)
     personas.reload_personas()
     controller = AssistantController(EventBus())
 
-    assert controller.persona_save({**noam, "id": persona_id, "speed": 1.2})["ok"]
-    assert controller.set_persona_words(persona_id, wake_word="Hey Noam")["ok"]
+    assert controller.persona_save({**robin, "id": persona_id, "speed": 1.2})["ok"]
+    assert controller.set_persona_words(persona_id, wake_word="Hey Robin")["ok"]
     saved = personas.load_all_personas()[persona_id]
-    assert (saved.voice, saved.speed, saved.wake_word) == ("clone:noam-2", 1.2, "Hey Noam")
+    assert (saved.voice, saved.speed, saved.wake_word) == ("clone:robin-2", 1.2, "Hey Robin")
 
 
 def test_slow_cloning_requests_do_not_hold_up_the_others():

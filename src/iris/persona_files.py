@@ -1,7 +1,7 @@
 """A persona in a file of its own, to take to another computer or give to
 someone, and back: exported and imported from Settings, Personas.
 
-A persona file (Noam.irispersona) is a zip archive of:
+A persona file (Robin.irispersona) is a zip archive of:
 
     persona.yaml                the persona, as its file in ~/.iris/personas
                                 holds it, with the version of this format
@@ -23,7 +23,7 @@ of its own first, and goes into the library only once all of it is sound,
 before the persona is saved. A file refused leaves nothing behind.
 
 Imported, the persona is named as it was, unless another persona has the
-name: then "Noam 2"; its voice keeps its own name in the same way, under a
+name: then "Robin 2"; its voice keeps its own name in the same way, under a
 folder of its own. The voice is made ready for Iris's other languages as any
 persona's voice is (iris.readiness), where the user sees it.
 """

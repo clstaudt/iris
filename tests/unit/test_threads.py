@@ -415,8 +415,8 @@ def test_forgetting_the_open_thread_leaves_a_new_one_with_the_same_persona(dirs,
 
 def test_a_thread_whose_persona_is_gone_opens_with_iris(dirs, store):
     _, hal = _two_threads(store)
-    gone = store.create_thread("klaus")
-    _exchange(store, gone, "Hi Klaus", "Moin.")
+    gone = store.create_thread("felix")
+    _exchange(store, gone, "Hi Felix", "Moin.")
     controller, _ = _controller(store)
     controller.open_thread(hal)
 

@@ -66,8 +66,8 @@ def _controller(wake_word=None, sleep_word=None):
 
 
 def test_the_wake_word_is_the_persona_s_name_and_there_is_no_sleep_word():
-    persona = Persona("Klaus", "Dry.", voice="alba")
-    assert persona.wake_word == "Klaus"
+    persona = Persona("Felix", "Dry.", voice="alba")
+    assert persona.wake_word == "Felix"
     assert persona.sleep_word == ""
 
 
@@ -271,6 +271,6 @@ def test_iris_starts_with_the_words_taken_on(dirs, monkeypatch):
 
 def test_the_words_of_a_persona_gone_since_go_to_iris(dirs):
     _, user = dirs
-    result = AssistantController(EventBus()).adopt_wake_words("klaus", "Jarvis", "")
+    result = AssistantController(EventBus()).adopt_wake_words("felix", "Jarvis", "")
     assert result["ok"] is True and result["wake_on"] is True
     assert find_persona("iris").wake_word == "Jarvis"

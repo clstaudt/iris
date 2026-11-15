@@ -291,7 +291,7 @@ def dump(data: dict) -> str:
 def unused_name(name: str) -> str:
     """A name for a persona added under this one (imported from a file):
     the name itself, unless another persona has it or the file it would be
-    kept in, then with a number, as "Noam 2"."""
+    kept in, then with a number, as "Robin 2"."""
     taken = {persona.name.casefold() for persona in PERSONAS.values()}
 
     def free(candidate: str) -> bool:
