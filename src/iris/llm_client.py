@@ -312,11 +312,16 @@ class OpenAIClient:
     ):
         """A chat completion, streamed as ollama streams one when asked.
 
-        `format`, `think` and `keep_alive` are Ollama's: OpenAI-compatible
-        servers differ too much in how they take them, so they are left out.
-        Reasoning a server streams apart from the reply is left out too.
+        `format` and `keep_alive` are Ollama's: OpenAI-compatible servers
+        differ too much in how they take them, so they are left out.
+        think=False asks the model's chat template to answer without
+        reasoning first (enable_thinking off), which servers whose templates
+        have no such switch ignore; any other `think` is left out. Reasoning
+        a server streams apart from the reply is left out too.
         """
         payload = {"model": model, "messages": openai_messages(messages or []), "stream": stream}
+        if think is False:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         if tools and not self.tools_refused:
             payload["tools"] = [dict(tool) for tool in tools]
         for ours, theirs in (
