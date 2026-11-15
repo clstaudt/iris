@@ -132,6 +132,13 @@ LOOP_RESTARTS = 3
 LOOP_RESTART_WINDOW = 60.0
 LOOP_RESTART_DELAY = 0.2
 
+# Seconds a reply stopped by opening another thread is given to end, so
+# what was said of it is kept in the thread it was said in
+REPLY_END_WAIT = 5.0
+
+# Iris starts in the thread talked in last, unless told which one
+LAST_THREAD = object()
+
 
 def silent_microphone_message() -> str:
     """What to say when the microphone delivers nothing but exact zeros.
@@ -449,6 +456,9 @@ class AssistantController:
         # {plugin id: enabled} chosen in the UI; the others follow their default
         kwargs["tools"] = kwargs.pop("tools", {}) or {}
         amnesia = bool(kwargs.pop("amnesia", False))
+        # The thread to go on in: an id, or None for a new one with the
+        # persona; without one, the thread talked in last
+        thread = kwargs.pop("thread", LAST_THREAD)
         # The app still shows the conversation when it starts a core again
         # after one stopped: the recent turns are not shown a second time
         restore = bool(kwargs.pop("restore_thread", True))
@@ -479,9 +489,11 @@ class AssistantController:
             )
             self.assistant.conversation.set_amnesia(amnesia)
             self.assistant.on_voice_not_ready = self._voice_not_ready
+            self._enter_first_thread(thread)
             self.bus.emit("config", self.assistant.config_info())
             if restore:
                 self._restore_thread()
+            self.bus.emit("threads.changed", {})
         except Exception as e:
             self.bus.emit("error", {"message": f"Failed to start assistant: {e}"})
             with self._start_lock:
@@ -774,7 +786,8 @@ class AssistantController:
         return {"ok": True}
 
     def _restore_thread(self):
-        """Show the recent part of the continuous conversation after a restart.
+        """Show the recent part of the thread Iris is in: after a restart,
+        or once it opened another thread.
 
         The turns are marked as restored: they come once the models are
         loaded, after what the app has said meanwhile (a microphone it may
@@ -783,7 +796,7 @@ class AssistantController:
         memory = getattr(self.assistant, "memory", None)
         if memory is None:
             return
-        for turn in memory.store.recent_turns():
+        for turn in memory.store.recent_turns(self.assistant.conversation.thread):
             if turn["role"] == "user":
                 self.bus.emit(
                     "chat.user", {"text": turn["text"], "source": turn["source"], "restored": True}
@@ -793,13 +806,128 @@ class AssistantController:
                     "chat.done", {"text": turn["text"], "interrupted": False, "restored": True}
                 )
 
+    # ------------------------------------------------------------------
+    # Threads: a conversation with one persona, and its own memory
+    # ------------------------------------------------------------------
+
+    def _enter_first_thread(self, wanted):
+        """Go on in the thread asked for at the start: the one talked in
+        last, unless the app names one (that is still there), or None for a
+        new thread with the persona Iris started with."""
+        assistant = self.assistant
+        if getattr(assistant, "memory", None) is None:
+            return
+        store = assistant.memory.store
+        found = None
+        if wanted is not None:
+            found = store.thread(wanted) if wanted is not LAST_THREAD else None
+            found = found or store.last_thread()
+        if found is None:
+            return
+        persona = self._thread_persona(found)
+        if persona != assistant.persona.id:
+            self.set_persona(persona, note=False)
+        assistant.conversation.open_thread(found["id"])
+
+    @staticmethod
+    def _thread_persona(thread: dict) -> str:
+        """The persona a thread is with: Iris once its own is gone."""
+        return thread["persona"] if find_persona(thread["persona"]) else "iris"
+
+    def threads_list(self) -> dict:
+        """The threads, the one talked in last first, and the one open (None
+        for a new thread) while Iris runs."""
+        memory = getattr(self.assistant, "memory", None)
+        if memory is None:
+            return {"threads": []}
+        threads = []
+        for thread in memory.store.threads():
+            persona = self._thread_persona(thread)
+            threads.append(
+                {**thread, "persona": persona, "persona_name": get_persona(persona).name}
+            )
+        return {"threads": threads, "open": self.assistant.conversation.thread}
+
+    def open_thread(self, thread_id) -> dict:
+        """Go on in another thread, with its persona and its memory."""
+        memory = getattr(self.assistant, "memory", None)
+        if memory is None:
+            return {"ok": False, "error": "Memory is off"}
+        thread = memory.store.thread(int(thread_id))
+        if thread is None:
+            return {"ok": False, "error": f"No thread {thread_id}"}
+        self._go_to_thread(thread["id"], self._thread_persona(thread))
+        return {"ok": True, "id": thread["id"]}
+
+    def new_thread(self, persona: str) -> dict:
+        """Go on in a new thread with this persona. It is stored with its
+        first turn; until then another persona can be chosen for it."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        if persona not in list_personas():
+            return {"ok": False, "error": f"Unknown persona: {persona}"}
+        self._go_to_thread(None, persona)
+        return {"ok": True}
+
+    def forget_thread(self, thread_id) -> dict:
+        """Delete a thread with its memory. Forgetting the open one leaves a
+        new thread, with the same persona."""
+        memory = getattr(self.assistant, "memory", None)
+        if memory is None:
+            return {"ok": False, "error": "Memory is off"}
+        thread_id = int(thread_id)
+        if self.assistant.conversation.thread == thread_id:
+            self._go_to_thread(None, self.assistant.persona.id)
+        memory.store.forget_thread(thread_id)
+        self.bus.emit("memory.updated", {})
+        self.bus.emit("threads.changed", {})
+        return {"ok": True}
+
+    def _go_to_thread(self, thread_id: int | None, persona: str):
+        """Leave the thread Iris is in for another (None: a new one). A reply
+        underway stops, as Stop does, and is kept in the thread it was given
+        in; messages waiting for it are dropped. Iris takes on the thread's
+        persona, its memory is the conversation's, and the app is shown the
+        thread's recent turns."""
+        assistant = self.assistant
+        if assistant.replying:
+            self.interrupt()
+            deadline = time.monotonic() + REPLY_END_WAIT
+            while assistant.replying and time.monotonic() < deadline:
+                time.sleep(0.02)
+        self._drop_waiting_turns()
+        if persona != assistant.persona.id:
+            self.set_persona(persona, note=False)
+        assistant.conversation.open_thread(thread_id)
+        with self._transcript_lock:
+            self._transcript = []
+        self.bus.emit("thread.opened", {"id": thread_id})
+        self._restore_thread()
+        self.bus.emit("config", assistant.config_info())
+        self.bus.emit("threads.changed", {})
+
+    def _drop_waiting_turns(self):
+        """Typed messages not answered yet belong to the thread left."""
+        kept = []
+        while True:
+            try:
+                turn = self._turns.get_nowait()
+            except queue.Empty:
+                break
+            if "text" not in turn:
+                kept.append(turn)
+        for turn in kept:
+            self._turns.put(turn)
+
     def memory_topics(self) -> dict:
-        """The topics Iris remembers, most recently discussed first, and
-        how many turns it keeps in all, filed under a topic or not yet."""
+        """The topics Iris remembers of the open thread, most recently
+        discussed first, and how many turns it keeps in all, in every
+        thread, filed under a topic or not yet."""
         memory = getattr(self.assistant, "memory", None)
         if memory is None:
             return {"topics": [], "turns": 0}
-        counts = memory.store.turn_counts()
+        thread = self.assistant.conversation.thread
+        counts = memory.store.turn_counts(thread)
         return {
             "topics": [
                 {
@@ -809,15 +937,17 @@ class AssistantController:
                     "updated": t.updated,
                     "turns": counts.get(t.id, 0),
                 }
-                for t in memory.store.topics()
+                for t in memory.store.topics(thread)
             ],
             "turns": memory.store.turn_count(),
         }
 
     def memory_topic(self, topic_id: int) -> dict:
-        """One topic with its summary and every turn filed under it."""
+        """One topic of the open thread with its summary and every turn filed
+        under it."""
         memory = getattr(self.assistant, "memory", None)
-        topic = memory.store.topic(int(topic_id)) if memory else None
+        thread = self.assistant.conversation.thread if memory else None
+        topic = memory.store.topic(int(topic_id), thread) if thread is not None else None
         if topic is None:
             return {"ok": False, "error": f"No topic {topic_id}"}
         return {
@@ -1292,8 +1422,10 @@ class AssistantController:
         names = reload_personas()
         return {"personas": list(names), "names": names}
 
-    def set_persona(self, name: str) -> dict:
-        """Hot-swap the persona (prompt, voice, speed, audio filter)."""
+    def set_persona(self, name: str, note: bool = True) -> dict:
+        """Hot-swap the persona (prompt, voice, speed, audio filter): the
+        open thread's, edited or gone, or another thread's as it is opened
+        (with no note: what the thread holds was said by its own persona)."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         if name not in list_personas():
@@ -1306,7 +1438,7 @@ class AssistantController:
         assistant.conversation.persona = persona
         # The history still holds the old persona's replies, which small
         # models happily continue; tell the model the voice has changed hands
-        if previous != persona.name:
+        if note and previous != persona.name:
             assistant.conversation.add_note(
                 f"You are now {persona.name}. Earlier replies in this conversation "
                 f"were given by {previous}; do not continue {previous}'s name or manner."

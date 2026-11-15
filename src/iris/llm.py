@@ -6,6 +6,7 @@ import re
 import threading
 import types
 import warnings
+from collections.abc import Callable
 from typing import Optional
 
 import httpx
@@ -268,7 +269,7 @@ class ConversationManager:
             vision_model: Optional vision model to switch to when using vision tools
             host: Ollama server URL; None follows OLLAMA_HOST
             memory: Long-term memory; when given, the conversation is stored
-                and the context is built from it (see iris.memory)
+                in a thread and the context is built from it (see iris.memory)
         """
         self.host = normalize_host(host)
         self.client = ollama_client(self.host)
@@ -284,6 +285,11 @@ class ConversationManager:
         # The model last asked for a reply, which an error may be about
         self.asked: Optional[str] = None
         self.memory = memory
+        # The thread the conversation is in, or None for a new one, which is
+        # stored with its first turn (see open_thread)
+        self.thread: Optional[int] = None
+        # Told after an exchange was stored, a new thread with it
+        self.on_stored: Optional[Callable[[], None]] = None
         # Recalled topics stay in context for a few turns: {topic_id: turns left}
         self.pinned: dict[int, int] = {}
         # Amnesia mode: the conversation goes on, but nothing of it is
@@ -543,10 +549,11 @@ class ConversationManager:
             return "Previous conversation context."
 
     def _memory_context(self) -> str:
-        """The memory part of the system prompt: what Iris remembers (the
-        topic index) and the topics it recalled in the last few turns."""
+        """The memory part of the system prompt: what Iris remembers of the
+        thread (its topic index) and the topics it recalled in the last few
+        turns."""
         store = self.memory.store
-        lines = store.index_lines()
+        lines = store.index_lines(self.thread)
         text = (
             "\n\nYou remember earlier conversations with the user. They are listed below "
             "by topic. When the user refers to something from before that is not in the "
@@ -557,7 +564,7 @@ class ConversationManager:
         )
         used = 0
         for topic_id in list(self.pinned):
-            topic = store.topic(topic_id)
+            topic = store.topic(topic_id, self.thread)
             if topic is None:
                 del self.pinned[topic_id]
                 continue
@@ -573,6 +580,24 @@ class ConversationManager:
         in amnesia mode are forgotten entirely once it ends."""
         self.amnesia = bool(on)
         self.unremembered = []
+
+    def open_thread(self, thread: Optional[int]):
+        """Go on in another thread: its turns and topics are the
+        conversation's memory from now on. None is a new thread, stored with
+        its first turn. What belonged to the thread left (turns held back by
+        amnesia, topics recalled, files shared) stays behind."""
+        self.thread = thread
+        self.unremembered = []
+        self.pinned = {}
+        self.shared = []
+        self.conversation_history = []
+
+    def _store(self, role: str, text: str, source: Optional[str] = None):
+        """Store a turn in the thread, which a new thread's first turn creates."""
+        store = self.memory.store
+        if self.thread is None:
+            self.thread = store.create_thread(self.persona.id)
+        store.add_turn(self.thread, role, text, source)
 
     def forget(self):
         """Start the conversation over, as if nothing had been said: no
@@ -607,18 +632,21 @@ class ConversationManager:
                 self.conversation_history.append({"role": role, "content": prompt})
                 self.conversation_history.append({"role": "assistant", "content": answer})
                 return
-            self.memory.store.add_turn(role, prompt, None if role == "system" else source)
-            self.memory.store.add_turn("assistant", answer)
+            self._store(role, prompt, None if role == "system" else source)
+            self._store("assistant", answer)
         self.memory.note_turn()
+        if self.on_stored:
+            self.on_stored()
 
     def add_note(self, text: str):
-        """A system note in the conversation, e.g. that the persona changed."""
+        """A system note in the conversation, e.g. that the persona changed.
+        A new thread has said nothing yet for a note to be about."""
         if self.memory is not None and self.amnesia:
             self.unremembered.append({"role": "system", "content": text})
         elif self.memory is None:
             self.conversation_history.append({"role": "system", "content": text})
-        else:
-            self.memory.store.add_turn("system", text)
+        elif self.thread is not None:
+            self.memory.store.add_turn(self.thread, "system", text)
 
     def manage_context(self, with_tools: bool = True) -> list:
         """
@@ -641,18 +669,16 @@ class ConversationManager:
 
         if self.memory is not None:
             system_content += self._memory_context()
-            # The live thread: stored turns, then any held back by amnesia
-            # mode, together within the live budget
+            # The live context: the thread's stored turns, then any held back
+            # by amnesia mode, together within the live budget
             unremembered, used = [], 0
             for turn in reversed(self.unremembered):
                 used += estimate_tokens(turn["content"])
                 if unremembered and used > LIVE_TOKENS:
                     break
                 unremembered.insert(0, turn)
-            stored = [
-                {"role": turn["role"], "content": turn["text"]}
-                for turn in self.memory.store.recent_turns(max(0, LIVE_TOKENS - used))
-            ]
+            recent = self.memory.store.recent_turns(self.thread, max(0, LIVE_TOKENS - used))
+            stored = [{"role": turn["role"], "content": turn["text"]} for turn in recent]
             return [{"role": "system", "content": system_content}] + stored + unremembered
 
         system_prompt = {

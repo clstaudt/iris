@@ -251,6 +251,11 @@ def main(extra: dict | None = None):
         "memory.forget": lambda params: controller.memory_forget(params.get("id", -1)),
         "memory.forget_all": lambda params: controller.memory_forget_all(),
         "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
+        # Threads: each a conversation with one persona and its own memory
+        "threads.list": lambda params: controller.threads_list(),
+        "threads.open": lambda params: controller.open_thread(params.get("id", -1)),
+        "threads.new": lambda params: controller.new_thread(params.get("persona", "iris")),
+        "threads.forget": lambda params: controller.forget_thread(params.get("id", -1)),
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
         # {"on": bool} switches the persona's wake word on or off; {"word"}
@@ -296,7 +301,6 @@ def main(extra: dict | None = None):
         "plugins.list": lambda params: controller.plugins_list(),
         "engines.list": lambda params: controller.engines_list(),
         "persona.list": lambda params: controller.list_personas(),
-        "persona.set": lambda params: controller.set_persona(params.get("name", "")),
         "persona.get": lambda params: controller.persona_get(params.get("id", "")),
         "persona.voices": lambda params: controller.persona_voices(),
         "persona.save": lambda params: controller.persona_save(params),

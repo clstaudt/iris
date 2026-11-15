@@ -1,10 +1,13 @@
-"""Long-term memory: one continuous conversation, remembered by topic.
+"""Long-term memory: conversations in threads, each remembered by topic.
 
-Every turn is stored. The LLM sees the most recent turns verbatim (the live
-thread) plus a compact index of topics from earlier conversations, one line
-each. When the user returns to something, the model notices it in the index
-and calls the recall tool itself; search_memory runs a full-text search over
-everything ever said, for details the index does not show. There are no
+A thread is a conversation with one persona, with a memory of its own: its
+turns, its topics, the index in its prompt, recall and search. It is stored
+with its first turn, so no thread is ever empty. Every turn is stored. The
+LLM sees the thread's most recent turns verbatim (the live context) plus a
+compact index of the thread's topics, one line each. When the user returns
+to something, the model notices it in the index and calls the recall tool
+itself; search_memory runs a full-text search over everything ever said in
+the thread, for details the index does not show. There are no
 embeddings and no similarity thresholds: deciding what to retrieve is the
 model's judgment.
 
@@ -61,14 +64,27 @@ ABORT_CHECK_SECONDS = 0.05
 # A recalled topic's summary stays in context for this many user turns
 PIN_TURNS = 6
 
+# A thread's title, from its first words until memory has filed a topic
+TITLE_LENGTH = 48
+
 SCHEMA = """
+-- A thread's id is never given again, so nothing that names a forgotten
+-- thread (filing that read it, say) can reach another
+CREATE TABLE IF NOT EXISTS threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona TEXT NOT NULL,
+    created REAL NOT NULL,
+    -- its last turn
+    updated REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS topics (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
     gist TEXT NOT NULL,
     summary TEXT NOT NULL,
     created REAL NOT NULL,
-    updated REAL NOT NULL
+    updated REAL NOT NULL,
+    thread_id INTEGER REFERENCES threads(id)
 );
 CREATE TABLE IF NOT EXISTS turns (
     id INTEGER PRIMARY KEY,
@@ -80,7 +96,8 @@ CREATE TABLE IF NOT EXISTS turns (
     filed INTEGER NOT NULL DEFAULT 0,
     -- 0 while the turn is filed under a topic whose summary does not yet
     -- include it
-    summarized INTEGER NOT NULL DEFAULT 1
+    summarized INTEGER NOT NULL DEFAULT 1,
+    thread_id INTEGER REFERENCES threads(id)
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
     text, content='turns', content_rowid='id'
@@ -96,6 +113,15 @@ END;
 
 def estimate_tokens(text: str) -> int:
     return len(text) // 4
+
+
+def shortened(text: str, length: int = TITLE_LENGTH) -> str:
+    """The text on one line, cut at a word within this length."""
+    text = " ".join(text.split())
+    if len(text) <= length:
+        return text
+    cut = text[:length].rsplit(" ", 1)[0] or text[:length]
+    return cut.rstrip(" ,.;:!?-") + "…"
 
 
 def relative_day(ts: float, now: Optional[float] = None) -> str:
@@ -118,6 +144,7 @@ class Exchange:
 
     turn_ids: list[int]
     text: str
+    thread_id: Optional[int] = None
 
 
 @dataclass
@@ -128,11 +155,13 @@ class Topic:
     summary: str
     created: float
     updated: float
+    thread_id: Optional[int] = None
     turns: list[dict] = field(default_factory=list)
 
 
 class MemoryStore:
-    """SQLite storage for turns and topics, with full-text search."""
+    """SQLite storage for threads, their turns and topics, with full-text
+    search. What is read for a conversation is read for one thread."""
 
     def __init__(self, path: str | Path = DEFAULT_PATH):
         if str(path) != ":memory:":
@@ -153,7 +182,36 @@ class MemoryStore:
                 self._db.execute(
                     "ALTER TABLE turns ADD COLUMN summarized INTEGER NOT NULL DEFAULT 1"
                 )
+            self._into_threads()
+            self._db.execute("CREATE INDEX IF NOT EXISTS turns_thread ON turns(thread_id)")
+            self._db.execute("CREATE INDEX IF NOT EXISTS topics_thread ON topics(thread_id)")
             self._db.commit()
+
+    def _into_threads(self):
+        """A database from before threads: everything in it becomes the
+        first thread, with Iris."""
+        for table in ("turns", "topics"):
+            columns = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
+            if "thread_id" not in columns:
+                self._db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN thread_id INTEGER REFERENCES threads(id)"
+                )
+        left = self._db.execute(
+            "SELECT (SELECT COUNT(*) FROM turns WHERE thread_id IS NULL)"
+            " + (SELECT COUNT(*) FROM topics WHERE thread_id IS NULL)"
+        ).fetchone()[0]
+        if not left:
+            return
+        first, last = self._db.execute(
+            "SELECT MIN(ts), MAX(ts) FROM turns WHERE thread_id IS NULL"
+        ).fetchone()
+        now = time.time()
+        thread = self._db.execute(
+            "INSERT INTO threads (persona, created, updated) VALUES ('iris', ?, ?)",
+            (first or now, last or now),
+        ).lastrowid
+        self._db.execute("UPDATE turns SET thread_id = ? WHERE thread_id IS NULL", (thread,))
+        self._db.execute("UPDATE topics SET thread_id = ? WHERE thread_id IS NULL", (thread,))
 
     def _query(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -169,24 +227,87 @@ class MemoryStore:
             self._db.commit()
             return cursor.lastrowid
 
-    # -- turns --------------------------------------------------------------
+    # -- threads ------------------------------------------------------------
 
-    def add_turn(self, role: str, text: str, source: Optional[str] = None) -> int:
-        """Store one turn: "user", "assistant", or "system" for notes."""
+    def create_thread(self, persona: str) -> int:
+        """A new thread with this persona (its id), as its first turn is stored."""
+        now = time.time()
         return self._write(
-            "INSERT INTO turns (ts, role, text, source) VALUES (?, ?, ?, ?)",
-            (time.time(), role, text, source),
+            "INSERT INTO threads (persona, created, updated) VALUES (?, ?, ?)",
+            (persona, now, now),
         )
 
+    def threads(self) -> list[dict]:
+        """Every thread, the one talked in last first: {id, persona, title,
+        created, updated}."""
+        rows = self._query(self._THREADS + " ORDER BY th.updated DESC, th.id DESC")
+        return [self._titled(row) for row in rows]
+
+    def thread(self, thread_id: Optional[int]) -> Optional[dict]:
+        """One thread, as threads() lists it, or None."""
+        rows = self._query(self._THREADS + " WHERE th.id = ?", (thread_id,))
+        return self._titled(rows[0]) if rows else None
+
+    def last_thread(self) -> Optional[dict]:
+        """The thread talked in last, or None when there is none."""
+        threads = self._query(self._THREADS + " ORDER BY th.updated DESC, th.id DESC LIMIT 1")
+        return self._titled(threads[0]) if threads else None
+
+    # A thread with what its title is made of: its earliest topic, else its
+    # first words (an opening Iris made itself has only its reply)
+    _THREADS = """
+        SELECT th.*,
+            (SELECT title FROM topics WHERE thread_id = th.id ORDER BY created, id LIMIT 1)
+                AS topic,
+            (SELECT text FROM turns WHERE thread_id = th.id AND role = 'user'
+                ORDER BY id LIMIT 1) AS asked,
+            (SELECT text FROM turns WHERE thread_id = th.id AND role = 'assistant'
+                ORDER BY id LIMIT 1) AS answered
+        FROM threads th
+    """
+
+    @staticmethod
+    def _titled(row: sqlite3.Row) -> dict:
+        thread = dict(row)
+        topic, asked, answered = thread.pop("topic"), thread.pop("asked"), thread.pop("answered")
+        thread["title"] = topic or shortened(asked or answered or "")
+        return thread
+
+    def forget_thread(self, thread_id: int):
+        """Delete a thread with everything in it: its turns (and their search
+        entries) and its topics."""
+        with self._lock:
+            self._db.execute("DELETE FROM turns WHERE thread_id = ?", (thread_id,))
+            self._db.execute("DELETE FROM topics WHERE thread_id = ?", (thread_id,))
+            self._db.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
+            self._db.commit()
+
+    # -- turns --------------------------------------------------------------
+
+    def add_turn(self, thread: int, role: str, text: str, source: Optional[str] = None) -> int:
+        """Store one turn of a thread: "user", "assistant", or "system" for notes."""
+        now = time.time()
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO turns (ts, role, text, source, thread_id) VALUES (?, ?, ?, ?, ?)",
+                (now, role, text, source, thread),
+            )
+            self._db.execute("UPDATE threads SET updated = ? WHERE id = ?", (now, thread))
+            self._db.commit()
+            return cursor.lastrowid
+
     def turn_count(self) -> int:
-        """How many turns are stored, filed or not."""
+        """How many turns are stored, in every thread, filed or not."""
         return self._query("SELECT COUNT(*) FROM turns")[0][0]
 
-    def recent_turns(self, budget: Optional[int] = None) -> list[dict]:
-        """The newest turns that fit the token budget, oldest first."""
+    def recent_turns(self, thread: Optional[int], budget: Optional[int] = None) -> list[dict]:
+        """The thread's newest turns that fit the token budget, oldest first."""
         budget = LIVE_TOKENS if budget is None else budget
         turns, used = [], 0
-        for row in self._query("SELECT * FROM turns ORDER BY id DESC LIMIT 400"):
+        rows = self._query(
+            "SELECT * FROM turns WHERE thread_id = ? ORDER BY id DESC LIMIT 400", (thread,)
+        )
+        for row in rows:
             cost = estimate_tokens(row["text"])
             if turns and used + cost > budget:
                 break
@@ -194,57 +315,68 @@ class MemoryStore:
             used += cost
         return turns[::-1]
 
-    def unfiled_exchanges(self) -> list[Exchange]:
-        """Unfiled turns grouped into exchanges; notes are left out."""
-        exchanges: list[Exchange] = []
-        for row in self._query("SELECT * FROM turns WHERE filed = 0 ORDER BY id"):
-            if row["role"] == "system":
-                continue
+    @staticmethod
+    def _exchanges(rows, key: str) -> dict:
+        """Turns grouped into exchanges, per value of a column (the thread,
+        or the topic)."""
+        grouped: dict = {}
+        for row in rows:
+            exchanges = grouped.setdefault(row[key], [])
             line = f"{'User' if row['role'] == 'user' else 'Assistant'}: {row['text']}"
             if row["role"] == "user" or not exchanges:
-                exchanges.append(Exchange([row["id"]], line))
+                exchanges.append(Exchange([row["id"]], line, row["thread_id"]))
             else:
                 exchanges[-1].turn_ids.append(row["id"])
                 exchanges[-1].text += "\n" + line
-        return exchanges
+        return grouped
+
+    def unfiled_exchanges(self) -> list[Exchange]:
+        """Unfiled turns grouped into exchanges, thread by thread; notes are
+        left out."""
+        rows = self._query(
+            "SELECT * FROM turns WHERE filed = 0 AND role != 'system' ORDER BY thread_id, id"
+        )
+        return [e for exchanges in self._exchanges(rows, "thread_id").values() for e in exchanges]
 
     def mark_filed(
-        self, turn_ids: list[int], topic_id: Optional[int], generation: Optional[int] = None
+        self,
+        thread: int,
+        turn_ids: list[int],
+        topic_id: Optional[int],
+        generation: Optional[int] = None,
     ):
-        """File turns under a topic (None: kept, but under no topic). Turns
-        filed under a topic wait for its summary to take them in."""
+        """File a thread's turns under a topic (None: kept, but under no
+        topic). Turns filed under a topic wait for its summary to take them
+        in. Turns of a thread forgotten meanwhile are gone, and so is the
+        filing."""
         if not turn_ids:
             return
         marks = ",".join("?" * len(turn_ids))
         self._write(
-            f"UPDATE turns SET filed = 1, topic_id = ?, summarized = ? WHERE id IN ({marks})",
-            (topic_id, 0 if topic_id else 1, *turn_ids),
+            "UPDATE turns SET filed = 1, topic_id = ?, summarized = ? "
+            f"WHERE thread_id = ? AND id IN ({marks})",
+            (topic_id, 0 if topic_id else 1, thread, *turn_ids),
             generation,
         )
 
     def pending_summaries(self) -> dict[int, list[Exchange]]:
         """Per topic, the filed exchanges its summary does not include yet."""
-        pending: dict[int, list[Exchange]] = {}
         rows = self._query(
             "SELECT * FROM turns WHERE filed = 1 AND summarized = 0 AND topic_id IS NOT NULL "
             "ORDER BY id"
         )
-        for row in rows:
-            exchanges = pending.setdefault(row["topic_id"], [])
-            line = f"{'User' if row['role'] == 'user' else 'Assistant'}: {row['text']}"
-            if row["role"] == "user" or not exchanges:
-                exchanges.append(Exchange([row["id"]], line))
-            else:
-                exchanges[-1].turn_ids.append(row["id"])
-                exchanges[-1].text += "\n" + line
-        return pending
+        return self._exchanges(rows, "topic_id")
 
-    def mark_summarized(self, turn_ids: list[int], generation: Optional[int] = None):
+    def mark_summarized(
+        self, thread: int, turn_ids: list[int], generation: Optional[int] = None
+    ):
         if not turn_ids:
             return
         marks = ",".join("?" * len(turn_ids))
         self._write(
-            f"UPDATE turns SET summarized = 1 WHERE id IN ({marks})", tuple(turn_ids), generation
+            f"UPDATE turns SET summarized = 1 WHERE thread_id = ? AND id IN ({marks})",
+            (thread, *turn_ids),
+            generation,
         )
 
     def mark_notes_filed(self, generation: Optional[int] = None):
@@ -255,31 +387,52 @@ class MemoryStore:
     # -- topics -------------------------------------------------------------
 
     def create_topic(
-        self, title: str, gist: str, summary: str, generation: Optional[int] = None
-    ) -> int:
+        self, thread: int, title: str, gist: str, summary: str, generation: Optional[int] = None
+    ) -> Optional[int]:
+        """A new topic of the thread (its id), or None when the thread was
+        forgotten meanwhile; with a generation, only if nothing was forgotten
+        since (else Forgotten)."""
         now = time.time()
-        return self._write(
-            "INSERT INTO topics (title, gist, summary, created, updated) VALUES (?, ?, ?, ?, ?)",
-            (title, gist, summary, now, now),
-            generation,
-        )
+        with self._lock:
+            if generation is not None and generation != self.generation:
+                raise Forgotten()
+            cursor = self._db.execute(
+                "INSERT INTO topics (title, gist, summary, created, updated, thread_id) "
+                "SELECT ?, ?, ?, ?, ?, id FROM threads WHERE id = ?",
+                (title, gist, summary, now, now, thread),
+            )
+            self._db.commit()
+            return cursor.lastrowid if cursor.rowcount else None
 
     def update_topic(
-        self, topic_id: int, gist: str, summary: str, generation: Optional[int] = None
+        self,
+        thread: int,
+        topic_id: int,
+        gist: str,
+        summary: str,
+        generation: Optional[int] = None,
     ):
         self._write(
-            "UPDATE topics SET gist = ?, summary = ?, updated = ? WHERE id = ?",
-            (gist, summary, time.time(), topic_id),
+            "UPDATE topics SET gist = ?, summary = ?, updated = ? WHERE id = ? AND thread_id = ?",
+            (gist, summary, time.time(), topic_id, thread),
             generation,
         )
 
-    def topics(self) -> list[Topic]:
-        """All topics, the most recently discussed first."""
-        rows = self._query("SELECT * FROM topics ORDER BY updated DESC")
+    def topics(self, thread: Optional[int]) -> list[Topic]:
+        """The thread's topics, the most recently discussed first."""
+        rows = self._query(
+            "SELECT * FROM topics WHERE thread_id = ? ORDER BY updated DESC", (thread,)
+        )
         return [Topic(**dict(row)) for row in rows]
 
-    def topic(self, topic_id: int) -> Optional[Topic]:
-        rows = self._query("SELECT * FROM topics WHERE id = ?", (topic_id,))
+    def topic(self, topic_id: int, thread: Optional[int] = None) -> Optional[Topic]:
+        """A topic with its turns, or None; given a thread, only one of its own."""
+        if thread is None:
+            rows = self._query("SELECT * FROM topics WHERE id = ?", (topic_id,))
+        else:
+            rows = self._query(
+                "SELECT * FROM topics WHERE id = ? AND thread_id = ?", (topic_id, thread)
+            )
         if not rows:
             return None
         topic = Topic(**dict(rows[0]))
@@ -292,9 +445,11 @@ class MemoryStore:
         ]
         return topic
 
-    def turn_counts(self) -> dict[int, int]:
+    def turn_counts(self, thread: Optional[int]) -> dict[int, int]:
         rows = self._query(
-            "SELECT topic_id, COUNT(*) AS n FROM turns WHERE topic_id IS NOT NULL GROUP BY topic_id"
+            "SELECT topic_id, COUNT(*) AS n FROM turns "
+            "WHERE thread_id = ? AND topic_id IS NOT NULL GROUP BY topic_id",
+            (thread,),
         )
         return {row["topic_id"]: row["n"] for row in rows}
 
@@ -318,14 +473,15 @@ class MemoryStore:
             self._db.commit()
             self._db.execute("VACUUM")
 
-    def index_lines(self, budget: Optional[int] = None) -> list[str]:
-        """One line per topic for the prompt, newest first, within budget.
+    def index_lines(self, thread: Optional[int], budget: Optional[int] = None) -> list[str]:
+        """One line per topic of the thread for the prompt, newest first,
+        within budget.
 
         Topics that do not fit are not lost: search_memory still finds them.
         """
         budget = INDEX_TOKENS if budget is None else budget
         lines, used, now = [], 0, time.time()
-        for topic in self.topics():
+        for topic in self.topics(thread):
             line = f"#{topic.id} {topic.title}: {topic.gist} ({relative_day(topic.updated, now)})"
             cost = estimate_tokens(line)
             if used + cost > budget:
@@ -336,10 +492,10 @@ class MemoryStore:
 
     # -- search -------------------------------------------------------------
 
-    def search(self, query: str, limit: int = 6) -> list[dict]:
-        """Full-text search over every turn, best matches first."""
+    def search(self, thread: Optional[int], query: str, limit: int = 6) -> list[dict]:
+        """Full-text search over every turn of the thread, best matches first."""
         words = re.findall(r"\w+", query.lower())
-        if not words:
+        if not words or thread is None:
             return []
         # Quoted terms joined by OR: any word may match, BM25 ranks the rest
         match = " OR ".join(f'"{w}"' for w in words)
@@ -350,11 +506,11 @@ class MemoryStore:
             FROM turns_fts
             JOIN turns ON turns.id = turns_fts.rowid
             LEFT JOIN topics ON topics.id = turns.topic_id
-            WHERE turns_fts MATCH ?
+            WHERE turns_fts MATCH ? AND turns.thread_id = ?
             ORDER BY bm25(turns_fts)
             LIMIT ?
             """,
-            (match, limit),
+            (match, thread, limit),
         )
         return [dict(row) for row in rows]
 
@@ -424,11 +580,15 @@ class Filer:
     def _file(self, should_yield: Callable[[], bool]):
         generation = self._generation
         self.store.mark_notes_filed(generation)
-        before = ""
+        # Per thread, the exchange said just before: each is filed into
+        # topics of its own thread
+        before: dict[Optional[int], str] = {}
         for exchange in self.store.unfiled_exchanges():
             if should_yield():
                 return
-            said_before, before = before, exchange.text
+            thread = exchange.thread_id
+            said_before = before.get(thread, "")
+            before[thread] = exchange.text
             try:
                 decision = self._decide(exchange, said_before)
             except ValueError as e:
@@ -440,11 +600,13 @@ class Filer:
             topic_id = None
             if decision.get("remember"):
                 topic_id = decision.get("topic_id") or 0
-                if self.store.topic(topic_id) is None:
+                if self.store.topic(topic_id, thread) is None:
                     title = (decision.get("title") or "").strip() or exchange.text[6:46]
-                    topic_id = self.store.create_topic(title, title, "", generation)
+                    topic_id = self.store.create_topic(thread, title, title, "", generation)
+                    if topic_id is None:  # the thread was forgotten meanwhile
+                        continue
             # Small talk is kept and searchable too, just under no topic
-            self.store.mark_filed(exchange.turn_ids, topic_id, generation)
+            self.store.mark_filed(thread, exchange.turn_ids, topic_id, generation)
             self._changed = True
 
         for topic_id, exchanges in self.store.pending_summaries().items():
@@ -455,11 +617,13 @@ class Filer:
             except ValueError as e:
                 logger.warning("Memory filing left topic #%s's summary for later: %s", topic_id, e)
                 continue
-            self.store.mark_summarized([t for e in exchanges for t in e.turn_ids], generation)
+            thread = exchanges[0].thread_id
+            turn_ids = [t for summarized in exchanges for t in summarized.turn_ids]
+            self.store.mark_summarized(thread, turn_ids, generation)
             self._changed = True
 
     def _decide(self, exchange: Exchange, before: str) -> dict:
-        topics = self.store.topics()[:40]
+        topics = self.store.topics(exchange.thread_id)[:40]
         listing = "\n".join(f"#{t.id} {t.title}: {t.gist}" for t in topics) or "(none yet)"
         context = f"Said just before:\n{before}\n\n" if before else ""
         prompt = (
@@ -499,7 +663,7 @@ class Filer:
         )
         summary = result.get("summary", "").strip() or topic.summary or text[:400]
         gist = result.get("gist", "").strip() or topic.gist
-        self.store.update_topic(topic_id, gist, summary, self._generation)
+        self.store.update_topic(topic.thread_id, topic_id, gist, summary, self._generation)
 
 
 class MemoryKeeper:
