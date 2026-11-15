@@ -95,7 +95,7 @@ Iris needs a language model server in any case. The simplest is [Ollama](https:/
 ollama pull qwen3:1.7b
 ```
 
-Install Ollama from [ollama.com/download](https://ollama.com/download) (on macOS also `brew install ollama && brew services start ollama`, on Linux `curl -fsSL https://ollama.com/install.sh | sh`). A server on another computer works too, Ollama or OpenAI-compatible: the setup screen asks for its address.
+Install Ollama from [ollama.com/download](https://ollama.com/download) (on macOS also `brew install ollama && brew services start ollama`, on Linux `curl -fsSL https://ollama.com/install.sh | sh`). A server on another computer works too, Ollama or OpenAI-compatible: the walkthrough asks for its address.
 
 ### The macOS app
 
@@ -104,8 +104,8 @@ Iris ships as a self-contained app for Apple Silicon Macs (macOS 14 or later), p
 1. Have a language model server, as above.
 2. Open the disk image and drag **Iris** into **Applications**.
 3. Open Iris. Released disk images are signed with a Developer ID and notarized by Apple, so the app opens like any other. A disk image built without a Developer ID is signed ad hoc only: macOS then refuses it the first time ("Apple could not verify..."). Click **Done**, then go to **System Settings > Privacy & Security**, scroll down to the message about Iris, click **Open Anyway**, and confirm. This is needed only once. If macOS instead says the app "is damaged", run `xattr -dr com.apple.quarantine /Applications/Iris.app` in Terminal and open it again.
-4. Allow the microphone when asked. The camera and screen recording are asked for the first time Iris uses them.
-5. Follow the setup screen. The speech models download once (about 2 GB) into `~/.cache/huggingface` and `~/.iris/models`.
+4. Follow the walkthrough. The speech models download once (about 2 GB) into `~/.cache/huggingface` and `~/.iris/models`, while you go on with the other steps.
+5. Allow the microphone when the walkthrough asks for it. The camera and screen recording are asked for the first time Iris uses them.
 
 ### From source
 
@@ -120,7 +120,16 @@ npm install
 npm run dev             # starts Vite, Electron and the Python core
 ```
 
-The first time it opens, Iris shows a setup screen before anything starts or downloads. Conversations need a large language model: setup looks for Ollama on this computer, or on any server you type, and offers its models, preferring `qwen3:1.7b`. It then asks where the speech models come from: downloaded (Whisper for recognition, Kokoro for the voice, about 2 GB together; models already downloaded are reused), or folders you already have. Kyutai's Pocket TTS, the default voice, fetches its model from Hugging Face the first time it loads. An iris bud at the top opens as setup comes along, a little when the language model is ready and further with each speech model in place; downloads show a thin progress bar. When the models are in, the setup screen gives way to the conversation and the flower blooms into the orb.
+The first time it opens, Iris walks you through getting ready, a step at a time; nothing starts before the last one, and every step has a default, so Continue all the way works:
+
+1. **Language model.** Conversations need a large language model. The walkthrough looks for Ollama on this computer and for OpenAI-compatible servers at their usual ports here (LM Studio, llama.cpp, vLLM, Jan), shows which answer, and takes any server you type. It offers the server's models, preferring `qwen3:1.7b`, then one that calls tools. Without a server it says what to install.
+2. **Speech models.** They download in the background from here on, the voices first (Kyutai's Pocket TTS with the personas' voices, Kokoro), then Smart Turn and Whisper, about 2 GB together; models already downloaded are reused. Each shows its progress in bytes, and a failed one can be tried again. Folders you already have can be used instead.
+3. **Microphone.** The walkthrough asks for the microphone (on macOS, the system's prompt), then shows its level and says when it hears your voice.
+4. **Voice.** Choose a persona; each one's voice can be played as soon as its engine is downloaded.
+5. **Wake word and tools**, both optional: whether Iris waits for its name, and whether it may use the camera, the screen and web search.
+6. **Ready.** A summary of the choices, each a click away. Iris starts, the iris bud at the top, which opened as the walkthrough came along, blooms into the orb, and Iris greets you in its persona's words. Downloads still running go on under the orb.
+
+Each step can be skipped or gone back to, and everything can be changed later in Settings, where **Walkthrough** runs it again.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
@@ -291,18 +300,18 @@ Requests are JSON-RPC 2.0; the core's activity arrives as notifications `{"jsonr
 
 | Area | Methods |
 | --- | --- |
-| App and setup | `app.info`, `setup.info`, `models.check`, `models.set` |
-| Assistant | `assistant.start`, `assistant.stop`, `assistant.interrupt`, `assistant.pause`, `assistant.resume`, `assistant.hold` |
+| App and setup | `app.info`, `setup.info`, `setup.download`, `models.check`, `models.set`, `mic.check` |
+| Assistant | `assistant.start`, `assistant.stop`, `assistant.interrupt`, `assistant.pause`, `assistant.resume`, `assistant.hold`, `assistant.greet` |
 | Listening and voice | `mic.set`, `audio.list_inputs`, `audio.set_input`, `wake.set`, `wake.options`, `voice.set_output`, `voice.set_barge_in` |
 | Conversation | `chat.send_text`, `chat.history` |
-| Language model | `llm.list`, `llm.set`, `llm.set_host` |
+| Language model | `llm.list`, `llm.set`, `llm.set_host`, `llm.check_hosts`, `llm.probe`, `llm.find_servers` |
 | Recognition and turn end | `stt.models`, `stt.set`, `turn.set` |
 | Memory | `memory.topics`, `memory.topic`, `memory.forget`, `memory.set_amnesia` |
 | Personas | `persona.list`, `persona.set`, `persona.get`, `persona.voices`, `persona.save`, `persona.delete`, `persona.preview` |
 | Plugins and engines | `tools.set`, `plugins.list`, `engines.list` |
 | Debugging | `debug.emit`, `debug.inject_audio` |
 
-Events: `config` (the loaded models and settings, with `tools`, `engines` and `plugins`), `state`, `flags`, `audio.level`, `audio.output`, `chat.user`, `chat.chunk`, `chat.done`, `chat.continued`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `memory.updated`, `turn.timing` and `error`. Their payloads are described in `src/iris/events.py`.
+Events: `config` (the loaded models and settings, with `tools`, `engines` and `plugins`), `state`, `flags`, `audio.level`, `audio.output`, `chat.user`, `chat.chunk`, `chat.done`, `chat.continued`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `setup.models`, `mic.check`, `memory.updated`, `turn.timing` and `error`. Their payloads are described in `src/iris/events.py`.
 
 ### Development
 
@@ -311,7 +320,7 @@ uv run pytest                  # unit tests
 uv run pytest -m integration   # integration tests, which need Ollama, Kokoro and Whisper
 ```
 
-The setup screen shows only once per settings folder. To go through it again as a new user:
+The walkthrough opens by itself only once per settings folder (Settings > Walkthrough runs it again with Iris running). To go through it as a new user:
 
 ```bash
 cd ui
@@ -328,7 +337,7 @@ cd ui
 npm run build && npm run e2e      # E2E_MODEL=<model> and E2E_HOST=<server URL> pick the language model
 ```
 
-The test opens every stage of the pipeline, switches models, turn detection and tools, plays voices, edits personas, switches setups, has a typed conversation and stops replies. Its core has a home folder of its own, so your personas, memory and settings are left alone, and it sleeps until a wake word nobody says. It does speak: the voices it plays are heard. Screenshots of failed steps and the core's log go to `ui/e2e/output`.
+The test starts with empty settings and goes through the walkthrough (a server typed without `/v1`, the downloads, the sound check, a voice preview, the wake word, Iris's greeting), then opens every stage of the pipeline, switches models, turn detection and tools, plays voices, edits personas, switches setups, has a typed conversation, stops replies, opens presence as a page of its own and runs the walkthrough again. Its core has a home folder of its own, so your personas, memory and settings are left alone, and it sleeps until a wake word nobody says. Its microphone and speaker are a virtual room (`irisdev.e2e_core`): nothing sounds, and the room is not heard. Screenshots of failed steps and the core's log go to `ui/e2e/output`.
 
 Other environment variables: `OLLAMA_HOST` (the model server when none is set in the app), `IRIS_LLM_API_KEY` (a key for servers that need one), `IRIS_MEMORY_DB`, `IRIS_PERSONAS_DIR`, `IRIS_PLUGINS_DIR`, and `IRIS_MODELS_DIR` (where Kokoro's files are looked for).
 

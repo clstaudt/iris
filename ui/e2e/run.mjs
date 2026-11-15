@@ -5,7 +5,10 @@
 // through the app's own bridge (electron/python-bridge.ts), which reports a
 // core that stops and starts it again. The core gets a home folder of its
 // own, so the tester's personas, memory and settings are left alone; the
-// speech models already on this computer are used.
+// speech models already on this computer are used. The app opens as on a
+// first launch, with empty settings: the test goes through the walkthrough,
+// which starts Iris. Presence, the orb's round window of its own, is a second
+// page, with the orb relayed between the two as the app's main process does.
 // Its microphone and speaker are a virtual room (irisdev.e2e_core), which
 // holds only Iris's own voice coming back: the real room is never heard, and
 // nothing sounds on the speakers. Iris sleeps until a wake word nobody says.
@@ -21,8 +24,8 @@
 //   E2E_HOST    model server URL (default: the core's default)
 //   E2E_PYTHON  Python to run the core with (default: <repo>/.venv/bin/python)
 //   E2E_ONLY    run only the steps whose name contains this text, or one of
-//               several split by "|"; the steps that start Iris and choose
-//               the model always run
+//               several split by "|"; the walkthrough's steps, which start
+//               Iris and choose the model, always run
 //   E2E_HEADED  set to watch the browser
 
 import fs from "node:fs";
@@ -160,12 +163,14 @@ const stubUrl = `http://127.0.0.1:${stub.address().port}/v1`;
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
 const server = http.createServer((request, response) => {
-  const file = path.join(DIST, request.url === "/" ? "index.html" : request.url.split("?")[0]);
-  if (request.url === "/favicon.ico") {
+  // Presence's window is the same page, as /?window=presence
+  const route = request.url.split("?")[0];
+  const file = path.join(DIST, route === "/" ? "index.html" : route);
+  if (route === "/favicon.ico") {
     response.writeHead(204).end();
     return;
   }
-  if (!file.startsWith(DIST) || !fs.existsSync(file)) {
+  if (!file.startsWith(DIST) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     response.writeHead(404).end();
     return;
   }
@@ -193,15 +198,45 @@ await page.exposeFunction("__irisRpc", async (method, params) => {
 });
 /** What the page asked of the window: presence on or off, in order. */
 const presence = [];
-await page.exposeFunction("__irisPresence", (on) => presence.push(on));
-await page.addInitScript(
-  ({ settings }) => {
+/** Presence's window: a page of its own, opened when first needed */
+let presencePage = null;
+
+/** At each switch the orb passes from the window that hides to the one that
+ *  shows, as main.ts hands it over. */
+async function handOver(on) {
+  if (!presencePage) return;
+  const [from, to] = on ? [page, presencePage] : [presencePage, page];
+  const handoff = await from.evaluate(() => window.__irisOrb.release());
+  await to.evaluate((h) => void window.__irisOrb.adopt(h), handoff);
+  await from.evaluate(() => void window.__irisOrb.rest());
+}
+
+await page.exposeFunction("__irisPresence", async (on) => {
+  presence.push(on);
+  await handOver(on);
+});
+// What the orb shows goes from the conversation to presence
+await page.exposeFunction("__irisOrbInputs", (inputs) =>
+  presencePage?.evaluate((i) => window.__irisOrb.inputs(i), inputs).catch(() => {})
+);
+
+/** window.iris as Electron's preload gives it, for both windows. */
+function stubIris({ settings }) {
     // Seeded once; a reload finds what the app saved
     if (localStorage.getItem("iris.settings") === null) {
       localStorage.setItem("iris.settings", JSON.stringify(settings));
     }
     const listeners = [];
     window.__irisEvent = (type, data) => listeners.forEach((listener) => listener(type, data));
+    // The orb between this window and the other, relayed by the test
+    const orb = { handlers: null, inputs: [], commands: [] };
+    window.__irisOrb = {
+      release: () => orb.handlers?.release() ?? null,
+      adopt: (handoff) => orb.handlers?.adopt(handoff),
+      rest: () => orb.handlers?.rest(),
+      inputs: (inputs) => orb.inputs.forEach((listener) => listener(inputs)),
+      command: (command) => orb.commands.forEach((listener) => listener(command)),
+    };
     // Links go to the system browser, as main.ts routes window.open there
     window.__opened = [];
     window.open = (target) => {
@@ -215,29 +250,35 @@ await page.addInitScript(
         return () => listeners.splice(listeners.indexOf(callback), 1);
       },
       micStatus: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
+      askMicrophone: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
       isPackaged: async () => false,
       chooseFolder: async () => null,
       presence: false,
       setPresence: (on) => window.__irisPresence(on),
-      onOrb: () => () => {},
-      sendOrbInputs: () => {},
-      onOrbInputs: () => () => {},
-      presenceCommand: () => {},
-      onPresenceCommand: () => () => {},
+      onOrb: (handlers) => {
+        orb.handlers = handlers;
+        return () => {
+          if (orb.handlers === handlers) orb.handlers = null;
+        };
+      },
+      sendOrbInputs: (inputs) => window.__irisOrbInputs?.(inputs),
+      onOrbInputs: (listener) => {
+        orb.inputs.push(listener);
+        return () => orb.inputs.splice(orb.inputs.indexOf(listener), 1);
+      },
+      presenceCommand: (command) => window.__irisPresenceCommand?.(command),
+      onPresenceCommand: (listener) => {
+        orb.commands.push(listener);
+        return () => orb.commands.splice(orb.commands.indexOf(listener), 1);
+      },
       presenceHover: () => {},
+      // Never a drag: a press and release is a click
       presenceDrag: async () => false,
       platform: "test",
     };
-  },
-  {
-    settings: {
-      setup_done: true,
-      // Iris sleeps until a word nobody says
-      wake_word: WAKE_WORD,
-      ...(process.env.E2E_HOST ? { ollama_host: process.env.E2E_HOST } : {}),
-    },
-  }
-);
+}
+// A first launch: the walkthrough sets the server, the model and the wake word
+await page.addInitScript(stubIris, { settings: {} });
 pushEvent = (type, data) => {
   page.evaluate(([t, d]) => window.__irisEvent?.(t, d), [type, data]).catch(() => {});
 };
@@ -248,7 +289,7 @@ const results = [];
 
 async function step(name, body) {
   const only = process.env.E2E_ONLY?.toLowerCase().split("|");
-  const always = ["the app starts", "language model: the server's models"];
+  const always = ["first run", "the app starts", "language model: the server's models"];
   if (only && !only.some((part) => name.toLowerCase().includes(part)) && !always.some((s) => name.startsWith(s))) {
     return;
   }
@@ -363,9 +404,27 @@ async function openStage(label, title = label) {
 }
 
 /** Out of presence, if a step left the window there. */
+/** Presence's window, the orb alone: index.html?window=presence. */
+async function openPresence() {
+  if (presencePage) return presencePage;
+  presencePage = await browser.newPage({ viewport: { width: 220, height: 220 } });
+  presencePage.on("pageerror", (error) => pageErrors.push(`presence: ${error}`));
+  await presencePage.exposeFunction("__irisRpc", (method, params) => rpc(method, params));
+  await presencePage.exposeFunction("__irisPresence", () => {});
+  // What presence asks (leave, pause) goes to the conversation window
+  await presencePage.exposeFunction("__irisPresenceCommand", (command) =>
+    page.evaluate((c) => window.__irisOrb.command(c), command)
+  );
+  await presencePage.addInitScript(stubIris, { settings: {} });
+  await presencePage.goto(`${url}?window=presence`);
+  await presencePage.locator('[aria-label="iris"]').waitFor({ timeout: 5000 });
+  return presencePage;
+}
+
 async function leavePresence() {
-  const leave = page.locator('main.presence button[title="Conversation"]');
-  if (await leave.count()) await leave.click();
+  if (presence.at(-1) !== true) return;
+  await presencePage.keyboard.press("Escape");
+  await until("the conversation", () => presence.at(-1) === false, 5000);
 }
 
 async function openSettings(pageName = "Pipeline") {
@@ -377,6 +436,9 @@ async function openSettings(pageName = "Pipeline") {
 }
 
 const config = () => events.findLast((e) => e.type === "config")?.data;
+const exactly = (text) => new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+const walkthroughStep = (name) => page.locator(`section[data-step="${name}"]`);
+const footerButton = (text) => page.locator("footer button", { hasText: text });
 const settings = () => page.evaluate(() => JSON.parse(localStorage.getItem("iris.settings") ?? "{}"));
 
 /** Back to the conversation from the settings or the memory panel. */
@@ -410,6 +472,140 @@ let model = process.env.E2E_MODEL ?? "";
 
 try {
   await page.goto(url);
+
+  // The address the core keeps for the test's server: .../v1 for one with
+  // the OpenAI-compatible API, the root for Ollama
+  let serverHost = "";
+
+  await step("first run: the walkthrough welcomes a new user, and nothing starts yet", async () => {
+    await page.getByText("Welcome to Iris").waitFor({ timeout: 30_000 });
+    check(!(await page.locator("textarea").count()), "the conversation shows before the walkthrough");
+    await footerButton("Get started").click();
+    await walkthroughStep("server").waitFor({ timeout: 5000 });
+    const started = events.find((e) => e.type === "state" && e.data.state === "starting");
+    check(!started, "Iris started before the walkthrough was done");
+  });
+
+  await step("first run: a server typed without /v1 is kept as the core resolves it, and a model chosen", async () => {
+    const models = page.locator('[aria-label="Model"] .s-option');
+    if (process.env.E2E_HOST) {
+      // As a user might type it: an OpenAI-compatible server without /v1
+      serverHost = (await rpc("llm.probe", { url: process.env.E2E_HOST })).host;
+      const typed = process.env.E2E_HOST.replace(/\/v1\/?$/, "");
+      await page.locator("button.s-btn", { hasText: "Add server" }).click();
+      await page.locator('input[aria-label="Server address"]').fill(typed);
+      await page.locator('input[aria-label="Server address"]').press("Enter");
+      await until(
+        "the server to be chosen",
+        async () =>
+          (await page.locator(".server.active .name").getAttribute("title").catch(() => null)) === serverHost,
+        30_000
+      );
+    } else {
+      // This computer's server, chosen as the first that answers
+      await page.locator(".server.active").waitFor({ timeout: 30_000 });
+    }
+    await until("the server's models", () => models.count(), 60_000);
+    if (!model) {
+      model = (await page.locator('[aria-label="Model"] .s-option.active .name').innerText()).trim();
+    }
+    await models.filter({ has: page.locator(".name", { hasText: exactly(model) }) }).click();
+    await page.locator('[aria-label="Model"] .s-option.active', { hasText: model }).waitFor({ timeout: 5000 });
+    await footerButton("Continue").click();
+  });
+
+  await step("first run: the speech models download in the background, the voices first", async () => {
+    await walkthroughStep("models").waitFor({ timeout: 5000 });
+    await until("the speech models", () => page.locator("[data-model]").count(), 10_000);
+    const ids = await page.locator("[data-model]").evaluateAll((rows) => rows.map((row) => row.dataset.model));
+    check(ids[0] === "kyutai" && ids[1] === "kokoro", `the voices do not come first: ${ids.join(", ")}`);
+    check(ids.includes("turn") && ids.includes("stt"), `models missing: ${ids.join(", ")}`);
+    // On this computer they are there already, or arrive with their bytes
+    await until(
+      "every model to be in",
+      async () => (await page.locator("[data-model]:not([data-state=done])").count()) === 0,
+      900_000
+    );
+    for (const update of events.filter((e) => e.type === "setup.models")) {
+      for (const m of update.data.models) {
+        check(m.state !== "downloading" || !m.total || m.done <= m.total, `${m.id}: ${m.done} of ${m.total} bytes`);
+      }
+    }
+    await footerButton("Continue").click();
+  });
+
+  await step("first run: the microphone's sound check shows its level, and closes", async () => {
+    await walkthroughStep("microphone").waitFor({ timeout: 5000 });
+    await page.locator('select[aria-label="Microphone"]').waitFor({ timeout: 10_000 });
+    const since = Date.now();
+    // A computer without a microphone says so instead
+    await until(
+      "the microphone's level",
+      async () =>
+        events.some((e) => e.at >= since && e.type === "mic.check") ||
+        (await page.getByText("The microphone could not be opened").count()),
+      10_000
+    );
+    check(await page.locator(".s-meter i").count(), "no level meter");
+    await footerButton("Continue").click();
+    await walkthroughStep("voice").waitFor({ timeout: 5000 });
+    await quiet(800);
+    const late = events.filter((e) => e.type === "mic.check" && e.at > Date.now() - 400);
+    check(late.length === 0, "the sound check goes on after its step");
+  });
+
+  await step("first run: a persona's voice plays before Iris runs", async () => {
+    await until("the personas", async () => (await page.locator(".persona").count()) >= 3);
+    const since = Date.now();
+    await page.locator('button[aria-label="Play HAL"]').click();
+    await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
+    await eventAfter("state", since, (data) => data.state === "idle", 60_000);
+    check(!events.some((e) => e.at >= since && e.type === "error"), "the preview failed");
+    await page.locator(".persona", { hasText: "Iris" }).locator("button.pick").click();
+    await footerButton("Continue").click();
+  });
+
+  await step("first run: the wake word is set, and the tools are offered", async () => {
+    await walkthroughStep("extras").waitFor({ timeout: 5000 });
+    for (const name of ["Camera", "Screen", "Web search"]) {
+      await page.getByRole("switch", { name }).waitFor({ timeout: 10_000 });
+    }
+    await page.getByRole("switch", { name: "Wake word" }).click();
+    await page.locator('input[aria-label="Wake word"]').fill(WAKE_WORD);
+    await footerButton("Continue").click();
+  });
+
+  await step("first run: Iris starts with the choices, and greets the user", async () => {
+    await walkthroughStep("ready").waitFor({ timeout: 5000 });
+    const stage = (id) => walkthroughStep("ready").locator(`[data-stage="${id}"]`);
+    check((await stage("llm").innerText()).includes(model), "the pipeline does not show the model");
+    check((await stage("wake").innerText()).includes(WAKE_WORD), "the pipeline does not show the wake word");
+    // A stage leads back to the step that sets it
+    await stage("wake").click();
+    await walkthroughStep("extras").waitFor({ timeout: 5000 });
+    await page.locator('nav[aria-label="Steps"] button[aria-label="Ready"]').click();
+    await walkthroughStep("ready").waitFor({ timeout: 5000 });
+    const since = Date.now();
+    await footerButton("Start talking").click();
+    await until("the conversation", () => page.locator("textarea").count(), 10_000);
+    const started = await eventAfter("config", since, () => true, 600_000);
+    // Typed turns need no microphone; the greeting keeps Iris awake meanwhile
+    await rpc("mic.set", { on: false });
+    check(started.data.wake_word === WAKE_WORD, `the wake word is ${started.data.wake_word}`);
+    check(started.data.llm_model === model, `the model is ${started.data.llm_model}`);
+    check(started.data.persona === "Iris", `the persona is ${started.data.persona}`);
+    if (serverHost) check(started.data.ollama_host === serverHost, `the server is ${started.data.ollama_host}`);
+    const greeting = await eventAfter("chat.done", since, () => true, 180_000);
+    const errors = events.filter((e) => e.at >= since && e.type === "error").map((e) => e.data.message);
+    check(!errors.length, `the greeting failed: ${errors.join(" | ")}`);
+    check(greeting.data.text.trim().length > 0, "the greeting is empty");
+    check(!events.some((e) => e.at >= since && e.type === "chat.user"), "a turn of the user's came before the greeting");
+    await until("the greeting in the conversation", () => page.getByText(greeting.data.text.trim().slice(0, 12)).count());
+    await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
+    const saved = await settings();
+    check(saved.setup_done === true, "the walkthrough is not marked done");
+    if (serverHost) check(saved.ollama_host === serverHost, `the server is kept as ${saved.ollama_host}`);
+  });
 
   await step("the app starts and the core loads its models", async () => {
     await eventAfter("config", 0, () => true, 180_000);
@@ -1340,18 +1536,48 @@ try {
     await toConversation();
   });
 
-  await step("a silent microphone is warned about once, also under the orb, and presence comes and goes", async () => {
+  await step("presence shows only the orb, a click pauses, the mark and Escape lead back, and a silent microphone tints it", async () => {
     await toConversation();
     await rpc("mic.set", { on: false });
-    // Only the orb shows
+    // A warning left by an earlier step (the denied microphone) would be the
+    // orb's to show, and the expand mark gives way to it: a reply after it,
+    // so nothing needs the user
+    await rpc("debug.emit", { type: "chat.done", data: { text: "Nothing needs you now.", interrupted: false } });
+    await until("the reply", () => page.getByText("Nothing needs you now.").count(), 5000);
+    const shown = presence.length;
+    const orb = (await openPresence()).locator('[aria-label="iris"]');
+    const mark = presencePage.locator(".mark");
+    const at = (x, y) => presencePage.mouse.click(x, y);
+    // Presence is a window of its own: the conversation window asks for it,
+    // and presence holds nothing but the orb
     await page.locator('button[title="Presence"]').click();
-    await until("only the orb", async () => !(await page.locator("textarea").count()));
-    check(presence.at(-1) === true, "the window was not asked to shrink");
-    check(!(await page.locator('button[title="Settings"]').isVisible()), "the top bar still shows");
-    check(await page.locator('[aria-label="assistant status"]').isVisible(), "the orb is gone");
+    await until("presence", () => presence.at(-1) === true, 5000);
+    check(await orb.locator("canvas").count(), "presence shows no orb");
+    check(!(await presencePage.locator("textarea, header, nav, input").count()), "presence shows more than the orb");
+    check(!(await orb.getAttribute("title")), "the orb shows a warning nothing calls for");
+    // The orb says what Iris does, as the conversation window has it
+    const state = (await rpc("app.info")).state;
+    await until(`the orb to show ${state}`, async () => (await orb.getAttribute("data-state")) === state, 5000);
+    // On the orb the expand mark shows; a click beside it pauses, and again resumes
+    await presencePage.mouse.move(110, 110);
+    await until("the expand mark", () => mark.evaluate((m) => m.classList.contains("shown")), 5000);
+    let since = Date.now();
+    await at(110, 110);
+    await eventAfter("state", since, (data) => data.state === "paused", 5000);
+    await until("the orb to rest", async () => (await orb.getAttribute("data-state")) === "paused", 5000);
+    since = Date.now();
+    await at(110, 110);
+    await eventAfter("state", since, (data) => data.state !== "paused", 5000);
+    check(presence.at(-1) === true, "a click on the orb left presence");
+    // The mark leads back to the conversation
+    await presencePage.mouse.move(146, 74);
+    await at(146, 74);
+    await until("the conversation", () => presence.at(-1) === false, 5000);
     // A microphone that delivers exact zeros (the core's own is off; its
     // levels are given to it as the microphone would)
-    const since = Date.now();
+    await page.locator('button[title="Presence"]').click();
+    await until("presence", () => presence.at(-1) === true, 5000);
+    since = Date.now();
     while (Date.now() - since < 8000) {
       await rpc("debug.emit", { type: "audio.level", data: { rms: 0 } });
       await quiet(100);
@@ -1359,20 +1585,23 @@ try {
     const warnings = events.filter((e) => e.at >= since && e.type === "error");
     check(warnings.length === 1, `${warnings.length} warnings for one silence`);
     const message = warnings[0].data.message;
-    // It needs the user: it shows under the orb, and opens the conversation
-    const notice = page.locator("button.presence-error", { hasText: message.slice(0, 20) });
-    await notice.waitFor({ timeout: 5000 });
-    await notice.click();
-    await page.locator("textarea").waitFor({ timeout: 5000 });
-    check(presence.at(-1) === false, "the window was not asked to grow");
+    // It needs the user: the orb takes the danger tint, says it as its
+    // title, and a click on it opens the conversation, where it is
+    await until("the warning on the orb", async () => (await orb.getAttribute("title")) === message, 5000);
+    await presencePage.mouse.move(110, 110);
+    await quiet(300);
+    check(!(await mark.evaluate((m) => m.classList.contains("shown"))), "the expand mark shows over the warning");
+    await at(110, 110);
+    await until("the conversation", () => presence.at(-1) === false, 5000);
     check((await page.locator(".bubble.error", { hasText: message.slice(0, 40) }).count()) === 1,
       "the warning is not in the conversation once");
     // Presence again, and Escape brings the conversation back
     await page.locator('button[title="Presence"]').click();
-    await until("only the orb", async () => !(await page.locator("textarea").count()));
-    await page.keyboard.press("Escape");
-    await page.locator("textarea").waitFor({ timeout: 5000 });
-    check(presence.join() === "true,false,true,false", `presence went ${presence.join()}`);
+    await until("presence", () => presence.at(-1) === true, 5000);
+    await presencePage.keyboard.press("Escape");
+    await until("the conversation", () => presence.at(-1) === false, 5000);
+    const went = presence.slice(shown).join();
+    check(went === "true,false,true,false,true,false", `presence went ${went}`);
   });
 
   await step("the core stops: the app says so, starts it again, and goes on", async () => {
@@ -1499,6 +1728,32 @@ try {
     await option("Smart Turn").click();
     await until("Smart Turn", () => config().turn_detection === "smart_turn");
     await toConversation();
+  });
+
+  await step("the walkthrough runs again from Settings, skips and keeps, and Iris says hello", async () => {
+    const before = config();
+    await openSettings();
+    await page.locator('nav[aria-label="Settings"] button', { hasText: "Walkthrough" }).click();
+    await page.getByText("Welcome to Iris").waitFor({ timeout: 5000 });
+    await footerButton("Get started").click();
+    const moves = [["server", "Skip"], ["models", "Continue"], ["microphone", "Skip"], ["voice", "Continue"], ["extras", "Continue"]];
+    for (const [name, move] of moves) {
+      await walkthroughStep(name).waitFor({ timeout: 10_000 });
+      await quiet(500);
+      await footerButton(move).click();
+    }
+    await walkthroughStep("ready").waitFor({ timeout: 5000 });
+    const since = Date.now();
+    await footerButton("Done").click();
+    await until("the conversation", () => page.locator("textarea").count(), 10_000);
+    const greeting = await eventAfter("chat.done", since, () => true, 180_000);
+    check(greeting.data.text.trim().length > 0, "the greeting is empty");
+    const after = config();
+    for (const key of ["llm_model", "ollama_host", "wake_word", "persona"]) {
+      check(after[key] === before[key], `${key} changed from ${before[key]} to ${after[key]}`);
+    }
+    check(after.mic_on === before.mic_on, "the microphone is not as it was");
+    await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
   });
 
   await step("nothing went wrong in the page", async () => {

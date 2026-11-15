@@ -1,6 +1,7 @@
 /** Central reactive store, fed by Python events over the RPC bridge. */
 
 import { onEvent, rpc, type AppInfo, type TurnTiming } from "./bridge";
+import type { WalkthroughChoices } from "./walkthrough.svelte";
 
 export type { TurnTiming };
 
@@ -276,7 +277,7 @@ export interface VoiceOptions {
 }
 
 /** User choices remembered across launches. */
-interface SavedSettings {
+export interface SavedSettings {
   llm_model?: string;
   persona?: string;
   input_device?: string;
@@ -304,15 +305,8 @@ interface SavedSettings {
   /** Model folders chosen by the user; empty means download as usual */
   stt_model_path?: string;
   tts_models_dir?: string;
-  /** The first-launch setup has been completed */
+  /** The first-launch walkthrough has been completed */
   setup_done?: boolean;
-}
-
-/** What the first-launch setup offers to download. */
-export interface SetupInfo {
-  stt: { engine: string; model: string; cached: boolean; size_mb: number | null };
-  tts: { found: string; size_mb: number };
-  ollama_url: string;
 }
 
 const SETTINGS_KEY = "iris.settings";
@@ -338,7 +332,7 @@ export function releasePreviews(attachments: AttachmentInfo[]) {
   }
 }
 
-function loadSettings(): SavedSettings {
+export function loadSettings(): SavedSettings {
   try {
     return JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as SavedSettings;
   } catch {
@@ -346,7 +340,7 @@ function loadSettings(): SavedSettings {
   }
 }
 
-function saveSettings(patch: SavedSettings) {
+export function saveSettings(patch: SavedSettings) {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...loadSettings(), ...patch }));
   } catch {
@@ -396,15 +390,14 @@ class IrisStore {
   /** Each speech engine's voices, for the persona editor */
   voices = $state<VoiceOptions | null>(null);
   memoryTopics = $state<MemoryTopic[]>([]);
-  /** First launch: the setup screen is shown and nothing starts until done.
-   *  Shown from the first frame, while the core is still booting. */
+  /** The walkthrough is shown instead of the conversation: on the first
+   *  launch, from the first frame while the core is still booting (nothing
+   *  starts until it is done), or run again from Settings */
   needsSetup = $state(!loadSettings().setup_done);
-  setupInfo = $state<SetupInfo | null>(null);
-  /** Setup is done and Iris is fetching its models; the setup screen stays
-   *  until they are in */
-  installing = $state(false);
-  /** How far the setup flower had opened, so the orb's bloom carries on */
+  /** How far the walkthrough's flower had opened, so the orb's bloom carries on */
   bloomFrom = 0;
+  /** Iris has been started in this window (not yet on a first launch) */
+  private started = false;
   /** A model download at first start, shown under the orb */
   setup = $state<{ model: string; label: string; done: number; total: number } | null>(null);
   /** When Iris falls asleep (performance.now() ms), or null when it isn't awake */
@@ -457,7 +450,6 @@ class IrisStore {
               total: data.total as number,
             }
           : null;
-        if (!data.label) this.leaveSetup();
         break;
 
       case "config": {
@@ -481,8 +473,6 @@ class IrisStore {
       case "state":
         this.state = (data.state as AssistantState) ?? "idle";
         this.running = this.state !== "idle";
-        // Started, or failed before its models were fetched
-        if (this.state !== "starting") this.leaveSetup();
         if (this.previewHeard && this.state !== "speaking") this.previewing = null;
         break;
 
@@ -966,15 +956,12 @@ class IrisStore {
   /** Point Iris at model folders it should use as they are ("" = download).
    *  Returns an error message, or null when the folder was accepted. */
   async setModelPaths(paths: { stt_path?: string; tts_dir?: string }): Promise<string | null> {
-    const method = this.needsSetup ? "models.check" : "models.set";
-    const result = await rpc<{ ok: boolean; error?: string }>(method, paths);
+    const result = await rpc<{ ok: boolean; error?: string }>("models.set", paths);
     if (!result.ok) return result.error ?? "Not a model folder";
-    if (!this.needsSetup) {
-      this.remember({
-        ...(paths.stt_path !== undefined ? { stt_model_path: paths.stt_path } : {}),
-        ...(paths.tts_dir !== undefined ? { tts_models_dir: paths.tts_dir } : {}),
-      });
-    }
+    this.remember({
+      ...(paths.stt_path !== undefined ? { stt_model_path: paths.stt_path } : {}),
+      ...(paths.tts_dir !== undefined ? { tts_models_dir: paths.tts_dir } : {}),
+    });
     return null;
   }
 
@@ -1102,9 +1089,14 @@ class IrisStore {
   async init() {
     onEvent((type, data) => this.handleEvent(type, data));
 
-    const micStatus = await window.iris.micStatus();
+    let micStatus = await window.iris.micStatus();
+    // The walkthrough asks for the microphone at its step; a launch after
+    // it asks now, should it never have been asked
+    if (micStatus === "not-determined" && !this.needsSetup) {
+      micStatus = await window.iris.askMicrophone();
+    }
     let micNotice: ChatMessage | null = null;
-    if (micStatus !== "granted") {
+    if (micStatus !== "granted" && !this.needsSetup) {
       const packaged = await window.iris.isPackaged();
       micNotice = {
         role: "error",
@@ -1145,12 +1137,14 @@ class IrisStore {
       }
       sayMicNotice();
 
-      // First launch: nothing starts (or downloads) until the user has said
-      // which server, model and speech models to use
-      if (info.running) this.needsSetup = false;
-      if (this.needsSetup) this.setPresence(false);
+      // First launch: nothing starts until the walkthrough is done; it
+      // fetches the speech models while the user makes the other choices
+      if (info.running) {
+        this.needsSetup = false;
+        this.started = true;
+      }
       if (this.needsSetup) {
-        this.setupInfo = await rpc<SetupInfo>("setup.info");
+        this.setPresence(false);
         return;
       }
 
@@ -1178,38 +1172,87 @@ class IrisStore {
     // The microphone chosen is chosen again in the new core
     this.micRestored = false;
     try {
-      if (this.needsSetup && !this.installing) {
-        this.setupInfo = await rpc<SetupInfo>("setup.info");
-        return;
-      }
+      // The walkthrough of a first launch goes on with the new core
+      if (this.needsSetup && !this.started) return;
       const info = await rpc<AppInfo>("app.info");
-      if (!info.running) await this.startAssistant(false);
+      if (!info.running) await this.startAssistant({ restore: false });
     } catch (err) {
       this.messages.push({ role: "error", text: `Iris could not be started again: ${err}`, streaming: false });
     }
   }
 
-  /** Save the first-launch choices and start Iris with them. The setup
-   *  screen stays while the speech models download. */
-  async finishSetup(choices: SavedSettings) {
-    saveSettings({ ...choices, setup_done: true });
-    this.installing = true;
-    await this.startAssistant();
+  /** The walkthrough's end on the first launch: keep its choices and start
+   *  Iris with them. The conversation shows at once; the orb blooms while
+   *  the models load, with the progress of any still downloading, and Iris
+   *  greets the user once it listens. */
+  async finishFirstRun(choices: WalkthroughChoices, greet: boolean) {
+    const host = choices.ollama_host;
+    const saved = loadSettings();
+    saveSettings({
+      persona: choices.persona,
+      input_device: choices.input_device,
+      wake_word: choices.wake_word,
+      tools: choices.tools,
+      stt_model_path: choices.stt_model_path,
+      tts_models_dir: choices.tts_models_dir,
+      ...(host !== undefined ? { ollama_host: host } : {}),
+      ...(choices.llm_model ? { llm_model: choices.llm_model } : {}),
+      ...(host !== undefined && choices.llm_model
+        ? { server_models: { ...saved.server_models, [host]: choices.llm_model } }
+        : {}),
+      setup_done: true,
+    });
+    if (host) this.keepServer(host);
+    this.persona = choices.persona;
+    this.needsSetup = false;
+    await this.startAssistant({ greet });
     this.loadLists();
   }
 
-  private leaveSetup() {
-    if (!this.installing) return;
-    this.installing = false;
+  /** The walkthrough's end when run again: what changed is applied to Iris
+   *  as it runs, the microphone opens as it was, and Iris says hello. */
+  async finishWalkthrough(
+    choices: WalkthroughChoices,
+    { greet, micOn }: { greet: boolean; micOn: boolean }
+  ) {
     this.needsSetup = false;
+    const config = this.config;
+    const host = choices.ollama_host;
+    try {
+      if (host !== undefined && host !== (config?.ollama_host ?? "")) {
+        await this.setOllamaHost(host);
+      }
+      if (choices.llm_model && choices.llm_model !== this.config?.llm_model) {
+        await this.setModel(choices.llm_model);
+      }
+      if (choices.persona !== this.persona) await this.setPersona(choices.persona);
+      const device = this.inputDevices.find((d) => d.name === choices.input_device);
+      if (device && device.name !== config?.input_device) await this.setMic(device.index);
+      if (choices.wake_word !== (config?.wake_word ?? "")) await this.setWakeWord(choices.wake_word);
+      for (const [id, on] of Object.entries(choices.tools)) {
+        const tool = this.config?.tools?.[id];
+        if (tool?.available && !!tool.enabled !== on) await this.setTool(id, on);
+      }
+      if (choices.stt_model_path !== (config?.stt_model_path ?? "")) {
+        await this.setModelPaths({ stt_path: choices.stt_model_path });
+      }
+      if (choices.tts_models_dir !== (config?.tts_models_dir ?? "")) {
+        await this.setModelPaths({ tts_dir: choices.tts_models_dir });
+      }
+    } finally {
+      await rpc("mic.set", { on: micOn });
+    }
+    if (greet) await rpc("assistant.greet");
   }
 
   /** Start the assistant with the saved settings; restore shows the recent
    *  part of the conversation the core remembers (not when it is shown
-   *  already). */
-  private async startAssistant(restore = true) {
+   *  already), and greet has Iris say hello once it listens (the end of the
+   *  walkthrough). */
+  private async startAssistant({ restore = true, greet = false } = {}) {
+    this.started = true;
     const saved = loadSettings();
-    const options: Record<string, unknown> = {};
+    const options: Record<string, unknown> = greet ? { greet: true } : {};
     if (!restore) options.restore_thread = false;
     if (saved.llm_model) options.llm_model = saved.llm_model;
     if (saved.persona) options.persona = saved.persona;

@@ -73,8 +73,9 @@ IMMEDIATE = frozenset(
 # Slow requests that depend on nothing else and nothing depends on: each is
 # answered on a thread of its own, so it holds up neither the requests in
 # order nor the controls. Checking the servers takes seconds when one is away,
-# and the app checks them again and again while their list is shown
-CONCURRENT = frozenset({"llm.check_hosts"})
+# and the app checks them again and again while their list is shown; the
+# walkthrough also looks for servers and asks one for its models
+CONCURRENT = frozenset({"llm.check_hosts", "llm.find_servers", "llm.probe"})
 
 
 def serve(read_line, methods: dict, write_frame, immediate=IMMEDIATE, concurrent=CONCURRENT):
@@ -216,6 +217,8 @@ def main():
         "llm.set": lambda params: controller.set_model(params.get("name", "")),
         "llm.set_host": lambda params: controller.set_ollama_host(params.get("url", "")),
         "llm.check_hosts": lambda params: controller.check_servers(params.get("urls", [])),
+        "llm.find_servers": lambda params: controller.find_servers(),
+        "llm.probe": lambda params: controller.probe_server(params.get("url", "")),
         "chat.send_text": lambda params: controller.send_text(
             params.get("text", ""), params.get("attachments")
         ),
@@ -228,6 +231,11 @@ def main():
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
         "wake.set": lambda params: controller.set_wake_word(params.get("word", "")),
         "setup.info": lambda params: controller.setup_info(),
+        "setup.download": lambda params: controller.setup_download(params),
+        "mic.check": lambda params: controller.sound_check(
+            bool(params.get("on", True)), params.get("index")
+        ),
+        "assistant.greet": lambda params: controller.greet(),
         "models.check": lambda params: controller.check_model_paths(
             params.get("stt_path"), params.get("tts_dir")
         ),

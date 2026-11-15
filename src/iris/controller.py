@@ -11,10 +11,10 @@ import time
 from collections import deque
 from pathlib import Path
 
-from iris import downloads, engines, servers
+from iris import downloads, engines, servers, speech_models
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
-from iris.audio import AUDIO_FILTERS, AudioRecorder, get_filter
+from iris.audio import AUDIO_FILTERS, AudioPlayer, AudioRecorder, SoundCheck, get_filter
 from iris.events import EventBus, brief
 from iris.llm import ConversationManager, effective_host, normalize_host, ollama_client
 from iris.personas import (
@@ -38,20 +38,18 @@ from iris.transcription import (
     resolve_engine,
     resolve_model,
 )
+from iris.speech_models import KOKORO_MB, WHISPER_MB
 from iris.tts import (
-    DEFAULT_KOKORO_DIR,
     KOKORO_MODEL_FILE,
-    KOKORO_MODEL_URL,
     KOKORO_VOICES_FILE,
-    KOKORO_VOICES_URL,
     SpeechGenerator,
+    SpeechPipeline,
     engine_speaks,
     find_kokoro_models,
     kokoro_files_in,
     list_voices,
     voice_language,
 )
-from iris.turns import SMART_TURN_FILE, SMART_TURN_REPO
 
 # What a voice says when previewed, in its own language
 PREVIEW_LINES = {
@@ -85,16 +83,9 @@ FLAG_STATE_PRIORITY = (
 # How long "speaking" survives a gap in playback, in seconds.
 SPEAKING_HOLD = 0.6
 
-# Rough download sizes for the first-launch setup, in MB
-APPROX_MODEL_MB = {
-    "tiny": 75,
-    "base": 145,
-    "small": 480,
-    "medium": 1500,
-    "large-v3": 3100,
-    "large-v3-turbo": 1600,
-}
-KOKORO_MB = 335
+# Seconds a voice preview before Iris runs is followed at most: its engine
+# loading, then the line said
+PREVIEW_LIMIT = 90.0
 
 # The model that answers about images when the conversation's model cannot
 # see, if the server has it; else the first one that can see
@@ -183,6 +174,19 @@ class AssistantController:
         # The latest turns' timings, for an app that attaches later
         self._timings: deque = deque(maxlen=TIMINGS_KEPT)
 
+        # The first-run walkthrough, before Iris runs: the speech models
+        # downloading meanwhile (held while anything downloads, so no file is
+        # fetched twice), the choices it made so far, the microphone's sound
+        # check, and a voice of its own for previews
+        self._fetching = threading.RLock()
+        self.fetcher = speech_models.Fetcher(
+            self._fetching, self._models_changed, self._model_progress
+        )
+        self._walkthrough: dict = {}
+        self._sound_check: SoundCheck | None = None
+        self._preview: SpeechPipeline | None = None
+        self._preview_lock = threading.Lock()
+
         bus.subscribe(self._on_bus_event)
 
     # ------------------------------------------------------------------
@@ -265,15 +269,23 @@ class AssistantController:
     # ------------------------------------------------------------------
 
     def start(self, options: dict | None = None) -> dict:
-        """Build the assistant and start its run_loop on a background thread."""
+        """Build the assistant and start its run_loop on a background thread.
+
+        greet: Iris says hello once it listens (the end of the walkthrough).
+        """
+        options = dict(options or {})
+        greet = bool(options.pop("greet", False))
         with self._start_lock:
             if self._loop_thread and self._loop_thread.is_alive():
                 return {"ok": True, "already_running": True}
+            self._release_first_run()
+            if greet:
+                self.greet()
             self._poller_stop.clear()
-            self._ollama_host = normalize_host((options or {}).get("ollama_host"))
+            self._ollama_host = normalize_host(options.get("ollama_host"))
             self._publish_state("starting")
             self._loop_thread = threading.Thread(
-                target=self._run, args=(options or {},), daemon=True
+                target=self._run, args=(options,), daemon=True
             )
             self._loop_thread.start()
             threading.Thread(target=self._speaking_poller, daemon=True).start()
@@ -517,6 +529,7 @@ class AssistantController:
                     "source": plugin.source,
                     "available": plugin.available(),
                     "switchable": plugin.switchable,
+                    "enabled_by_default": plugin.enabled_by_default,
                     "enabled": tools.enabled(plugin.id) if tools else None,
                     "tools": tools.names_of(plugin.id) if tools else [],
                     "speech_engines": [e.id for e in plugin.speech_engines()],
@@ -638,86 +651,77 @@ class AssistantController:
             "setup.progress", {"model": model, "label": label, "done": done, "total": total}
         )
 
+    def _fetch(self, model: speech_models.SpeechModel | None):
+        """Download a speech model unless it is there, with progress under
+        the orb. Waits while the walkthrough's downloads run, so no file is
+        fetched twice at once."""
+        if model is None:
+            return
+        with self._fetching:
+            if not model.is_cached():
+                model.fetch(self._progress(model.id, model.progress_label))
+
     def _fetch_stt(self, whisper_model: str, wake_word: str | None = None, **engine):
         """Download the speech recognition model unless it is cached or a
         local folder was chosen (used as it is)."""
-        if Path(whisper_model).expanduser().is_dir():
-            return
-        resolved = resolve_engine(engine.get("whisper_engine", "auto"))
-        device = resolve_device(resolved, engine.get("whisper_device", "auto"))
-        repo = model_repo(resolve_model(whisper_model, resolved, device), resolved)
-        if not downloads.is_cached(repo):
-            downloads.download(repo, self._progress("stt", "Downloading speech recognition model"))
+        self._fetch(
+            speech_models.whisper(
+                whisper_model,
+                engine.get("whisper_engine", "auto"),
+                engine.get("whisper_device", "auto"),
+            )
+        )
         if wake_word:
-            tiny = model_repo("tiny", resolved)
-            if not downloads.is_cached(tiny):
-                downloads.download(tiny, self._progress("wake", "Downloading wake word model"))
+            self._fetch(speech_models.wake(engine.get("whisper_engine", "auto")))
 
     def _fetch_turn(self):
         """Download Smart Turn, which hears when the user has finished
         speaking, unless it is cached. Without it a turn ends after a silence."""
-        if downloads.is_cached(SMART_TURN_REPO, SMART_TURN_FILE):
-            return
         try:
-            downloads.download(
-                SMART_TURN_REPO,
-                self._progress("turn", "Downloading turn detection model"),
-                filename=SMART_TURN_FILE,
-            )
+            self._fetch(speech_models.turn())
         except Exception:
             pass
 
     def _fetch_tts(self, tts_dir: str | None):
         """Download the voice model unless a folder was chosen or the files
         are already in one of the usual places."""
-        if tts_dir or find_kokoro_models() is not None:
-            return
-        downloads.download_files(
-            [
-                (KOKORO_MODEL_URL, DEFAULT_KOKORO_DIR / KOKORO_MODEL_FILE),
-                (KOKORO_VOICES_URL, DEFAULT_KOKORO_DIR / KOKORO_VOICES_FILE),
-            ],
-            self._progress("tts", "Downloading voice model"),
-        )
+        self._fetch(speech_models.kokoro(tts_dir))
 
     def _fetch_models(self, kwargs: dict):
         """Download the speech models that are neither found nor pointed to,
-        with visible progress.
+        with visible progress, the voices first.
 
         On a fresh install the first launch fetches large models (1.6 GB for
-        large-v3-turbo, 335 MB for the voice); without this the UI would only
-        say "Loading models". A model folder chosen in Settings is used as it
-        is and never downloaded.
+        large-v3-turbo, a few hundred MB for each voice engine); without this
+        the UI would only say "Loading models". A model folder chosen in
+        Settings is used as it is and never downloaded. Usually the
+        walkthrough has fetched them already; while it still is, this waits
+        for it, then fetches whatever failed there.
         """
-        steps = []
-        # Whisper's models; another recognition engine fetches its own
-        if kwargs.get("recognition_engine", "whisper") == "whisper":
-            steps.append((
-                "speech recognition model",
-                lambda: self._fetch_stt(
-                    kwargs.get("whisper_model", "auto"),
-                    kwargs.get("wake_word"),
-                    whisper_engine=kwargs.get("whisper_engine", "auto"),
-                    whisper_device=kwargs.get("whisper_device", "auto"),
-                ),
-            ))
-        steps.append(("turn detection model", self._fetch_turn))
-        steps.append(("Kokoro voice model", lambda: self._fetch_tts(kwargs.get("tts_models_dir"))))
         # Each is tried whatever became of the others (offline, all fail):
-        # Iris starts with what it has and says what it could not fetch
+        # Iris starts with what it has and says what it could not fetch.
+        # Without Smart Turn a silence ends a turn, which needs no word.
         try:
-            for what, fetch in steps:
+            for model in speech_models.needed(
+                whisper_model=kwargs.get("whisper_model", "auto"),
+                whisper_engine=kwargs.get("whisper_engine", "auto"),
+                whisper_device=kwargs.get("whisper_device", "auto"),
+                recognition_engine=kwargs.get("recognition_engine", "whisper"),
+                wake_word=kwargs.get("wake_word"),
+                tts_dir=kwargs.get("tts_models_dir"),
+            ):
                 try:
-                    fetch()
+                    self._fetch(model)
                 except Exception as e:
-                    message = f"Could not download the {what}: {brief(e)}"
-                    self.bus.emit("error", {"message": message})
+                    if not model.optional:
+                        message = f"Could not download the {model.what}: {brief(e)}"
+                        self.bus.emit("error", {"message": message})
         finally:
             self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
 
     def setup_info(self) -> dict:
-        """For the first-launch setup: what would be downloaded, roughly how
-        much, and what is already on this machine."""
+        """For the first-launch walkthrough: what would be downloaded, roughly
+        how much, and what is already on this machine."""
         engine = resolve_engine("auto")
         model = resolve_model("auto", engine, resolve_device(engine))
         return {
@@ -725,11 +729,102 @@ class AssistantController:
                 "engine": engine,
                 "model": model,
                 "cached": downloads.is_cached(model_repo(model, engine)),
-                "size_mb": APPROX_MODEL_MB.get(model),
+                "size_mb": WHISPER_MB.get(model),
             },
             "tts": {"found": str(find_kokoro_models() or ""), "size_mb": KOKORO_MB},
             "ollama_url": effective_host(self._ollama_host),
+            "models": self.fetcher.describe(speech_models.needed()),
         }
+
+    # ------------------------------------------------------------------
+    # The first-run walkthrough: what it needs before Iris runs
+    # ------------------------------------------------------------------
+
+    def setup_download(self, options: dict | None = None) -> dict:
+        """Fetch the speech models Iris will need, in the background, while
+        the walkthrough goes on; asked again, retry what failed. Progress
+        comes as setup.models events (each model's state) and setup.progress
+        (the one downloading, for the orb).
+
+        options: the choices made so far that change what is needed:
+        whisper_model, wake_word, and model folders (stt_path, tts_dir) to
+        use instead of downloads.
+        """
+        options = dict(options or {})
+        self._walkthrough = options
+
+        def choose():
+            return speech_models.needed(
+                whisper_model=options.get("stt_path") or options.get("whisper_model") or "auto",
+                wake_word=options.get("wake_word") or None,
+                tts_dir=options.get("tts_dir") or None,
+            )
+
+        return {"ok": True, "models": self.fetcher.start(choose)}
+
+    def _models_changed(self, models: list[dict], busy: bool):
+        self.bus.emit("setup.models", {"models": models, "busy": busy})
+
+    def _model_progress(self, model, done: int, total: int):
+        if model is None:
+            self.bus.emit("setup.progress", {"label": "", "done": 0, "total": 0})
+        else:
+            self._progress(model.id, model.progress_label)(done, total)
+
+    @staticmethod
+    def probe_server(url: str) -> dict:
+        """A server's address as Iris would keep it, and its models, without
+        switching to it: the walkthrough lets the user choose first."""
+        host = resolve_host(url)
+        try:
+            ollama_client(host, timeout=8).list()
+        except Exception as e:
+            where = host or "the default server"
+            return {"ok": False, "error": f"Cannot reach the server at {where}: {e}"}
+        return {
+            "ok": True,
+            "host": host or "",
+            "models": ConversationManager.list_available_models(host),
+        }
+
+    @staticmethod
+    def find_servers() -> dict:
+        """Model servers with the OpenAI-compatible API answering on this
+        computer at their usual ports (besides Ollama, the default one)."""
+        return {"servers": servers.discover()}
+
+    def sound_check(self, on: bool, device: int | None = None) -> dict:
+        """Listen to the microphone on its own, before Iris does, so the
+        walkthrough can show its level and whether a voice comes through
+        (mic.check events). Off closes it again."""
+        if self._sound_check is not None:
+            self._sound_check.stop()
+            self._sound_check = None
+        if not on:
+            return {"ok": True}
+        check = SoundCheck(lambda data: self.bus.emit("mic.check", data), device=device)
+        try:
+            check.start()
+        except Exception as e:
+            return {"ok": False, "error": f"The microphone could not be opened: {e}"}
+        self._sound_check = check
+        return {"ok": True, "device": check.device_name()}
+
+    def greet(self) -> dict:
+        """Have Iris say hello as its next turn, in the persona's own words:
+        the end of the walkthrough. Kept until Iris runs, if it does not yet."""
+        self._turns.put({"greet": True})
+        return {"ok": True}
+
+    def _release_first_run(self):
+        """Iris starts: what the walkthrough used of the microphone and the
+        speaker is given back."""
+        self.sound_check(False)
+        with self._preview_lock:
+            preview, self._preview = self._preview, None
+        if preview is not None:
+            preview.stop()
+            preview.text_queue.put(None)  # its workers end
 
     @staticmethod
     def check_model_paths(stt_path: str | None = None, tts_dir: str | None = None) -> dict:
@@ -802,7 +897,7 @@ class AssistantController:
             "models": [
                 {
                     "id": size,
-                    "size_mb": APPROX_MODEL_MB.get(size),
+                    "size_mb": WHISPER_MB.get(size),
                     "cached": downloads.is_cached(model_repo(size, engine)),
                     "active": size == current,
                 }
@@ -1081,9 +1176,8 @@ class AssistantController:
     def persona_preview(self, settings: dict) -> dict:
         """Say a line in a persona's voice, as edited, cutting off whatever is
         being said. It goes through the speech pipeline, so the mic stays
-        closed while it plays."""
-        if self.assistant is None:
-            return {"ok": False, "error": "Assistant not running"}
+        closed while it plays. Before Iris runs (in the walkthrough) a voice
+        of its own says it, once that engine's model is downloaded."""
         engine, voice = settings.get("engine"), settings.get("voice")
         if engine not in engines.speech_engines() or not voice:
             return {"ok": False, "error": "No voice chosen"}
@@ -1092,18 +1186,63 @@ class AssistantController:
         if not engine_speaks(engine, language):
             language = "en"
         name = (settings.get("name") or "").strip() or "Iris"
+        line = PREVIEW_LINES.get(language, PREVIEW_LINES["en"]).format(name=name)
+        sound = {
+            "engine": engine,
+            "voice": voice,
+            "speed": float(settings.get("speed") or 1.0),
+            "audio_filter": settings.get("audio_filter") or "",
+        }
+        if self.assistant is None:
+            return self._preview_before_start(line, language, sound)
         pipeline = self.assistant.speech_pipeline
         pipeline.stop()
-        pipeline.queue_speech(
-            PREVIEW_LINES.get(language, PREVIEW_LINES["en"]).format(name=name),
-            language=language,
-            sound={
-                "engine": engine,
-                "voice": voice,
-                "speed": float(settings.get("speed") or 1.0),
-                "audio_filter": settings.get("audio_filter") or "",
-            },
-        )
+        pipeline.queue_speech(line, language=language, sound=sound)
+        return {"ok": True}
+
+    def _voice_downloaded(self, engine: str) -> bool:
+        """Whether a speech engine's model is here, to preview its voices
+        before Iris runs (an engine a plugin adds fetches its own)."""
+        if engine == "kyutai":
+            return speech_models.kyutai().is_cached()
+        if engine == "kokoro":
+            return bool(self._walkthrough.get("tts_dir")) or speech_models.kokoro().is_cached()
+        return True
+
+    def _preview_before_start(self, line: str, language: str, sound: dict) -> dict:
+        """Say a preview in a voice of the walkthrough's own, while Iris does
+        not run yet. Its engine loads on a thread, so no request waits for
+        it; the state is speaking while it plays, as it is with Iris."""
+        if not self._voice_downloaded(sound["engine"]):
+            return {"ok": False, "error": "The voice is still downloading"}
+        tts_dir = self._walkthrough.get("tts_dir") or None
+
+        def speak():
+            try:
+                with self._preview_lock:
+                    if self._preview is None:
+                        generator = SpeechGenerator(
+                            sound["engine"], sound["voice"], sound["speed"], models_dir=tts_dir
+                        )
+                        self._preview = SpeechPipeline(generator, AudioPlayer())
+                        self._preview.on_output_level = lambda level: self.bus.emit(
+                            "audio.output", {"rms": level}
+                        )
+                    pipeline = self._preview
+                pipeline.stop()
+                pipeline.queue_speech(line, language=language, sound=sound)
+            except Exception as e:
+                self.bus.emit("error", {"message": f"Could not load the voice: {e}"})
+                return
+            self._publish_state("speaking")
+            deadline = time.monotonic() + PREVIEW_LIMIT
+            while pipeline.is_active and time.monotonic() < deadline:
+                time.sleep(0.05)
+            # Unless Iris has started meanwhile, which says what it is doing
+            if self._preview is pipeline:
+                self._publish_state("idle")
+
+        threading.Thread(target=speak, daemon=True).start()
         return {"ok": True}
 
     def history(self) -> dict:
