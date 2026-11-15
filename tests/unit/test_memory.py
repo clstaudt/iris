@@ -2,15 +2,17 @@
 
 import json
 import logging
+import sqlite3
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import ollama
 import pytest
 
 from iris import memory as memory_module
+from iris.attachments import Attachment
 from iris.llm import ConversationManager
 from iris.llm_client import OpenAIClient
 from iris.memory import PIN_TURNS, Filer, MemoryKeeper, MemoryStore
@@ -557,8 +559,6 @@ def test_a_busy_conversation_gets_the_llm_first(store, monkeypatch):
 
 
 def test_old_databases_get_the_summarized_column(tmp_path):
-    import sqlite3
-
     path = tmp_path / "memory.db"
     db = sqlite3.connect(path)
     db.executescript(
@@ -605,3 +605,130 @@ def test_amnesia_still_reads_memory(store):
     conversation = _conversation(store)
     conversation.set_amnesia(True)
     assert "#1 Lisbon trip" in conversation.manage_context()[0]["content"]
+
+
+# -- forgetting everything ---------------------------------------------------
+
+
+def _reply(conversation, prompt, answer, keep=True):
+    """A reply streamed to the end, as the model gives it."""
+    conversation.client = MagicMock()
+    conversation.client.chat.return_value = iter([{"message": {"content": answer}}])
+    return "".join(conversation.chat_stream(prompt, keep=keep))
+
+
+def test_forgetting_everything_leaves_nothing_in_the_store_or_its_file(tmp_path):
+    path = tmp_path / "memory.db"
+    store = MemoryStore(path)
+    topic = store.create_topic("Surprise party", "Ana, Saturday", "Ana's party at the Quokkabar.")
+    for n in range(40):
+        _exchange(store, f"Idea {n} for Ana's surprise party at the Quokkabar?", "Saturday at eight.")
+    store.mark_filed([t["id"] for t in store.recent_turns()], topic)
+    store.add_turn("system", "You are now HAL.")
+
+    store.forget_all()
+
+    assert store.turn_count() == 0 and store.topics() == []
+    assert store.search("Quokkabar") == [] and store.unfiled_exchanges() == []
+    db = sqlite3.connect(path)
+    # The search index holds no word of it
+    db.execute("CREATE VIRTUAL TABLE temp.words USING fts5vocab(main, turns_fts, row)")
+    assert db.execute("SELECT COUNT(*) FROM temp.words").fetchone()[0] == 0
+    # And the file was rebuilt: no free page still holds the words
+    assert db.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    db.close()
+    assert b"quokkabar" not in path.read_bytes().lower()
+    # Iris started again has nothing to show of the conversation
+    assert MemoryStore(path).recent_turns() == []
+
+
+def test_a_decision_made_while_everything_was_forgotten_files_nothing(store):
+    _exchange(store, "Plan a Lisbon trip", "Alfama, Belém, Sintra.")
+
+    def forgotten_meanwhile(messages, schema, abort=lambda: False):
+        # Everything is forgotten while the model decides, and the user goes
+        # on: the new turns take the forgotten ones' numbers
+        store.forget_all()
+        _exchange(store, "Hello again", "Hi!")
+        return {"remember": True, "topic_id": 0, "title": "Lisbon trip"}
+
+    assert Filer(store, forgotten_meanwhile).file() is False
+    assert store.topics() == []
+    assert [e.text for e in store.unfiled_exchanges()] == ["User: Hello again\nAssistant: Hi!"]
+
+
+def test_a_summary_written_while_everything_was_forgotten_is_dropped(store):
+    topic = store.create_topic("Lisbon trip", "Lisbon", "")
+    _exchange(store, "Plan a Lisbon trip", "Sure.")
+    store.mark_filed([t["id"] for t in store.recent_turns()], topic)
+
+    def forgotten_meanwhile(messages, schema, abort=lambda: False):
+        store.forget_all()
+        # A new topic takes the forgotten one's number
+        store.create_topic("Tomatoes", "after the frost", "Plant them after the last frost.")
+        return {"summary": "A trip to Lisbon.", "gist": "Lisbon"}
+
+    Filer(store, forgotten_meanwhile).file()
+    [tomatoes] = store.topics()
+    assert (tomatoes.id, tomatoes.summary) == (topic, "Plant them after the last frost.")
+
+
+def test_forgetting_everything_cuts_off_a_filing_call_in_flight(store, fake_ollama):
+    _exchange(store, "Plan a Lisbon trip", "Sure.")
+    fake_ollama.replies = ['{"remember": true, "topic_id": 0, "title": "Lisbon"}']
+    fake_ollama.delay = 5.0  # a long generation
+    filer = Filer(store, memory_module.chat_json(lambda: None, lambda: "model"))
+    threading.Timer(0.1, store.forget_all).start()
+    started = time.monotonic()
+    assert filer.file() is False
+    # The model is free for the conversation at once
+    assert time.monotonic() - started < 1
+    assert store.topics() == [] and store.turn_count() == 0
+
+
+def test_forgetting_everything_starts_the_conversation_over(store):
+    topic = store.create_topic("Lisbon trip", "late Oct", "Staying in Chiado.")
+    conversation = _conversation(store)
+    _reply(conversation, "Where should I stay in Lisbon?", "Chiado, near the river.")
+    conversation.pinned[topic] = PIN_TURNS
+    plan = Attachment("plan.txt", "document", "text/plain", text="Day one: Belém")
+    conversation.shared = [(plan, PIN_TURNS)]
+    conversation.language = "pt"
+
+    conversation.forget()
+    store.forget_all()
+
+    # The next prompt carries the persona and an empty memory, nothing else
+    [system] = conversation.manage_context()
+    assert "Memory index:\n(nothing yet)" in system["content"]
+    assert "Chiado" not in system["content"] and "Lisbon" not in system["content"]
+    assert conversation._files_context([]) == ""
+    assert conversation.language == "en"
+
+    # And the conversation goes on, remembered as ever
+    _reply(conversation, "Hi", "Hello!")
+    assert [t["text"] for t in store.recent_turns()] == ["Hi", "Hello!"]
+
+
+def test_forgetting_everything_in_amnesia_mode_forgets_its_turns_and_stays_in_it(store):
+    conversation = _conversation(store)
+    conversation.set_amnesia(True)
+    _reply(conversation, "Something private", "Understood.")
+
+    conversation.forget()
+    assert len(conversation.manage_context()) == 1
+    assert conversation.amnesia is True
+
+    _reply(conversation, "Something else", "Noted.")
+    assert store.turn_count() == 0
+    assert [m["content"] for m in conversation.manage_context()[1:]] == ["Something else", "Noted."]
+
+
+def test_a_reply_begun_before_everything_was_forgotten_is_not_kept(store):
+    conversation = _conversation(store)
+    _reply(conversation, "Where should I stay in Lisbon?", "Chiado.", keep=False)
+    # Forgotten while the reply was still being heard; then it is kept
+    conversation.forget()
+    store.forget_all()
+    conversation.keep("Where should I stay in Lisbon?", "Chiado.", "voice")
+    assert store.turn_count() == 0

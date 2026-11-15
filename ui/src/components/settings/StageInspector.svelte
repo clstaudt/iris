@@ -30,6 +30,7 @@
     if (stage === "stt") store.loadRecognitionModels().catch(() => {});
     if (stage === "persona") store.refreshPersonas().catch(() => {});
     if (stage === "voice" && !store.voices) store.loadVoices().catch(() => {});
+    if (stage === "memory") store.loadMemory().catch(() => {});
   });
 
   const title = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
@@ -220,6 +221,21 @@
     store.models.find((m) => m.name === config?.llm_model)?.tools ?? true
   );
   const plugins = $derived(config?.plugins ?? []);
+
+  // Memory: forgetting everything asks first -----------------------------
+
+  let confirmingForget = $state(false);
+  let forgetting = $state(false);
+
+  async function forgetEverything() {
+    forgetting = true;
+    try {
+      await store.forgetEverything();
+    } finally {
+      forgetting = false;
+      confirmingForget = false;
+    }
+  }
 
   // Voice -----------------------------------------------------------------
 
@@ -536,6 +552,29 @@
             onchange={() => store.toggleAmnesia().catch(fail("memory.set_amnesia"))}
           />
         </div>
+        {#if config?.memory && store.remembersAnything}
+          {#if confirmingForget}
+            <div class="confirm">
+              <p>Forget everything Iris remembers? This cannot be undone.</p>
+              <div class="flex justify-end gap-2">
+                <button
+                  class="s-btn"
+                  onclick={() => (confirmingForget = false)}
+                  disabled={forgetting}
+                >
+                  Cancel
+                </button>
+                <button class="s-btn solid-danger" onclick={forgetEverything} disabled={forgetting}>
+                  Forget everything
+                </button>
+              </div>
+            </div>
+          {:else}
+            <button class="s-btn danger forget self-start" onclick={() => (confirmingForget = true)}>
+              Forget everything
+            </button>
+          {/if}
+        {/if}
       </section>
       {#if config?.memory}
         <button class="s-btn self-start" onclick={() => store.togglePanel("memory")}>
@@ -656,5 +695,35 @@
   }
   .unreachable {
     color: var(--color-danger);
+  }
+  /* Forgetting everything: quiet until asked, and asked first */
+  .s-btn.forget {
+    margin-top: 0.25rem;
+    border-color: color-mix(in srgb, var(--color-danger) 35%, transparent);
+    color: var(--color-danger);
+  }
+  .confirm {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 0.25rem;
+    padding: 0.75rem 0.875rem;
+    border-radius: 0.6rem;
+    border: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 5%, transparent);
+  }
+  .confirm p {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--color-ink);
+  }
+  .s-btn.solid-danger {
+    border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 16%, transparent);
+    color: color-mix(in srgb, var(--color-danger) 55%, var(--color-ink));
+  }
+  .s-btn.solid-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-danger) 24%, transparent);
+    color: color-mix(in srgb, var(--color-danger) 55%, var(--color-ink));
   }
 </style>
