@@ -19,6 +19,7 @@ from iris.events import EventBus
 from iris.llm import ConversationManager
 from iris.memory import Filer, MemoryKeeper, MemoryStore
 from iris.plugin import PluginContext
+from iris.plugins import BUILT_IN
 from iris.plugins import memory as memory_plugin
 from iris.tools import Tools
 from iris.tts import SpeechGenerator
@@ -68,7 +69,7 @@ def _exchange(store, thread, user, assistant):
 # -- the store ---------------------------------------------------------------
 
 
-def test_a_thread_is_stored_with_its_first_turn(store):
+def test_a_thread_is_stored_with_its_first_message(store):
     conversation = _conversation(store)
     stored = []
     conversation.on_stored = lambda: stored.append(conversation.thread)
@@ -76,24 +77,20 @@ def test_a_thread_is_stored_with_its_first_turn(store):
     conversation.add_note("You are now HAL.")
     assert store.threads() == [] and conversation.thread is None
 
-    conversation._record("Plan a Lisbon trip", "Alfama, Belém, Sintra.", "text")
-    [thread] = store.threads()
+    seen = []
+    _model(conversation, "Alfama, Belém, Sintra.", lambda: seen.append(store.threads()))
+    "".join(conversation.chat_stream("Plan a Lisbon trip", keep=True))
+    [[thread]] = seen  # stored as the reply began
     assert thread["persona"] == "iris" and conversation.thread == thread["id"]
-    assert stored == [thread["id"]]
+    assert stored[0] == thread["id"]
     assert [t["text"] for t in store.recent_turns(thread["id"])] == [
         "Plan a Lisbon trip",
         "Alfama, Belém, Sintra.",
     ]
     # The next exchange goes on in it
-    conversation._record("And Sintra?", "Take the train.", "voice")
+    _model(conversation, "Take the train.")
+    "".join(conversation.chat_stream("And Sintra?", keep=True))
     assert len(store.threads()) == 1
-
-
-def test_amnesia_in_a_new_thread_stores_no_thread(store):
-    conversation = _conversation(store)
-    conversation.set_amnesia(True)
-    conversation._record("Something private", "Understood.", "voice")
-    assert store.threads() == [] and conversation.thread is None
 
 
 def test_each_thread_has_its_own_index_live_turns_search_and_recall(store):
@@ -347,9 +344,14 @@ def test_a_new_thread_is_stored_with_the_persona_chosen_for_it(dirs, store):
     assert shown.of("thread.opened") == [{"id": None}]
     assert controller.new_thread("nobody")["ok"] is False
 
-    conversation._record("Hello HAL", "Good afternoon.", "text")
-    assert store.thread(conversation.thread)["persona"] == "hal"
-    assert controller.threads_list()["open"] == conversation.thread
+    seen = []
+    _model(conversation, "Good afternoon.", lambda: seen.append(controller.threads_list()))
+    "".join(conversation.chat_stream("Hello HAL", keep=True))
+    # Listed with HAL as the reply began
+    [listed] = seen
+    assert len(listed["threads"]) == 3 and listed["open"] == conversation.thread
+    new = next(t for t in listed["threads"] if t["id"] == conversation.thread)
+    assert new["persona"] == "hal"
 
 
 def test_amnesia_s_held_back_turns_are_dropped_when_the_thread_changes(dirs, store):
@@ -535,13 +537,15 @@ def test_a_reply_cut_short_keeps_what_was_heard_with_its_question(store):
     ]
 
 
-def test_in_amnesia_mode_a_first_message_lists_no_thread(store):
+def test_in_amnesia_mode_a_first_message_lists_the_thread_and_writes_nothing(store):
     conversation = _conversation(store)
     conversation.set_amnesia(True)
     seen = []
     _model(conversation, "Understood.", lambda: seen.append(store.threads()))
     "".join(conversation.chat_stream("Something private", keep=True))
-    assert seen == [[]] and store.threads() == []
+    [[thread]] = seen
+    assert thread["amnesia"] is True and thread["title"] == ""
+    assert store.turn_count() == 0
 
 
 # -- switching is heard and pauses listening ---------------------------------------
@@ -587,3 +591,125 @@ def test_while_listening_is_paused_the_microphone_is_closed_and_shown_paused():
     assert not assistant._mic_closed()
     assistant.listening_paused = True
     assert assistant._mic_closed()
+
+
+# -- memory's switch, and amnesia in each thread ---------------------------------
+
+
+def test_with_memory_off_nothing_is_written_in_any_thread(store):
+    lisbon = store.create_thread("iris")
+    _exchange(store, lisbon, "Plan a Lisbon trip", "Alfama, Belém, Sintra.")
+    store.create_topic(lisbon, "Lisbon trip", "late Oct", "Trip in late October.")
+    conversation = _conversation(
+        store, tools=Tools(list(BUILT_IN), PluginContext(memory=store, remember=lambda: True))
+    )
+    conversation.open_thread(lisbon)
+    conversation.set_remember(False)
+
+    _model(conversation, "Take the train.")
+    "".join(conversation.chat_stream("How do I get to Sintra?", keep=True))
+    conversation.open_thread(None)
+    _model(conversation, "Hello!")
+    "".join(conversation.chat_stream("Hi", keep=True))
+    assert store.turn_count() == 2 and len(store.threads()) == 1  # no new turn, no new thread
+
+    # The thread is read as it was stored, but memory is not in the prompt
+    conversation.open_thread(lisbon)
+    system = conversation.manage_context()[0]["content"]
+    assert "Memory index" not in system
+    assert [m["content"] for m in conversation.manage_context()[1:3]] == [
+        "Plan a Lisbon trip",
+        "Alfama, Belém, Sintra.",
+    ]
+    # Switched on again, memory is written and in the prompt as ever
+    conversation.set_remember(True)
+    _model(conversation, "By train, from Rossio.")
+    "".join(conversation.chat_stream("And Sintra?", keep=True))
+    assert store.turn_count() == 4
+    assert "Lisbon trip" in conversation.manage_context()[0]["content"]
+
+
+def test_with_memory_off_the_memory_tools_are_not_offered(store):
+    remember = [True]
+    tools = Tools(list(BUILT_IN), PluginContext(memory=store, remember=lambda: remember[0]))
+    offered = lambda: {s["function"]["name"] for s in tools.get_schemas()}  # noqa: E731
+    assert {"recall", "search_memory"} <= offered()
+    remember[0] = False
+    assert not {"recall", "search_memory"} & offered()
+
+
+def test_amnesia_belongs_to_its_thread_and_comes_back_with_it(dirs, store):
+    iris, hal = _two_threads(store)
+    controller, _ = _controller(store)
+    conversation = controller.assistant.conversation
+    controller.open_thread(iris)
+
+    controller.set_amnesia(True)
+    conversation._record("Something private", "Understood.", "voice")
+    controller.open_thread(hal)
+    assert conversation.amnesia is False
+    conversation._record("Open the doors", "I'm afraid not.", "voice")
+    assert store.recent_turns(hal)[-1]["text"] == "I'm afraid not."
+
+    controller.open_thread(iris)
+    assert conversation.amnesia is True and store.thread(iris)["amnesia"] is True
+    # What was held back stayed behind with the switch
+    assert "Something private" not in str(conversation.manage_context())
+    assert store.search(iris, "private") == []
+    controller.set_amnesia(False)
+    assert store.thread(iris)["amnesia"] is False
+
+
+def test_a_new_thread_in_amnesia_mode_is_listed_with_nothing_in_it(dirs, store):
+    controller, _ = _controller(store)
+    conversation = controller.assistant.conversation
+    controller.new_thread("hal")
+    conversation.set_amnesia(True)
+    _model(conversation, "Understood.")
+    "".join(conversation.chat_stream("Something private", keep=True))
+
+    [thread] = store.threads()
+    assert (thread["title"], thread["amnesia"], thread["persona"]) == ("", True, "hal")
+    assert store.recent_turns(thread["id"]) == []
+    # Opened again, it is in amnesia mode still
+    controller.new_thread("iris")
+    controller.open_thread(thread["id"])
+    assert conversation.amnesia is True
+
+
+def test_amnesia_kept_for_every_thread_before_becomes_the_open_one_s(dirs, store, monkeypatch):
+    iris, hal = _two_threads(store)
+    monkeypatch.setattr("iris.controller.VoiceAssistant", lambda **kwargs: ThreadAssistant(store))
+    monkeypatch.setattr(AssistantController, "_fetch_models", lambda self, kwargs: None)
+    monkeypatch.setattr(
+        AssistantController, "_pick_vision_model", lambda self, preferred=None: None
+    )
+    monkeypatch.setattr(AssistantController, "_warn_if_ollama_unreachable", lambda self: False)
+    controller = AssistantController(EventBus())
+    try:
+        controller.start({"thread": iris, "amnesia": True, "remember": True})
+        deadline = time.monotonic() + 5
+        while controller.assistant is None or not controller.assistant.conversation.amnesia:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert store.thread(iris)["amnesia"] is True
+        assert store.thread(hal)["amnesia"] is False
+    finally:
+        controller.stop()
+
+
+def test_opening_a_thread_takes_on_its_persona_s_file_as_edited_meanwhile(dirs, store):
+    builtin, _ = dirs
+    iris, hal = _two_threads(store)
+    controller, _ = _controller(store)
+    controller.open_thread(iris)
+    controller._follow_persona_file()  # the look at the file in use, as Iris runs
+    # HAL's file is edited while Iris speaks, keeping its size
+    path = builtin / "hal.yaml"
+    path.write_text(path.read_text().replace("Calm.", "Cold."))
+    controller._follow_persona_file()
+    assert personas.find_persona("hal").personality.strip() == "Calm."  # not noticed
+
+    controller.open_thread(hal)
+    assert controller.assistant.persona.personality.strip() == "Cold."
+    assert "Cold." in controller.assistant.conversation.manage_context()[0]["content"]

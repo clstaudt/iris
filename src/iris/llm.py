@@ -296,10 +296,15 @@ class ConversationManager:
         self.on_stored: Optional[Callable[[], None]] = None
         # Recalled topics stay in context for a few turns: {topic_id: turns left}
         self.pinned: dict[int, int] = {}
-        # Amnesia mode: the conversation goes on, but nothing of it is
-        # written to memory; its turns live here and vanish when it ends
+        # Amnesia mode, the open thread's: the conversation goes on, but
+        # nothing of it is written to memory; its turns live here and vanish
+        # when it ends or the thread changes
         self.amnesia = False
         self.unremembered: list[dict] = []
+        # Memory's own switch, for every thread: off, nothing is written,
+        # turns are held back as in amnesia mode, and memory is neither in
+        # the prompt nor offered as tools
+        self.remember = True
         # How many times everything was forgotten, and how many times when
         # the reply being given began: a reply begun before is not kept
         self._forgotten = 0
@@ -580,17 +585,33 @@ class ConversationManager:
         return text
 
     def set_amnesia(self, on: bool):
-        """Stop (or resume) writing the conversation to memory. Turns spoken
-        in amnesia mode are forgotten entirely once it ends."""
+        """Stop (or resume) writing the open thread to memory, kept with the
+        thread. Turns spoken in amnesia mode are forgotten entirely once it
+        ends."""
         self.amnesia = bool(on)
         self.unremembered = []
+        if self.memory is not None and self.thread is not None:
+            self.memory.store.set_amnesia(self.thread, self.amnesia)
 
-    def open_thread(self, thread: Optional[int]):
+    def set_remember(self, on: bool):
+        """Switch memory on or off for every thread. Turns held back while it
+        was off are forgotten once it is on again."""
+        self.remember = bool(on)
+        self.unremembered = []
+
+    @property
+    def _holding(self) -> bool:
+        """Turns are held back, not written: amnesia mode, or memory off."""
+        return self.memory is not None and (self.amnesia or not self.remember)
+
+    def open_thread(self, thread: Optional[int], amnesia: bool = False):
         """Go on in another thread: its turns and topics are the
-        conversation's memory from now on. None is a new thread, stored with
-        its first turn. What belonged to the thread left (turns held back by
-        amnesia, topics recalled, files shared) stays behind."""
+        conversation's memory from now on, in amnesia mode if it is. None is
+        a new thread, stored with its first turn. What belonged to the
+        thread left (turns held back by amnesia, topics recalled, files
+        shared) stays behind."""
         self.thread = thread
+        self.amnesia = bool(amnesia)
         self.unremembered = []
         self.pinned = {}
         self.shared = []
@@ -600,22 +621,28 @@ class ConversationManager:
         """Store a turn in the thread, which a new thread's first turn creates."""
         store = self.memory.store
         if self.thread is None:
-            self.thread = store.create_thread(self.persona.id)
+            self.thread = store.create_thread(self.persona.id, self.amnesia)
         return store.add_turn(self.thread, role, text, source)
 
     def _store_asked(self, prompt: str, source: Optional[str]):
         """Store the turn being answered as its reply begins, so a new thread
-        is listed at once, titled by it; its reply follows once it has been
-        heard (_record), or the turn is taken back (forgo). Nothing is stored
-        in amnesia mode."""
+        is listed at once; its reply follows once it has been heard
+        (_record), or the turn is taken back (forgo). In amnesia mode nothing
+        is stored, but a new thread is listed all the same; with memory off,
+        nothing at all."""
         with self._keeping:
             self._asked = None
-            if self.memory is None or self.amnesia:
+            if self.memory is None or not self.remember:
                 return
-            role = "system" if source == OPENING else "user"
-            turn = self._store(role, prompt, None if role == "system" else source)
-            if turn is not None:
-                self._asked = (self.thread, turn)
+            if self.amnesia:
+                if self.thread is not None:
+                    return
+                self.thread = self.memory.store.create_thread(self.persona.id, True)
+            else:
+                role = "system" if source == OPENING else "user"
+                turn = self._store(role, prompt, None if role == "system" else source)
+                if turn is not None:
+                    self._asked = (self.thread, turn)
         if self.on_stored:
             self.on_stored()
 
@@ -635,14 +662,15 @@ class ConversationManager:
 
     def forget(self):
         """Start the conversation over, as if nothing had been said, in a
-        new thread: no recent turns, recalled topics or shared files go to
-        the model any more, nor does the language spoken last. A reply begun
-        before is not kept, should it end later. Amnesia mode stays as it
-        is. What is stored in memory is the store's to forget
+        new thread, which is not in amnesia mode: no recent turns, recalled
+        topics or shared files go to the model any more, nor does the
+        language spoken last. A reply begun before is not kept, should it end
+        later. What is stored in memory is the store's to forget
         (MemoryStore.forget_all)."""
         with self._keeping:
             self._forgotten += 1
             self.thread = None
+            self.amnesia = False
             self._asked = None
             self.conversation_history = []
             self.unremembered = []
@@ -666,7 +694,7 @@ class ConversationManager:
                 # Stored as the reply began, in the thread it began in: the
                 # reply joins it
                 self.memory.store.add_turn(asked[0], "assistant", answer)
-            elif self.memory is not None and self.amnesia:
+            elif self._holding:
                 self.unremembered.append({"role": role, "content": prompt})
                 self.unremembered.append({"role": "assistant", "content": answer})
                 return
@@ -684,7 +712,7 @@ class ConversationManager:
     def add_note(self, text: str):
         """A system note in the conversation, e.g. that the persona changed.
         A new thread has said nothing yet for a note to be about."""
-        if self.memory is not None and self.amnesia:
+        if self._holding:
             self.unremembered.append({"role": "system", "content": text})
         elif self.memory is None:
             self.conversation_history.append({"role": "system", "content": text})
@@ -711,7 +739,9 @@ class ConversationManager:
             system_content += self.tools.guidance()
 
         if self.memory is not None:
-            system_content += self._memory_context()
+            # What it remembers, and how to recall it, while memory is on
+            if self.remember:
+                system_content += self._memory_context()
             # The live context: the thread's stored turns, then any held back
             # by amnesia mode, together within the live budget
             unremembered, used = [], 0

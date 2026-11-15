@@ -406,7 +406,8 @@ class VoiceAssistant:
                 store,
                 chat_json(lambda: self.conversation.host, lambda: self.conversation.model),
                 on_change=lambda: self.event_bus and self.event_bus.emit("memory.updated", {}),
-                busy=self._conversation_busy,
+                # Nor while memory is switched off: nothing is written then
+                busy=lambda: self._conversation_busy() or not self.conversation.remember,
             )
 
         # The plugins' tools, on as chosen; a plugin whose optional
@@ -499,6 +500,7 @@ class VoiceAssistant:
         return PluginContext(
             memory=self.memory.store if self.memory else None,
             thread=lambda: self.conversation.thread,
+            remember=lambda: self.conversation.remember,
             sleep=self._end_conversation,
             can_sleep=lambda: bool(self.wake_word),
         )
@@ -526,6 +528,9 @@ class VoiceAssistant:
             "ollama_host": self.conversation.host or "",
             "ollama_url": effective_host(self.conversation.host),
             "memory": self.memory is not None,
+            # Memory switched on, for every thread, and the open thread in
+            # amnesia mode
+            "remember": self.conversation.remember,
             "amnesia": self.conversation.amnesia,
             # The thread the conversation is in; None for a new one
             "thread": self.conversation.thread,

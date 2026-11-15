@@ -97,6 +97,7 @@ class Memory(Plugin):
                 required=("topic_id",),
                 label="Recalled",
                 detail=memory.topic_title,
+                offered=context.remember,
             ),
             Tool(
                 name="search_memory",
@@ -108,6 +109,7 @@ class Memory(Plugin):
                 parameters={"query": {"type": "string", "description": "Words to look for"}},
                 required=("query",),
                 label="Searched memory",
+                offered=context.remember,
             ),
         ]
 

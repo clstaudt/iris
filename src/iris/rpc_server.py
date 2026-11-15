@@ -251,6 +251,7 @@ def main(extra: dict | None = None):
         "memory.forget": lambda params: controller.memory_forget(params.get("id", -1)),
         "memory.forget_all": lambda params: controller.memory_forget_all(),
         "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
+        "memory.set_remember": lambda params: controller.set_remember(bool(params.get("on", True))),
         # Threads: each a conversation with one persona and its own memory
         "threads.list": lambda params: controller.threads_list(),
         "threads.open": lambda params: controller.open_thread(params.get("id", -1)),
