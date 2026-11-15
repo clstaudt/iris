@@ -7,6 +7,7 @@
   import NewThread from "./components/NewThread.svelte";
   import SettingsWindow from "./components/settings/SettingsWindow.svelte";
   import StatusZone from "./components/StatusZone.svelte";
+  import SwitchConfirm from "./components/SwitchConfirm.svelte";
   import Threads from "./components/Threads.svelte";
   import Transcript from "./components/Transcript.svelte";
   import Walkthrough from "./components/walkthrough/Walkthrough.svelte";
@@ -79,6 +80,10 @@
         {#if store.sidebar && !store.settingsPage}
           <Threads />
         {/if}
+        <!-- Memory beside the threads, left of the conversation -->
+        {#if store.panel === "memory" && !store.settingsPage}
+          <Memory />
+        {/if}
         <!-- The settings window covers the conversation without unmounting it -->
         <section
           class="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-line bg-panel {store.settingsPage
@@ -102,11 +107,10 @@
           {/if}
           <Composer />
           <StatusZone />
+          <SwitchConfirm />
         </section>
         {#if store.settingsPage}
           <SettingsWindow />
-        {:else if store.panel === "memory"}
-          <Memory />
         {/if}
       </div>
     {/if}

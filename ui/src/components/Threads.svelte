@@ -26,10 +26,23 @@
     )
   );
 
+  /** Where the menu of a ring in the strip opens: beside the pointer */
+  let menuAt = $state<{ x: number; y: number } | null>(null);
+
   function openMenu(event: MouseEvent, id: number) {
     event.stopPropagation();
     confirming = false;
+    menuAt = null;
     menuFor = menuFor === id ? null : id;
+  }
+
+  /** A ring of the strip, right-clicked: the thread's menu */
+  function ringMenu(event: MouseEvent, id: number) {
+    event.preventDefault();
+    event.stopPropagation();
+    confirming = false;
+    menuFor = id;
+    menuAt = { x: event.clientX, y: event.clientY };
   }
 
   async function forget(event: MouseEvent, id: number) {
@@ -45,20 +58,75 @@
 
   function closeMenu() {
     menuFor = null;
+    menuAt = null;
     confirming = false;
   }
 </script>
 
 <svelte:window onclick={closeMenu} />
 
+{#if store.sidebarStrip}
+  <!-- Narrow: a strip of the threads' rings, each titled on hover -->
+  <aside
+    class="strip flex w-[52px] shrink-0 flex-col items-center overflow-hidden rounded-[14px] border border-line bg-panel"
+    aria-label="Threads"
+  >
+    <div class="flex flex-col items-center gap-1 pb-1.5 pt-2.5">
+      <button onclick={() => store.newThread()} class="new square" title="New thread" aria-label="New thread">
+        <Icon name="plus" size={15} />
+      </button>
+      <button
+        onclick={() => store.toggleSidebarStrip()}
+        class="toggle"
+        title="Expand"
+        aria-label="Expand"
+      >
+        <Icon name="panel-open" size={15} />
+      </button>
+    </div>
+    <div class="flex min-h-0 w-full flex-1 flex-col items-center overflow-y-auto pb-2.5">
+      {#each grouped as g, i (g.name)}
+        {#if i > 0}<span class="h-2.5 shrink-0"></span>{/if}
+        {#each g.threads as thread (thread.id)}
+          <button
+            class="ring-item {thread.id === store.openThread ? 'active' : ''}"
+            data-thread={thread.id}
+            title={thread.title || "New thread"}
+            onclick={() => store.openThreadById(thread.id)}
+            oncontextmenu={(e) => ringMenu(e, thread.id)}
+          >
+            <PersonaRing name={thread.persona_name} />
+          </button>
+        {/each}
+      {/each}
+    </div>
+    {#if menuFor !== null && menuAt}
+      {@const id = menuFor}
+      <div class="menu fixed" style="left: {menuAt.x + 6}px; top: {menuAt.y - 6}px">
+        <button class={confirming ? "danger" : ""} onclick={(e) => forget(e, id)}>
+          <Icon name="trash" size={13} />
+          {confirming ? "Confirm forget" : "Forget this thread"}
+        </button>
+      </div>
+    {/if}
+  </aside>
+{:else}
 <aside
   class="flex w-[256px] shrink-0 flex-col overflow-hidden rounded-[14px] border border-line bg-panel"
   aria-label="Threads"
 >
-  <div class="px-2.5 pb-1.5 pt-2.5">
+  <div class="flex gap-1.5 px-2.5 pb-1.5 pt-2.5">
     <button onclick={() => store.newThread()} class="new">
       <Icon name="plus" size={15} />
       New thread
+    </button>
+    <button
+      onclick={() => store.toggleSidebarStrip()}
+      class="toggle"
+      title="Collapse"
+      aria-label="Collapse"
+    >
+      <Icon name="panel-close" size={15} />
     </button>
   </div>
   <div class="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2.5">
@@ -96,11 +164,13 @@
     {/each}
   </div>
 </aside>
+{/if}
 
 <style>
   .new {
     display: flex;
-    width: 100%;
+    min-width: 0;
+    flex: 1;
     height: 34px;
     align-items: center;
     gap: 0.5rem;
@@ -113,6 +183,48 @@
     transition: background-color 150ms;
   }
   .new:hover {
+    background: var(--color-hover);
+  }
+  .new.square {
+    width: 34px;
+    flex: 0 0 34px;
+    justify-content: center;
+    padding: 0;
+  }
+  /* Between expanded and the strip of rings */
+  .toggle {
+    display: flex;
+    height: 34px;
+    width: 30px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    color: var(--color-ink-3);
+    transition:
+      background-color 150ms,
+      color 150ms;
+  }
+  .toggle:hover {
+    background: var(--color-hover);
+    color: var(--color-ink);
+  }
+  .strip .toggle {
+    height: 28px;
+  }
+  .ring-item {
+    display: flex;
+    width: 36px;
+    flex-shrink: 0;
+    justify-content: center;
+    padding: 8px 0;
+    border-radius: 9px;
+    transition: background-color 150ms;
+  }
+  .ring-item:hover {
+    background: color-mix(in srgb, var(--color-hover) 60%, transparent);
+  }
+  .ring-item.active {
     background: var(--color-hover);
   }
   .item {
@@ -178,6 +290,10 @@
   .more:hover {
     background: var(--color-hover);
     color: var(--color-ink);
+  }
+  .menu.fixed {
+    position: fixed;
+    right: auto;
   }
   .menu {
     position: absolute;

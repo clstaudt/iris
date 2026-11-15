@@ -31,6 +31,7 @@ read the turns before writes nothing afterwards.
 """
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -43,6 +44,8 @@ from typing import Optional
 import ollama
 
 from iris.llm_client import MODEL_TIMEOUT, OpenAIClient, is_openai
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PATH = Path.home() / ".iris" / "memory.db"
 
@@ -62,9 +65,6 @@ ABORT_CHECK_SECONDS = 0.05
 # A recalled topic's summary stays in context for this many user turns
 PIN_TURNS = 6
 
-# A thread's title, from its first words until memory has filed a topic
-TITLE_LENGTH = 48
-
 SCHEMA = """
 -- A thread's id is never given again, so nothing that names a forgotten
 -- thread (filing that read it, say) can reach another
@@ -75,7 +75,9 @@ CREATE TABLE IF NOT EXISTS threads (
     role TEXT,
     created REAL NOT NULL,
     -- its last turn
-    updated REAL NOT NULL
+    updated REAL NOT NULL,
+    -- 1 while nothing of it is written (amnesia mode)
+    amnesia INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS topics (
     id INTEGER PRIMARY KEY,
@@ -113,15 +115,6 @@ END;
 
 def estimate_tokens(text: str) -> int:
     return len(text) // 4
-
-
-def shortened(text: str, length: int = TITLE_LENGTH) -> str:
-    """The text on one line, cut at a word within this length."""
-    text = " ".join(text.split())
-    if len(text) <= length:
-        return text
-    cut = text[:length].rsplit(" ", 1)[0] or text[:length]
-    return cut.rstrip(" ,.;:!?-") + "…"
 
 
 def relative_day(ts: float, now: Optional[float] = None) -> str:
@@ -193,6 +186,8 @@ class MemoryStore:
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(threads)")}
         if "role" not in columns:  # threads from before roles
             self._db.execute("ALTER TABLE threads ADD COLUMN role TEXT")
+        if "amnesia" not in columns:  # threads from before amnesia was each one's own
+            self._db.execute("ALTER TABLE threads ADD COLUMN amnesia INTEGER NOT NULL DEFAULT 0")
         for table in ("turns", "topics"):
             columns = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
             if "thread_id" not in columns:
@@ -232,14 +227,22 @@ class MemoryStore:
 
     # -- threads ------------------------------------------------------------
 
-    def create_thread(self, persona: str, role: Optional[str] = None) -> int:
+    def create_thread(
+        self, persona: str, role: Optional[str] = None, amnesia: bool = False
+    ) -> int:
         """A new thread with this persona and role (its id), as its first
-        turn is stored. Neither changes afterwards."""
+        turn is stored; in amnesia mode, as its first turn is held back.
+        Neither persona nor role changes afterwards."""
         now = time.time()
         return self._write(
-            "INSERT INTO threads (persona, role, created, updated) VALUES (?, ?, ?, ?)",
-            (persona, role, now, now),
+            "INSERT INTO threads (persona, role, created, updated, amnesia) VALUES (?, ?, ?, ?, ?)",
+            (persona, role, now, now, int(amnesia)),
         )
+
+    def set_amnesia(self, thread: int, on: bool):
+        """Whether nothing of the thread is written, kept for when it is
+        opened again."""
+        self._write("UPDATE threads SET amnesia = ? WHERE id = ?", (int(on), thread))
 
     def clear_role(self, role: str):
         """The role is gone: its threads go on without one."""
@@ -261,24 +264,21 @@ class MemoryStore:
         threads = self._query(self._THREADS + " ORDER BY th.updated DESC, th.id DESC LIMIT 1")
         return self._titled(threads[0]) if threads else None
 
-    # A thread with what its title is made of: its earliest topic, else the
-    # user's first words. Nothing of Iris's own: neither its replies nor an
-    # opening it made itself, such as its greeting
+    # A thread with its title: its earliest topic's, once memory has filed one
     _THREADS = """
         SELECT th.*,
             (SELECT title FROM topics WHERE thread_id = th.id ORDER BY created, id LIMIT 1)
-                AS topic,
-            (SELECT text FROM turns WHERE thread_id = th.id AND role = 'user'
-                ORDER BY id LIMIT 1) AS asked
+                AS title
         FROM threads th
     """
 
     @staticmethod
     def _titled(row: sqlite3.Row) -> dict:
-        """The thread with its title, "" until the user has said anything."""
+        """The thread with its title, "" until a topic is filed (the app calls
+        it a new thread)."""
         thread = dict(row)
-        topic, asked = thread.pop("topic"), thread.pop("asked")
-        thread["title"] = topic or shortened(asked or "")
+        thread["title"] = thread["title"] or ""
+        thread["amnesia"] = bool(thread["amnesia"])
         return thread
 
     def forget_thread(self, thread_id: int):
@@ -292,17 +292,35 @@ class MemoryStore:
 
     # -- turns --------------------------------------------------------------
 
-    def add_turn(self, thread: int, role: str, text: str, source: Optional[str] = None) -> int:
-        """Store one turn of a thread: "user", "assistant", or "system" for notes."""
+    def add_turn(
+        self, thread: int, role: str, text: str, source: Optional[str] = None
+    ) -> Optional[int]:
+        """Store one turn of a thread: "user", "assistant", or "system" for
+        notes. Its id, or None when the thread was forgotten meanwhile."""
         now = time.time()
         with self._lock:
             cursor = self._db.execute(
-                "INSERT INTO turns (ts, role, text, source, thread_id) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO turns (ts, role, text, source, thread_id) "
+                "SELECT ?, ?, ?, ?, id FROM threads WHERE id = ?",
                 (now, role, text, source, thread),
             )
             self._db.execute("UPDATE threads SET updated = ? WHERE id = ?", (now, thread))
             self._db.commit()
-            return cursor.lastrowid
+            return cursor.lastrowid if cursor.rowcount else None
+
+    def drop_turn(self, thread: int, turn: int) -> bool:
+        """Take back a turn of the thread, and the thread with it when that
+        leaves it empty. Returns whether the thread went too."""
+        with self._lock:
+            self._db.execute("DELETE FROM turns WHERE id = ? AND thread_id = ?", (turn, thread))
+            cursor = self._db.execute(
+                "DELETE FROM threads WHERE id = ? "
+                "AND NOT EXISTS (SELECT 1 FROM turns WHERE thread_id = threads.id) "
+                "AND NOT EXISTS (SELECT 1 FROM topics WHERE thread_id = threads.id)",
+                (thread,),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
 
     def turn_count(self) -> int:
         """How many turns are stored, in every thread, filed or not."""
@@ -527,7 +545,8 @@ class MemoryStore:
 # -- filing ------------------------------------------------------------------
 
 # chat(messages, schema, abort) -> parsed JSON object; raises FilingInterruptedError
-# when abort() turns true while the call runs
+# when abort() turns true while the call runs, ValueError when the model gives
+# no usable JSON even when asked again
 ChatFn = Callable[..., dict]
 
 
@@ -556,6 +575,8 @@ class Filer:
     it completes, so the next run picks up exactly where this one stopped.
     Once everything is forgotten, filing stops too, a call underway is cut
     off, and nothing it read is written back (see MemoryStore.generation).
+    One the model gives no usable answer for is left to the next run, and
+    the others go on.
     """
 
     def __init__(self, store: MemoryStore, chat: ChatFn):
@@ -593,8 +614,16 @@ class Filer:
             if should_yield():
                 return
             thread = exchange.thread_id
-            decision = self._decide(exchange, before.get(thread, ""))
+            said_before = before.get(thread, "")
             before[thread] = exchange.text
+            try:
+                decision = self._decide(exchange, said_before)
+            except ValueError as e:
+                # No usable answer, even when asked again: the exchange stays
+                # unfiled for a later quiet spell, and the next one goes on
+                first = exchange.turn_ids[0]
+                logger.warning("Memory filing left the exchange of turn %d for later: %s", first, e)
+                continue
             topic_id = None
             if decision.get("remember"):
                 topic_id = decision.get("topic_id") or 0
@@ -610,9 +639,13 @@ class Filer:
         for topic_id, exchanges in self.store.pending_summaries().items():
             if should_yield():
                 return
-            self._summarize(topic_id, exchanges)
+            try:
+                self._summarize(topic_id, exchanges)
+            except ValueError as e:
+                logger.warning("Memory filing left topic #%s's summary for later: %s", topic_id, e)
+                continue
             thread = exchanges[0].thread_id
-            turn_ids = [t for e in exchanges for t in e.turn_ids]
+            turn_ids = [t for summarized in exchanges for t in summarized.turn_ids]
             self.store.mark_summarized(thread, turn_ids, generation)
             self._changed = True
 
@@ -704,7 +737,7 @@ class MemoryKeeper:
                 self.on_change()
         except Exception as e:
             # Nothing is lost: what was not filed is filed in a later quiet spell
-            print(f"[memory] filing failed: {e}")
+            logger.warning("Memory filing failed: %s", e)
         finally:
             self._filing.release()
 
@@ -832,6 +865,6 @@ def chat_json(get_host: Callable[[], Optional[str]], get_model: Callable[[], str
                 {"role": "assistant", "content": reply},
                 {"role": "user", "content": "Reply with only the JSON object, nothing else."},
             ]
-        raise ValueError(f"{model} gave no usable JSON: {reply[:120]!r}")
+        raise ValueError(f"{model} gave no usable JSON, asked twice: {reply[:120]!r}")
 
     return chat

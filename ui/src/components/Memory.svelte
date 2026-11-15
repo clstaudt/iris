@@ -4,35 +4,13 @@
 
   let openId = $state<number | null>(null);
   let detail = $state<MemoryTopicDetail | null>(null);
-  /** What forgetting was asked for, to be confirmed: the open thread, or
-   *  everything */
-  let confirming = $state<"thread" | "everything" | null>(null);
-  let forgetting = $state(false);
-
-  // Something to forget: topics, turns kept but not filed yet, or the
-  // conversation shown
-  const remembers = $derived(
-    store.memoryTopics.length > 0 ||
-      store.memoryTurns > 0 ||
-      store.pending.length > 0 ||
-      store.messages.some((m) => m.role === "user" || m.role === "assistant")
-  );
 
   // Another thread: its own topics, none of them open
   $effect(() => {
     void store.openThread;
     openId = null;
     detail = null;
-    confirming = null;
   });
-
-  async function forgetThread() {
-    if (store.openThread === null) return;
-    confirming = null;
-    openId = null;
-    detail = null;
-    await store.forgetThread(store.openThread);
-  }
 
   function relativeDay(ts: number): string {
     const days = Math.floor((Date.now() / 1000 - ts) / 86400);
@@ -56,18 +34,6 @@
     openId = null;
     detail = null;
     await store.forgetTopic(id);
-  }
-
-  async function forgetEverything() {
-    forgetting = true;
-    try {
-      await store.forgetEverything();
-    } finally {
-      forgetting = false;
-      confirming = null;
-      openId = null;
-      detail = null;
-    }
   }
 </script>
 
@@ -147,107 +113,4 @@
       </div>
     {/each}
   </div>
-
-  {#if confirming}
-    <div class="confirm">
-      <p>
-        {confirming === "thread"
-          ? "Forget this thread and everything Iris remembers of it?"
-          : "Forget everything Iris remembers? This cannot be undone."}
-      </p>
-      <div class="actions">
-        <button class="btn" onclick={() => (confirming = null)} disabled={forgetting}>Cancel</button>
-        {#if confirming === "thread"}
-          <button class="btn solid-danger" onclick={forgetThread}>Forget this thread</button>
-        {:else}
-          <button class="btn solid-danger" onclick={forgetEverything} disabled={forgetting}>
-            Forget everything
-          </button>
-        {/if}
-      </div>
-    </div>
-  {:else if store.openThread !== null || remembers}
-    <div class="foot">
-      {#if store.openThread !== null}
-        <button class="btn" onclick={() => (confirming = "thread")}>
-          <Icon name="trash" size={13} />
-          Forget this thread
-        </button>
-      {/if}
-      {#if remembers}
-        <button class="btn danger" onclick={() => (confirming = "everything")}>
-          Forget everything
-        </button>
-      {/if}
-    </div>
-  {/if}
 </aside>
-
-<style>
-  /* Forgetting everything, at the foot of the panel */
-  .foot {
-    display: flex;
-    flex-shrink: 0;
-    gap: 0.5rem;
-    padding: 0.75rem 0.875rem;
-    border-top: 1px solid var(--color-line);
-  }
-  .confirm {
-    display: flex;
-    flex-shrink: 0;
-    flex-direction: column;
-    gap: 0.75rem;
-    padding: 0.875rem 1rem;
-    border-top: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
-    background: color-mix(in srgb, var(--color-danger) 5%, transparent);
-  }
-  .confirm p {
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--color-ink);
-  }
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-  }
-  .btn {
-    display: inline-flex;
-    height: 2rem;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0 0.75rem;
-    border-radius: 0.5rem;
-    border: 1px solid var(--color-line-strong);
-    font-size: 12.5px;
-    color: var(--color-ink-2);
-    transition:
-      background-color 150ms,
-      color 150ms;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--color-hover);
-    color: var(--color-ink);
-  }
-  .btn:disabled {
-    opacity: 0.5;
-  }
-  /* Quiet: the color of danger without its weight */
-  .btn.danger {
-    border-color: color-mix(in srgb, var(--color-danger) 35%, transparent);
-    color: var(--color-danger);
-  }
-  .btn.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
-    color: var(--color-danger);
-  }
-  .btn.solid-danger {
-    border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
-    background: color-mix(in srgb, var(--color-danger) 16%, transparent);
-    color: color-mix(in srgb, var(--color-danger) 55%, var(--color-ink));
-  }
-  .btn.solid-danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-danger) 24%, transparent);
-    color: color-mix(in srgb, var(--color-danger) 55%, var(--color-ink));
-  }
-</style>

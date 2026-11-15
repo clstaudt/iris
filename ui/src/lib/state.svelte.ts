@@ -85,8 +85,7 @@ export interface ThreadInfo {
   /** Its role's id and name, if it has one */
   role: string | null;
   role_name: string;
-  /** Its earliest topic once memory has filed one, else the user's first
-   *  words; "" until the user has said anything */
+  /** Its earliest topic's, once memory has filed one; "" until then */
   title: string;
   created: number;
   /** When it was last talked in (seconds since the epoch) */
@@ -203,6 +202,8 @@ export interface AssistantConfig {
   paused?: boolean;
   memory?: boolean;
   amnesia?: boolean;
+  /** Memory switched on, for every thread */
+  remember?: boolean;
   /** The thread Iris is in; null for a new one, stored with its first turn */
   thread?: number | null;
   /** The thread's role, if it has one, and its name */
@@ -381,14 +382,20 @@ export interface SavedSettings {
   persona?: string;
   /** The thread Iris is in, to open again; null for a new one */
   thread?: number | null;
-  /** Whether the threads are shown beside the conversation */
+  /** Whether the threads are shown beside the conversation, and whether
+   *  as a narrow strip of rings */
   sidebar?: boolean;
+  sidebar_strip?: boolean;
   input_device?: string;
   speak_replies?: boolean;
   /** Speaking interrupts the voice */
   barge_in?: boolean;
   tools?: Record<string, boolean>;
   ollama_host?: string;
+  /** Memory switched on, for every thread; on unless switched off */
+  remember?: boolean;
+  /** Before amnesia was each thread's own: one switch for all, which goes
+   *  to the thread Iris starts in */
   amnesia?: boolean;
   /** The wake word switch; the words are each persona's own */
   wake_on?: boolean;
@@ -516,9 +523,18 @@ class IrisStore {
   openThread = $state<number | null>(null);
   /** The threads are shown beside the conversation */
   sidebar = $state(loadSettings().sidebar ?? false);
+  /** Shown, the threads are a narrow strip of their rings */
+  sidebarStrip = $state(loadSettings().sidebar_strip ?? false);
   /** A new thread was asked for: its persona and role are chosen until
    *  something is said */
   choosing = $state(false);
+  /** A switch of thread asked for while Iris replies, to be confirmed */
+  switchAsked = $state<{
+    open?: number;
+    persona?: string;
+    role?: string | null;
+    choose?: boolean;
+  } | null>(null);
   /** The roles, by name */
   roles = $state<RoleInfo[]>([]);
   /** The role open in the role editor; "" for a new one, null for the
@@ -564,8 +580,31 @@ class IrisStore {
     return this.state === "paused";
   }
 
+  /** The open thread is in amnesia mode: nothing of it is written */
   get amnesia() {
     return this.config?.amnesia ?? false;
+  }
+
+  /** Memory is switched on, for every thread */
+  get memoryOn() {
+    return this.config?.remember ?? true;
+  }
+
+  /** Whether there is anything to forget: topics, turns kept but not filed
+   *  yet, or the conversation shown */
+  get remembersAnything() {
+    return (
+      this.memoryTopics.length > 0 ||
+      this.memoryTurns > 0 ||
+      this.pending.length > 0 ||
+      this.messages.some((m) => m.role === "user" || m.role === "assistant")
+    );
+  }
+
+  /** Whether what is remembered is shown: in the memory panel, or in the
+   *  settings' Memory stage */
+  private get showsMemory() {
+    return this.panel === "memory" || (!!this.settingsPage && this.stage === "memory");
   }
 
   /** What needs the user while only the orb shows: the latest message, when
@@ -715,7 +754,7 @@ class IrisStore {
         break;
 
       case "memory.updated":
-        if (this.panel === "memory") this.loadMemory();
+        if (this.showsMemory) this.loadMemory();
         // A topic filed may give a thread its title
         this.loadThreads();
         break;
@@ -732,7 +771,7 @@ class IrisStore {
         this.restoredCount = 0;
         this.streamingIndex = null;
         this.settleThread((data.id as number | null) ?? null);
-        if (this.panel === "memory") this.loadMemory();
+        if (this.showsMemory) this.loadMemory();
         break;
 
       case "memory.forgotten":
@@ -799,7 +838,7 @@ class IrisStore {
     this.choosing = false;
     this.settleThread(null);
     this.threads = [];
-    if (this.panel === "memory") this.loadMemory();
+    if (this.showsMemory) this.loadMemory();
   }
 
   /** A turn of the conversation before this launch, as memory kept it: it
@@ -866,11 +905,16 @@ class IrisStore {
     await rpc("mic.set", { on: !this.micOn });
   }
 
-  /** While on, nothing of the conversation is written to memory. */
+  /** While on, nothing of the open thread is written to memory; it stays
+   *  with the thread. */
   async toggleAmnesia() {
-    const on = !this.amnesia;
-    saveSettings({ amnesia: on });
-    await rpc("memory.set_amnesia", { on });
+    await rpc("memory.set_amnesia", { on: !this.amnesia });
+  }
+
+  /** Switch memory on or off, for every thread. */
+  async setRemember(on: boolean) {
+    saveSettings({ remember: on });
+    await rpc("memory.set_remember", { on });
   }
 
   /** Pause or resume the whole conversation: listening, reply and speech. */
@@ -915,21 +959,48 @@ class IrisStore {
     return this.threads.find((t) => t.id === this.openThread) ?? null;
   }
 
-  /** Go on in another thread: its persona and its memory. */
-  async openThreadById(id: number) {
-    this.choosing = false;
+  /** Go on in another thread: its persona and its memory. While Iris
+   *  replies, which that stops, it is asked first (switchAsked). */
+  async openThreadById(id: number, { confirmed = false } = {}) {
     if (this.settingsPage) this.settingsPage = null;
-    if (id === this.openThread) return;
+    if (id === this.openThread) {
+      this.choosing = false;
+      return;
+    }
+    if (this.busy && !confirmed) {
+      this.switchAsked = { open: id };
+      return;
+    }
+    this.choosing = false;
     await rpc("threads.open", { id });
   }
 
   /** A new thread with a persona, and a role if one is given: Iris and no
    *  role unless others are chosen. Choosing, they can be picked until
-   *  something is said. */
-  async newThread(persona = "iris", { choose = true, role = null as string | null } = {}) {
-    this.choosing = choose;
+   *  something is said. While Iris replies, which that stops, it is asked
+   *  first (switchAsked). */
+  async newThread(
+    persona = "iris",
+    { choose = true, role = null as string | null, confirmed = false } = {}
+  ) {
     this.settingsPage = null;
+    if (this.busy && !confirmed) {
+      this.switchAsked = { persona, role, choose };
+      return;
+    }
+    this.choosing = choose;
     await rpc("threads.new", { persona, ...(role ? { role } : {}) });
+  }
+
+  /** Go on with the switch asked for while Iris replied, or not. */
+  async answerSwitch(confirmed: boolean) {
+    const asked = this.switchAsked;
+    this.switchAsked = null;
+    if (!asked || !confirmed) return;
+    if (asked.open !== undefined) await this.openThreadById(asked.open, { confirmed: true });
+    else {
+      await this.newThread(asked.persona, { choose: asked.choose, role: asked.role, confirmed: true });
+    }
   }
 
   /** Forget a thread with its memory; the open one leaves a new thread. */
@@ -976,6 +1047,12 @@ class IrisStore {
   toggleSidebar() {
     this.sidebar = !this.sidebar;
     saveSettings({ sidebar: this.sidebar });
+  }
+
+  /** The threads as a narrow strip of rings, or listed in full. */
+  toggleSidebarStrip() {
+    this.sidebarStrip = !this.sidebarStrip;
+    saveSettings({ sidebar_strip: this.sidebarStrip });
   }
 
   /** Open the persona editor on a persona, or on a new one (no id). */
@@ -1713,6 +1790,7 @@ class IrisStore {
     if (saved.barge_in !== undefined) options.barge_in = saved.barge_in;
     if (saved.tools) options.tools = saved.tools;
     if (saved.ollama_host) options.ollama_host = saved.ollama_host;
+    if (saved.remember === false) options.remember = false;
     if (saved.amnesia) options.amnesia = true;
     if (saved.wake_on) options.wake_on = true;
     if (saved.idle_sleep === false) options.wake_window = 0;
@@ -1724,6 +1802,8 @@ class IrisStore {
     if (saved.languages) options.languages = saved.languages;
     this.speakReplies = saved.speak_replies ?? true;
     await rpc("assistant.start", options);
+    // The old switch went to the thread Iris started in, once
+    if (saved.amnesia !== undefined) saveSettings({ amnesia: undefined });
   }
 
   /** The wake word and sleep word kept for all personas before each had
