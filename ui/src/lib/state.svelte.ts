@@ -1669,7 +1669,11 @@ class IrisStore {
   }
 
   async init() {
-    onEvent((type, data) => this.handleEvent(type, data));
+    // One listener for the core's events however often the store starts: in
+    // development a hot reload runs this again in a fresh module, and a second
+    // listener would show every message twice
+    window.__irisOffEvent?.();
+    window.__irisOffEvent = onEvent((type, data) => this.handleEvent(type, data));
 
     let micStatus = await window.iris.micStatus();
     // The walkthrough asks for the microphone at its step; a launch after
@@ -1925,3 +1929,12 @@ class IrisStore {
 }
 
 export const store = new IrisStore();
+
+declare global {
+  interface Window {
+    /** Ends the store's listener for the core's events (see IrisStore.init) */
+    __irisOffEvent?: () => void;
+    /** Ends the walkthrough's listener for the core's events */
+    __irisOffWalkthroughEvent?: () => void;
+  }
+}

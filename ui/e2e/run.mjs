@@ -300,7 +300,11 @@ function stubIris({ settings }) {
       rpc: async (method, params) => window.__irisRpc(method, structuredClone(params ?? {})),
       onEvent: (callback) => {
         listeners.push(callback);
-        return () => listeners.splice(listeners.indexOf(callback), 1);
+        window.__irisListeners = listeners.length;
+        return () => {
+          listeners.splice(listeners.indexOf(callback), 1);
+          window.__irisListeners = listeners.length;
+        };
       },
       micStatus: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
       askMicrophone: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
@@ -1385,6 +1389,10 @@ try {
     check(!error, `the reply failed: ${error?.data.message}`);
     check(done.data.text.trim().length > 0, "the reply is empty");
     await until("the reply in the conversation", () => page.getByText(done.data.text.trim().slice(0, 12)).count());
+    // Each message once: a second listener for the core's events would show it twice
+    const asked = await page.getByText("Say hello in five words.", { exact: true }).count();
+    const replied = await page.getByText(done.data.text.trim(), { exact: true }).count();
+    check(asked === 1 && replied === 1, `the message shows ${asked} times and the reply ${replied} times`);
     await checkHeard(since, "the reply");
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
   });
