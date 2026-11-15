@@ -27,7 +27,7 @@ from iris.personas import load_all_personas
 from iris.tts import kokoro_speech
 from iris.turns import SmartTurn
 from irisdev.voicetest import assistant as under_test
-from irisdev.voicetest import scripted, sounds, voices, wording
+from irisdev.voicetest import acoustics, scripted, sounds, voices, wording
 from irisdev.voicetest.acoustics import (
     HEARD_KEPT,
     LOOKBACK,
@@ -81,6 +81,34 @@ def tone(seconds: float, level: float = 0.5, rate: int = RATE) -> np.ndarray:
     return (np.sin(2 * np.pi * 220 * t) * level).astype(np.float32)
 
 
+class Clock:
+    """The voice test's clock (time.monotonic() throughout), moved on by the
+    test alone: a sleep takes no time, and what is measured is what the test
+    said, however slowly it runs. Each reading is a microsecond on, so
+    events keep their order. Only for tests that run on one thread."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        self.now += 1e-6
+        return self.now
+
+    def sleep(self, seconds: float):
+        self.now += max(0.0, seconds)
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(acoustics, "time", clock)
+    monkeypatch.setattr(under_test, "time", clock)
+    return clock
+
+
 class TestSpeaker:
     def test_a_clip_is_heard_after_the_latency_until_it_ends(self):
         speaker = Space().endpoint("a").speaker
@@ -92,26 +120,31 @@ class TestSpeaker:
         assert abs(clip.end - clip.started - 0.5) < 0.01
         assert speaker.playing()
 
-    def test_stop_cuts_the_clip_and_a_new_one_ends_the_last(self):
+    def test_stop_cuts_the_clip_and_a_new_one_ends_the_last(self, clock):
         speaker = Space().endpoint("a").speaker
         speaker.play(tone(2.0), RATE)
-        time.sleep(0.2)
+        clock.sleep(0.2)
         speaker.stop()
         first = speaker.clips[-1]
-        assert first.stopped is not None and first.end < first.started + 0.3
+        # Heard from after the latency until the stop
+        assert first.stopped is not None
+        assert first.end - first.started == pytest.approx(0.2 - OUTPUT_LATENCY, abs=1e-4)
         assert not speaker.playing()
         speaker.play(tone(2.0), RATE)
         speaker.play(tone(1.0), RATE)
         assert speaker.clips[-2].stopped is not None
 
-    def test_the_stream_plays_on_to_the_end_of_its_last_block(self):
+    def test_the_stream_plays_on_to_the_end_of_its_last_block(self, clock):
         speaker = Space().endpoint("a").speaker
         speaker.play(tone(0.1), RATE, blocksize=RATE // 2)
         clip = speaker.clips[-1]
-        time.sleep(clip.end - time.monotonic() + 0.1)
+        clock.sleep(clip.end - clock.monotonic() + 0.1)
         # Heard no more, but still playing the silence after it
         assert not speaker.audible() and speaker.playing()
-        time.sleep(0.45)
+        # Until the end of its block of 0.5 s
+        clock.sleep(clip.started + 0.5 - clock.monotonic() - 0.01)
+        assert speaker.playing()
+        clock.sleep(0.02)
         assert not speaker.playing()
 
     def test_another_rate_is_resampled(self):
@@ -205,17 +238,26 @@ class TestSpace:
         done = threading.Event()
 
         def callback(indata, frames, info, status):
-            blocks.append((time.monotonic(), indata.shape, info.currentTime - info.inputBufferAdcTime))
+            blocks.append((info.inputBufferAdcTime, info.currentTime, indata.shape))
             if len(blocks) == 10:
                 done.set()
 
         started = time.monotonic()
         with endpoint.input_stream(samplerate=RATE, blocksize=512, callback=callback):
-            assert done.wait(2)
-        assert all(shape == (512, 1) for _, shape, _ in blocks)
-        # Ten blocks of 32 ms take about 0.32 s, and arrive just after they were heard
-        assert blocks[-1][0] - started == pytest.approx(0.32, abs=0.08)
-        assert all(0 < lag < 1.0 for _, _, lag in blocks)
+            assert done.wait(10)
+        blocks = blocks[:10]
+        seconds = 512 / RATE
+        assert all(shape == (512, 1) for _, _, shape in blocks)
+        # The blocks follow one another from the opening on, 32 ms each
+        heard = [at for at, _, _ in blocks]
+        assert started <= heard[0] < started + 1.0
+        assert np.allclose(np.diff(heard), seconds, rtol=0, atol=1e-6)
+        # Each arrives once it has been heard, never before: ten take at
+        # least 0.32 s, however fast the machine. And soon after, however
+        # slow it is: a late block does not hold up the ones after it
+        for at, delivered, _ in blocks:
+            assert at + seconds - 0.001 <= delivered < at + seconds + 1.0
+        assert blocks[-1][1] - started >= 10 * seconds - 0.001
         assert len(endpoint.recording(started, time.monotonic())) > 0
 
     def test_it_is_an_audio_device(self):
@@ -401,26 +443,26 @@ class FakeAssistant:
         self.log = Log()
 
 
-def test_self_talk_is_measured_turn_by_turn():
+def test_self_talk_is_measured_turn_by_turn(clock):
     space = Space(noise=0)
     a = FakeAssistant("iris", space.endpoint("iris"))
     b = FakeAssistant("hal", space.endpoint("hal"))
-    start = time.monotonic()
-    # Iris says a reply; HAL hears it and answers 0.3 s after it ended
+    start = clock.monotonic()
+    # Iris says a reply of 0.4 s; HAL hears it and answers 0.35 s after it ended
     a.endpoint.play(tone(0.4), RATE)
     a.log("chat.done", {"text": "Hello HAL, what is your favourite planet?"})
-    time.sleep(0.75)
+    clock.sleep(0.75)
     b.log("chat.user", {"text": "Hello Hal, what is your favorite planet?"})
     b.endpoint.play(tone(0.4), RATE)
     b.log("chat.done", {"text": "Saturn, for its rings."})
-    time.sleep(0.5)
+    clock.sleep(0.5)
     a.log("chat.user", {"text": "Saturn for its rings"})
-    result = SelfTalk(a, b, report=lambda line: None)._analyse(start, time.monotonic())
+    result = SelfTalk(a, b, report=lambda line: None)._analyse(start, clock.monotonic())
     first, second = result.exchanges
     assert (first.speaker, first.listener) == ("iris", "hal")
     assert first.heard_share == pytest.approx(6 / 7, abs=0.01)
     assert first.turns_heard == 1
-    assert first.gap == pytest.approx(0.35, abs=0.1)
+    assert first.gap == pytest.approx(0.35)
     assert (second.speaker, second.heard_share) == ("hal", 1.0)
     assert result.overlap == 0
     assert result.self_cuts == {"iris": 0, "hal": 0}
@@ -814,12 +856,21 @@ class TestSpaceMore:
     def test_what_nobody_listened_to(self):
         space = Space()
         endpoint = space.endpoint("a")
-        said = space.say("hello", tone(1.0))
+        said = space.say("hello", tone(3.0))
+        end = said.start + 3.0
+        before = time.monotonic()
         with endpoint.input_stream(callback=lambda *args: None):
+            opening = time.monotonic()
             time.sleep(0.3)
-        assert endpoint.open_spans(said.start)[0][0] <= said.start + 0.05
-        deaf = endpoint.deaf_spans(said.start, said.start + 1.0)
-        assert sum(b - a for a, b in deaf) == pytest.approx(0.7, abs=0.1)
+            closing = time.monotonic()
+        after = time.monotonic()
+        # Open from when it was opened until it was closed
+        [(opened, closed)] = endpoint.open_spans(said.start)
+        assert before <= opened <= opening and closing <= closed <= after < end
+        # Nobody listened to the speech before it was opened and after it was closed
+        deaf = endpoint.deaf_spans(said.start, end)
+        assert sum(b - a for a, b in deaf) == pytest.approx((opened - said.start) + (end - closed), abs=1e-6)
+        assert deaf[-1] == pytest.approx((closed, end), abs=1e-6)
         assert subtract([(0, 10)], [(2, 3), (5, 6)]) == [(0, 2), (3, 5), (6, 10)]
 
     def test_long_runs_keep_little(self):
@@ -1201,7 +1252,11 @@ class TestHolding:
         assert [r.passed for r in results] == [True, True], [r.failures for r in results]
         first = results[0]
         assert first.heard == "hello there" and first.heard_share == 1.0 and not first.taken_early
-        assert 0.5 < first.first_word < 0.9 and first.voice_pipeline == pytest.approx(first.first_word - 0.1)
+        # From the end of the user's speech to the reply's first sound, as
+        # the space has it; the stand-in waits 0.2 s and thinks 0.3 s first
+        said, clip = space.utterances[0], fake.endpoint.speaker.clips[0]
+        assert first.first_word == pytest.approx(clip.started - said.speech_end, abs=0.002)
+        assert first.first_word > 0.5 and first.voice_pipeline == pytest.approx(first.first_word - 0.1)
         assert first.states[0][1] == "listening" and ("thinking" in [s for _, s in first.states])
         assert first.audible == pytest.approx(0.6, abs=0.1) and first.replies[0][1] == "Reply to hello there"
 

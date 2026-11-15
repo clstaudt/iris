@@ -369,7 +369,8 @@ def test_a_call_in_flight_is_cut_off_when_the_conversation_resumes(fake_ollama):
 
     with pytest.raises(memory_module.FilingInterruptedError):
         chat([{"role": "user", "content": "Decide."}], DECISION_SCHEMA, abort=user_speaks)
-    assert time.monotonic() - started < 0.5
+    # Cut off, not answered late: the model's first words were still to come
+    assert time.monotonic() - started < fake_ollama.delay
 
 
 LISBON = '{"remember": true, "topic_id": 0, "title": "Lisbon trip"}'
@@ -681,8 +682,9 @@ def test_forgetting_everything_cuts_off_a_filing_call_in_flight(store, fake_olla
     threading.Timer(0.1, store.forget_all).start()
     started = time.monotonic()
     assert filer.file() is False
-    # The model is free for the conversation at once
-    assert time.monotonic() - started < 1
+    # The model is free for the conversation at once: the call was cut off
+    # before the model's first words
+    assert time.monotonic() - started < fake_ollama.delay
     assert store.topics() == [] and store.turn_count() == 0
 
 

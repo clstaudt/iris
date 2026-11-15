@@ -48,7 +48,9 @@ class Device:
 
 
 def _frames(frames, count):
-    return [frames.get(timeout=0.1) for _ in range(count)]
+    # Each comes a block after the one before; the timeout only ends a test
+    # whose frames never come
+    return [frames.get(timeout=2.0) for _ in range(count)]
 
 
 def test_what_is_said_between_two_listeners_reaches_the_second():
