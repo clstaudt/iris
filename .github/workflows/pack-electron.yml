@@ -62,6 +62,13 @@ jobs:
       env:
         CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
+    # The core in the app, signed, started as the app starts it: it must
+    # answer the app's first requests and find every engine, before the disk
+    # image goes anywhere. Offline, in an empty home, with no models
+    - name: Smoke test the core in the app
+      timeout-minutes: 15
+      run: uv run --no-project --python 3.13 packaging/smoke_core.py ui/release/mac-arm64/Iris.app
+
     # A tag's disk image goes straight to its release (a draft is made if
     # there is none): release assets do not count against the account's
     # artifact storage, which a disk image of this size fills
