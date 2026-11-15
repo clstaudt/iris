@@ -1,14 +1,20 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { onEvent, rpc } from "../../lib/bridge";
-  import { store, type PersonaSettings, type VoiceInfo } from "../../lib/state.svelte";
+  import { store, type PersonaSettings, type VoiceInfo, type VoiceJob } from "../../lib/state.svelte";
+  import { spokenBy, toggled } from "../../lib/voices";
   import Icon from "../Icon.svelte";
+  import JobLine from "../JobLine.svelte";
   import Progress from "../Progress.svelte";
+  import LanguageFilter from "./LanguageFilter.svelte";
 
   // Cloning a voice for a persona, with Kyutai's Pocket TTS: Hugging Face
   // access to its cloning model, the model's download, a sample recorded or
-  // chosen, and the voice made of it. The voice made is one of the engine's
-  // voices from then on, listed with the others; this offers to make one.
+  // chosen, and the voice made of it, for English and the languages chosen
+  // with it (each language's cloning model downloaded first): the voice is
+  // cloned once it is made for all of them. The voice made is one of the
+  // engine's voices from then on, listed with the others; this offers to
+  // make one.
 
   let { draft, onchoose }: { draft: PersonaSettings; onchoose: (voice: string) => void } =
     $props();
@@ -27,6 +33,18 @@
   const AUDIO = ".wav,.mp3,.m4a,.aac,.flac,.ogg,.aiff,audio/*";
 
   type Step = "closed" | "checking" | "connect" | "download" | "sample" | "recording" | "making";
+  /** Pocket TTS's languages, which a cloned voice speaks */
+  const pocket = $derived(
+    (store.voices?.languages ?? []).filter((l) =>
+      (store.voices?.engines.kyutai ?? []).some((v) => spokenBy(v).includes(l.code))
+    )
+  );
+  /** The languages to make the voice for: English and Iris's languages,
+   *  which its personas will speak */
+  let picked = $state<string[]>([]);
+  /** The jobs making the voice for its other languages, once made for English */
+  let making = $state<VoiceJob[]>([]);
+  let madeVoice = "";
   type Access = { state: "login" | "terms" | "ready"; cached: boolean; error?: string };
 
   let step = $state<Step>("closed");
@@ -87,6 +105,9 @@
 
   async function open() {
     error = "";
+    making = [];
+    const wanted = new Set(["en", ...store.languages]);
+    picked = pocket.map((l) => l.code).filter((code) => wanted.has(code));
     step = "checking";
     follow(await rpc<Access>("voice.clone_access"));
   }
@@ -167,12 +188,16 @@
     else back(result.error);
   }
 
-  /** Make the voice of the sample, choose it, and say the preview in it. */
+  /** Make the voice of the sample, for English and each language picked,
+   *  then choose it, and say the preview in it. */
   async function make() {
-    const result = await rpc<{ ok: boolean; error?: string; access?: boolean; voice?: VoiceInfo }>(
-      "voice.clone",
-      { name: draft.name.trim() }
-    );
+    const result = await rpc<{
+      ok: boolean;
+      error?: string;
+      access?: boolean;
+      voice?: VoiceInfo;
+      jobs?: VoiceJob[];
+    }>("voice.clone", { name: draft.name.trim(), languages: picked });
     if (!result.ok || !result.voice) {
       if (result.access) {
         await open();
@@ -181,9 +206,26 @@
       return;
     }
     const voice = result.voice.id;
+    made.push(voice);
+    madeVoice = voice;
+    making = result.jobs ?? [];
+    if (!making.length) await finish();
+  }
+
+  // Made for every language picked: the voice is cloned
+  $effect(() => {
+    if (step !== "making" || !making.length) return;
+    const now = making.map((job) => store.jobs[job.id] ?? job);
+    if (now.every((job) => job.state === "ready")) finish();
+  });
+
+  async function finish() {
+    const voice = madeVoice;
+    if (!voice) return;
+    madeVoice = "";
+    making = [];
     // Cloned again before saving: the voice made before is not kept
     const replaced = made.includes(draft.voice) ? draft.voice : null;
-    made.push(voice);
     await store.loadVoices();
     onchoose(voice);
     step = "closed";
@@ -198,6 +240,8 @@
 
   function close() {
     if (step === "recording") rpc("voice.record", { on: false, keep: false }).catch(() => {});
+    making = [];
+    madeVoice = "";
     step = "closed";
     error = "";
     token = "";
@@ -221,7 +265,16 @@
         </button>
       </div>
 
-      {#if step === "checking" || step === "making"}
+      {#if step === "making" && making.length}
+        {#each making as job (job.id)}
+          <JobLine job={store.jobs[job.id] ?? job} quiet />
+        {/each}
+        {#if making.some((job) => (store.jobs[job.id] ?? job).state === "failed")}
+          <div>
+            <button class="s-btn" onclick={finish}>Done</button>
+          </div>
+        {/if}
+      {:else if step === "checking" || step === "making"}
         <div class="waiting" aria-hidden="true"></div>
       {:else if step === "connect"}
         <p class="line">
@@ -279,6 +332,20 @@
             onchange={chosen}
           />
         </div>
+        {#if pocket.length > 1}
+          <div class="flex flex-col gap-1.5">
+            <span class="text-[11.5px] text-ink-3">Make it for</span>
+            <LanguageFilter
+              languages={pocket}
+              asked={picked}
+              addable={new Set(pocket.map((l) => l.code))}
+              onwant={(code) => {
+                if (code !== "en") picked = toggled(picked, code);
+              }}
+              label="Languages to make the voice for"
+            />
+          </div>
+        {/if}
         <p class="line">Only clone a voice you have permission to use.</p>
       {:else if step === "recording"}
         <p class="script">{SCRIPT}</p>

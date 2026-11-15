@@ -6,8 +6,11 @@
     type SpeechEngine,
     type VoiceInfo,
   } from "../../lib/state.svelte";
+  import { byLanguages, byOrigin, speakAlike, spokenBy, toggled } from "../../lib/voices";
   import Icon from "../Icon.svelte";
+  import LanguageFilter from "./LanguageFilter.svelte";
   import VoiceClone from "./VoiceClone.svelte";
+  import VoiceLanguages from "./VoiceLanguages.svelte";
 
   // A persona is who Iris is: a name, a personality, the words that wake it
   // and send it to sleep, and a voice. Models, tools, turn-taking and
@@ -85,40 +88,29 @@
   // The languages Iris talks in, and those a voice speaks properly: a reply
   // in any other is shown, not spoken
   const languages = $derived(store.voices?.languages ?? []);
-  const spokenBy = (voice: VoiceInfo) => voice.languages ?? [];
   const nameOf = (code: string) => languages.find((l) => l.code === code)?.name ?? code;
-  /** The languages the voices shown must speak; none shows them all */
+  /** The languages the voices shown must speak; none shows them all. Of
+   *  those, the ones a voice of this engine speaks (asked), the voices that
+   *  speak them all, and the languages one of those also speaks */
   let wanted = $state<string[]>([]);
-  // Of those, the ones a voice of this engine speaks
-  const asked = $derived(wanted.filter((code) => voices.some((v) => spokenBy(v).includes(code))));
-  const shown = $derived(voices.filter((v) => asked.every((code) => spokenBy(v).includes(code))));
-  /** Languages one of the voices shown also speaks, which can be added */
-  const addable = $derived(new Set(shown.flatMap(spokenBy)));
+  const filtered = $derived(byLanguages(voices, wanted));
+  const asked = $derived(filtered.asked);
+  const shown = $derived(filtered.shown);
 
   function want(code: string) {
-    wanted = asked.includes(code) ? asked.filter((c) => c !== code) : [...asked, code];
+    wanted = toggled(asked, code);
   }
 
   /** Whether the engine's voices all speak the same languages: the
    *  persona's languages above then tell them for every voice */
-  const alike = $derived(new Set(voices.map((v) => [...spokenBy(v)].sort().join())).size <= 1);
-
+  const alike = $derived(speakAlike(voices));
   /** Voices by the language they were made for, in the order the engine
-   *  lists them, each with the languages it speaks; one group when they all
-   *  speak the same. */
-  const groups = $derived.by(() => {
-    if (alike) return [["", shown]] as [string, VoiceInfo[]][];
-    const byOrigin = new Map<string, VoiceInfo[]>();
-    for (const voice of shown) {
-      byOrigin.set(voice.language, [...(byOrigin.get(voice.language) ?? []), voice]);
-    }
-    return [...byOrigin];
-  });
+   *  lists them, each with the languages it speaks */
+  const groups = $derived(byOrigin(shown, alike));
 
-  // What the persona's voice speaks of Iris's languages, and what it does not
+  // What the persona's voice speaks of Iris's languages, is not ready for
+  // yet, and does not speak
   const chosen = $derived(voices.find((v) => v.id === draft?.voice));
-  const spoken = $derived(languages.filter((l) => chosen && spokenBy(chosen).includes(l.code)));
-  const unspoken = $derived(languages.filter((l) => chosen && !spokenBy(chosen).includes(l.code)));
 
   function setEngine(engine: SpeechEngine) {
     if (!draft || draft.engine === engine) return;
@@ -264,28 +256,14 @@
         </div>
       {/if}
       {#if chosen && languages.length}
-        <dl class="spoken" aria-label="Languages of {draft.name || 'the persona'}">
-          <dt>Spoken</dt>
-          <dd>{spoken.map((l) => l.name).join(", ") || "None"}</dd>
-          {#if unspoken.length}
-            <dt>Not spoken</dt>
-            <dd class="text-ink-3">{unspoken.map((l) => l.name).join(", ")}</dd>
-          {/if}
-        </dl>
+        <VoiceLanguages
+          engine={draft.engine}
+          voice={chosen}
+          label="Languages of {draft.name || 'the persona'}"
+        />
       {/if}
       {#if languages.length}
-        <div class="langs" role="group" aria-label="Voices that speak">
-          {#each languages as language}
-            <button
-              class="lang {asked.includes(language.code) ? 'active' : ''}"
-              aria-pressed={asked.includes(language.code)}
-              disabled={!asked.includes(language.code) && !addable.has(language.code)}
-              onclick={() => want(language.code)}
-            >
-              {language.name}
-            </button>
-          {/each}
-        </div>
+        <LanguageFilter {languages} {asked} addable={filtered.addable} onwant={want} />
       {/if}
       {#if !shown.length && asked.length}
         <p class="text-[12px] text-ink-3">
@@ -405,44 +383,6 @@
   .title:focus {
     border-color: var(--color-line-strong);
     background: var(--color-raised);
-  }
-  .spoken {
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 0.2rem 0.9rem;
-    font-size: 12px;
-    color: var(--color-ink-2);
-  }
-  .spoken dt {
-    color: var(--color-ink-3);
-  }
-  .langs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .lang {
-    height: 1.5rem;
-    padding: 0 0.55rem;
-    border-radius: 9999px;
-    border: 1px solid var(--color-line);
-    font-size: 11.5px;
-    color: var(--color-ink-2);
-    transition:
-      border-color 150ms,
-      color 150ms;
-  }
-  .lang:hover:not(:disabled) {
-    border-color: var(--color-line-strong);
-    color: var(--color-ink);
-  }
-  .lang.active {
-    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
-    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-    color: var(--color-ink);
-  }
-  .lang:disabled {
-    opacity: 0.35;
   }
   .voices {
     display: grid;

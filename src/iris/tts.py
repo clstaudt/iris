@@ -13,9 +13,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
+import pocket_tts.models.tts_model as pocket_model_module
+import pocket_tts.modules.text_conditioner as pocket_text_module
+import pocket_tts.utils.config as pocket_config_module
 import soundfile as sf
 import torch
-import yaml
+from huggingface_hub import hf_hub_download
 from kokoro_onnx import Kokoro
 from kokoro_onnx import tokenizer as kokoro_tokenizer
 from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
@@ -26,14 +29,15 @@ from phonemizer.separator import default_separator
 from phonemizer.utils import list2str, str2list
 from pocket_tts import TTSModel
 from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
-from pocket_tts.utils.config import CONFIGS_DIR as POCKET_CONFIGS
-from pocket_tts.utils.utils import get_predefined_voice
 from pykakasi import kakasi
 
+from iris import cloning, downloads, pocket
 from iris.audio import get_filter
-from iris.cloning import cloned_voices, voice_folder, voice_state
+from iris.cloning import cloned_voices, made_for, voice_folder, voice_state
+from iris.downloads import HubFile, Progress
 from iris.engines import (
     SpeechEngine,
+    Step,
     register_speech_engine,
     speech_engine,
     speech_languages,
@@ -269,6 +273,31 @@ class KokoroGenerator(SpeechEngine):
         return folder is not None and kokoro_files_in(folder)
 
     @classmethod
+    def make_ready(
+        cls,
+        voice: str,
+        language: str,
+        models_dir: str | Path | None = None,
+        on_progress: Progress | None = None,
+        on_step: Callable[[Step], None] | None = None,
+    ):
+        """Its model and voices, one download for every language (a folder
+        chosen instead is used as it is)."""
+        if cls.available(models_dir):
+            return
+        if models_dir:
+            raise FileNotFoundError(f"{models_dir} does not hold Kokoro's model and voices")
+        if on_step:
+            on_step(Step("download", "model"))
+        downloads.download_files(
+            [
+                (KOKORO_MODEL_URL, DEFAULT_KOKORO_DIR / KOKORO_MODEL_FILE),
+                (KOKORO_VOICES_URL, DEFAULT_KOKORO_DIR / KOKORO_VOICES_FILE),
+            ],
+            on_progress or (lambda done, total: None),
+        )
+
+    @classmethod
     def voices(cls, models_dir: str | Path | None = None) -> list[dict]:
         """Kokoro's voices come from its voices file, so there are none
         until it is downloaded."""
@@ -382,15 +411,34 @@ def heard_part(text: str, fraction: float) -> str:
 
 # Whisper language codes Pocket TTS speaks, and the model for each. It has
 # none for Hindi, Japanese and Chinese.
-POCKET_LANGUAGES = {
-    "en": "english",
-    "fr": "french",
-    "it": "italian",
-    "de": "german",
-    "es": "spanish",
-    "pt": "portuguese",
-    "nl": "dutch",
-}
+POCKET_LANGUAGES = pocket.LANGUAGES
+
+
+def _from_the_cache(file_path) -> Path:
+    """Pocket TTS's own way to its files, which would download what is
+    missing, unseen: from the Hugging Face cache only. Iris downloads what
+    a voice needs for a language beforehand, with progress (iris.readiness).
+
+    Raises:
+        LocalEntryNotFoundError: The file is not downloaded
+    """
+    path = str(file_path)
+    if path.startswith("hf://"):
+        file = HubFile.parse(path)
+        return Path(
+            hf_hub_download(
+                file.repo, file.filename, revision=file.revision, local_files_only=True
+            )
+        )
+    if path.startswith(("http://", "https://")):
+        raise FileNotFoundError(f"Pocket TTS does not download {path} while Iris speaks")
+    return Path(path)
+
+
+# Every module of Pocket TTS that fetches what it loads (the model and its
+# weights, the tokenizer, a config, a voice) takes its files from the cache
+for _module in (pocket_model_module, pocket_text_module, pocket_config_module):
+    _module.download_if_necessary = _from_the_cache
 # Pocket TTS's English voices; each further language has one voice of its
 # own. Every voice speaks every language (see PocketGenerator), but these.
 POCKET_ENGLISH_VOICES = (
@@ -534,6 +582,19 @@ def voice_languages(engine: str, voice: str) -> list[str]:
         return []
 
 
+def voice_ready(engine: str, voice: str, language: str, models_dir=None) -> bool:
+    """Whether a voice is ready to speak a language now: it speaks the
+    language properly, and what it needs for it is downloaded (and, for a
+    cloned voice, made). Speaking never fetches it; iris.readiness does,
+    with progress."""
+    if not voice_speaks(engine, voice, language):
+        return False
+    try:
+        return speech_engine(engine).ready(voice, language, models_dir)
+    except ValueError:
+        return False
+
+
 def voice_language(engine: str, voice: str) -> str:
     """The Whisper language code of the language a voice was made for."""
     try:
@@ -589,15 +650,6 @@ def pocket_sentences(text: str) -> list[str]:
     return sentences
 
 
-def _hub_paths(node) -> list[str]:
-    """Every hf:// path in a Pocket TTS config, however deep."""
-    if isinstance(node, dict):
-        return [path for value in node.values() for path in _hub_paths(value)]
-    if isinstance(node, list):
-        return [path for value in node for path in _hub_paths(value)]
-    return [node] if isinstance(node, str) and node.startswith("hf://") else []
-
-
 def pocket_files(voices=("anna",), language: str = "english") -> list[str]:
     """The files Pocket TTS loads for a language and these voices of it, as
     hf:// paths, so they can be fetched with progress before it loads them.
@@ -606,19 +658,10 @@ def pocket_files(voices=("anna",), language: str = "english") -> list[str]:
     hands out only to an account that accepted its terms, and the open one
     without cloning that Pocket TTS falls back to. The open one is fetched.
     """
-    config = yaml.safe_load((POCKET_CONFIGS / f"{language}.yaml").read_text())
-    weights = config.get("weights_path_without_voice_cloning") or config.get("weights_path")
-    others = {
-        key: value
-        for key, value in config.items()
-        if key not in ("weights_path", "weights_path_without_voice_cloning")
-    }
-    known = POCKET_ENGLISH_VOICES if language == "english" else ()
-    return (
-        ([weights] if weights else [])
-        + _hub_paths(others)
-        + [get_predefined_voice(language, voice) for voice in voices if voice in known]
-    )
+    known = set(PocketGenerator.catalogue())
+    return pocket.model_paths(language) + [
+        pocket.voice_path(language, voice) for voice in voices if voice in known
+    ]
 
 
 class PocketGenerator(SpeechEngine):
@@ -639,6 +682,80 @@ class PocketGenerator(SpeechEngine):
     @classmethod
     def voice_languages(cls, voice: str) -> frozenset[str]:
         return cls.languages - POCKET_VOICES_LACK.get(voice, frozenset())
+
+    @classmethod
+    def catalogue(cls) -> list[str]:
+        """Pocket TTS's own voices: the English ones, and one for each
+        further language."""
+        return list(POCKET_ENGLISH_VOICES) + [
+            DEFAULT_VOICE_FOR_LANGUAGE[pocket_lang]
+            for code, pocket_lang in POCKET_LANGUAGES.items()
+            if code != "en"
+        ]
+
+    @classmethod
+    def missing(cls, voice: str, language: str) -> list[HubFile]:
+        """The files speaking a language in a voice still needs from Hugging
+        Face: the language's model (in either form: the one that clones
+        speaks as well, once it is here) and, for one of Pocket TTS's own
+        voices, the voice as the model reads it. A cloned voice is made for
+        the language besides (made_for)."""
+        pocket_lang = POCKET_LANGUAGES[language]
+        cached = cloning.KYUTAI.cached
+        model = pocket.model_files(pocket_lang, clones=True)
+        if not all(cached(file) for file in model):
+            model = pocket.model_files(pocket_lang)
+        files = list(model)
+        if voice_folder(voice) is None:
+            files.append(pocket.voice_file(pocket_lang, voice))
+        return [file for file in files if not cached(file)]
+
+    @classmethod
+    def ready(cls, voice: str, language: str, models_dir: str | Path | None = None) -> bool:
+        pocket_lang = POCKET_LANGUAGES.get(language)
+        if pocket_lang is None:
+            return False
+        folder = voice_folder(voice)
+        if folder is not None and pocket_lang not in made_for(folder):
+            return False
+        try:
+            return not cls.missing(voice, language)
+        except Exception:
+            return False
+
+    @classmethod
+    def make_ready(
+        cls,
+        voice: str,
+        language: str,
+        models_dir: str | Path | None = None,
+        on_progress: Progress | None = None,
+        on_step: Callable[[Step], None] | None = None,
+    ):
+        """Download the language's model and the voice for it; a cloned
+        voice is made for the language from its sample, with the language's
+        cloning model (downloaded first), unless it is made already.
+
+        Raises:
+            CloneAccessError: A cloned voice to make, without Hugging Face
+                access to the cloning model
+            FileNotFoundError: A cloned voice whose sample is gone
+        """
+        on_progress = on_progress or (lambda done, total: None)
+        on_step = on_step or (lambda step: None)
+        pocket_lang = POCKET_LANGUAGES[language]
+        folder = voice_folder(voice)
+        if folder is not None and pocket_lang not in made_for(folder):
+            if not cloning.weights_cached(pocket_lang):
+                on_step(Step("download", "cloning"))
+            cloning.make_language(
+                folder, pocket_lang, on_progress, on_making=lambda: on_step(Step("make"))
+            )
+        missing = cls.missing(voice, language)
+        if missing:
+            weights = {file for file in pocket.model_files(pocket_lang)}
+            on_step(Step("download", "model" if weights & set(missing) else "voice"))
+            cloning.KYUTAI.fetch(missing, on_progress)
 
     def __init__(self, voice: str = "anna", models_dir: str | Path | None = None):
         """
@@ -687,11 +804,7 @@ class PocketGenerator(SpeechEngine):
 
     @classmethod
     def voices(cls, models_dir: str | Path | None = None) -> list[dict]:
-        names = list(POCKET_ENGLISH_VOICES) + [
-            DEFAULT_VOICE_FOR_LANGUAGE[pocket_lang]
-            for code, pocket_lang in POCKET_LANGUAGES.items()
-            if code != "en"
-        ]
+        names = cls.catalogue()
         return [
             {
                 "id": name,
@@ -765,6 +878,9 @@ class SpeechGenerator:
     voice or engine in its place (the assistant shows it instead).
     """
 
+    # The voice model folder chosen by the user, if any
+    models_dir: Path | None = None
+
     def __init__(
         self,
         engine: str = "kyutai",
@@ -803,6 +919,11 @@ class SpeechGenerator:
         reply in another is shown, not spoken."""
         return voice_speaks(self.engine, self.voice, language)
 
+    def ready(self, language: str) -> bool:
+        """Whether the persona's voice is ready to speak this language now:
+        nothing to download or make first (voice_ready)."""
+        return voice_ready(self.engine, self.voice, language, self.models_dir)
+
     def languages(self) -> frozenset[str]:
         """The languages a reply may be in, as Whisper codes: all Iris talks
         in, whether the persona's voice speaks them or not."""
@@ -822,6 +943,9 @@ class SpeechGenerator:
         voice speaks."""
         engine, voice = self.engine, self.voice
         if not self.speaks(language) or (engine, voice, language) in self._prepared:
+            return
+        # What is not here is not fetched for it (iris.readiness does that)
+        if not self.ready(language):
             return
         with self._lock:
             try:

@@ -348,7 +348,7 @@ def test_neither_the_voice_nor_the_transcript_gets_any_markup():
     assistant.conversation = conversation
     assistant.speech_pipeline = Voice()
     assistant.tts_generator = SimpleNamespace(
-        languages=lambda: frozenset({"en"}), speaks=lambda language: True
+        languages=lambda: frozenset({"en"}), speaks=lambda language: True, ready=lambda language: True
     )
     assistant.interrupt_event = threading.Event()
     assistant.suspend_event = threading.Event()
@@ -379,7 +379,7 @@ def test_a_reply_its_voice_does_not_speak_is_shown_and_the_user_told_once():
     assistant.speech_pipeline = Voice()
     assistant.tts_generator = SimpleNamespace(
         engine="kokoro", voice="bm_lewis", languages=lambda: frozenset({"en", "de"}),
-        speaks=lambda language: language == "en", prepare_language=lambda language: None,
+        speaks=lambda language: language == "en", ready=lambda language: True, prepare_language=lambda language: None,
     )
     assistant.persona = SimpleNamespace(name="HAL")
     assistant._unspoken_told = set()
