@@ -1,6 +1,7 @@
 /** Central reactive store, fed by Python events over the RPC bridge. */
 
 import { onEvent, rpc, type AppInfo, type TurnTiming } from "./bridge";
+import { Exposures } from "./shutter";
 import type { WalkthroughChoices } from "./walkthrough.svelte";
 
 export type { TurnTiming };
@@ -562,6 +563,11 @@ class IrisStore {
   level = $state(0);
   /** TTS playback level, driving the meter while the assistant speaks. */
   outputLevel = $state(0);
+  /** The looks Iris has begun through the camera or at the screen: every
+   *  orb fires its shutter as the count goes up. Counted in the
+   *  conversation window, and sent to presence */
+  shots = $state(0);
+  private exposures = new Exposures();
 
   private streamingIndex: number | null = null;
   /** Turns from before this launch shown at the top so far */
@@ -651,9 +657,16 @@ class IrisStore {
         break;
       }
 
+      // A tool's activity shows the moment it starts, also while the state
+      // shows Iris speaking
+      case "flags":
+        if (this.exposures.flags((data.flags as Record<string, boolean>) ?? {})) this.shots++;
+        break;
+
       case "state":
         this.state = (data.state as AssistantState) ?? "idle";
         this.running = this.state !== "idle";
+        if (this.exposures.state(this.state)) this.shots++;
         if (this.previewHeard && this.state !== "speaking") this.previewing = null;
         break;
 

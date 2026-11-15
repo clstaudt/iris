@@ -13,9 +13,11 @@
     "build:electron": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outdir=dist-electron --out-extension:.js=.cjs",
     "build": "npm run build:electron && vite build",
     "preview": "vite preview",
-    "e2e": "node e2e/run.mjs",
+    "e2e": "uv run --project .. python -m irisdev.e2e_report",
+    "e2e:plain": "node e2e/run.mjs",
     "test:bridge": "node --test e2e/bridge.test.mjs",
     "test:wake-hint": "node --test e2e/wakehint.test.mjs",
+    "test:shutter": "node --test e2e/shutter.test.mjs",
     "test:tour": "node --test e2e/tour.test.mjs",
     "icon": "esbuild scripts/icon/render.ts --bundle --format=iife --outfile=dist-electron/icon-render.js && ELECTRON_RUN_AS_NODE= electron scripts/icon/make-icon.cjs",
     "dist:mac": "bash scripts/package-mac.sh"

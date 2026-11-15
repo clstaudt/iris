@@ -2,3 +2,4 @@ node_modules/
 dist/
 dist-electron/
 e2e/output
+e2e/timings.json

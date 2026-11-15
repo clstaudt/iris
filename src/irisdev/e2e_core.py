@@ -18,6 +18,10 @@ The test can break the room's speaker (in a file of the test's home): while
 it says so, opening the speaker fails as it does on macOS when its device has
 gone (AirPods disconnecting), so the test sees what Iris does then.
 
+The camera is a stand-in too: it takes as long as the real one takes to warm
+up, and gives a picture of a plain colour. The computer's own camera is never
+opened.
+
 The test looks into the core through methods of its own:
 
 - e2e.speaker {since, until}: how much sound the virtual speaker played
@@ -30,7 +34,8 @@ The test looks into the core through methods of its own:
   it has been quiet for a while, so the test need not wait for that;
 - e2e.memory: what the core remembers (the turns and topics stored, the words
   in their search index) and what the next prompt would carry of the
-  conversation.
+  conversation;
+- e2e.camera: how many pictures the camera took.
 
 The moments of e2e.speaker and e2e.model are the test's: milliseconds since
 the epoch.
@@ -44,22 +49,26 @@ choose a tool lets it reason again while it runs (e2e.reasoning {on}).
     python -m irisdev.e2e_core
 """
 
+import base64
 import json
 import os
 import sqlite3
 import threading
 import time
 from collections import deque
+from io import BytesIO
 from pathlib import Path
 
 import httpx
 import sounddevice as sd
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
+from PIL import Image
 from pocket_tts import TTSModel
 
 from iris import audio, cloning, rpc_server
 from iris.controller import AssistantController
 from iris.memory import DEFAULT_PATH
+from iris.plugins import camera
 from irisdev.voicetest.acoustics import Space
 
 # The token the test logs in with, the file where it says what the account
@@ -204,6 +213,33 @@ class Breakable:
         if self._broken("speaker"):
             raise sd.PortAudioError("Error opening OutputStream: Internal PortAudio error", -9986)
         return self._endpoint.play(data, sample_rate, **options)
+
+
+# Seconds the real camera takes to warm up before its picture
+CAMERA_WARMUP = 1.8
+
+
+class StandInCamera:
+    """The camera: a picture of a plain colour, after as long as the real
+    one takes to warm up (iris.plugins.camera)."""
+
+    def __init__(self):
+        self.taken = 0
+        buffer = BytesIO()
+        Image.new("RGB", (320, 240), (90, 140, 200)).save(buffer, format="JPEG")
+        self._picture = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    def look(self, **kwargs) -> dict:
+        time.sleep(CAMERA_WARMUP)
+        self.taken += 1
+        return {"success": True, "image": self._picture, "message": "Image captured"}
+
+    def report(self, params: dict) -> dict:
+        """How many pictures were taken."""
+        return {"taken": self.taken}
+
+
+CAMERA = StandInCamera()
 
 
 def _monotonic(moment_ms: float) -> float:
@@ -363,6 +399,10 @@ def main():
     # is built, after the app has asked for it
     audio.SYSTEM = Breakable(LAPTOP)
     cloning.KYUTAI = StandInKyutai()
+    # The camera plugin's tool runs the module's look, as it is when the
+    # assistant is built: the stand-in's, which needs no OpenCV
+    camera.HAS_CAMERA = True
+    camera.look = CAMERA.look
     # Both Ollama's client and Iris's own for other servers read a streamed
     # reply line by line, and build each request through httpx
     httpx.Response.iter_lines = _watched_lines
@@ -375,6 +415,7 @@ def main():
             "e2e.reasoning": reasoning,
             "e2e.file_memory": file_memory,
             "e2e.memory": remembered,
+            "e2e.camera": CAMERA.report,
         }
     )
 

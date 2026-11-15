@@ -35,7 +35,8 @@ export function setOrbResting(on: boolean) {
 
 export function registerOrb(handle: OrbHandle): () => void {
   orb = handle;
-  if (!resting) handle.wake();
+  if (resting) handle.rest();
+  else handle.wake();
   return () => {
     if (orb === handle) orb = null;
   };
@@ -66,6 +67,7 @@ function orbInputs(): OrbInputs {
     outputLevel: store.outputLevel,
     awakeUntil: store.awakeUntil === null ? null : performance.timeOrigin + store.awakeUntil,
     error: store.presenceError,
+    shots: store.shots,
   };
 }
 
@@ -77,6 +79,7 @@ function applyOrbInputs(inputs: OrbInputs) {
   store.level = inputs.level;
   store.outputLevel = inputs.outputLevel;
   store.awakeUntil = inputs.awakeUntil === null ? null : inputs.awakeUntil - performance.timeOrigin;
+  store.shots = inputs.shots;
   presence.error = inputs.error;
 }
 
