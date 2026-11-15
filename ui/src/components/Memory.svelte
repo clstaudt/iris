@@ -35,7 +35,6 @@
     detail = null;
     await store.forgetTopic(id);
   }
-
 </script>
 
 <aside
