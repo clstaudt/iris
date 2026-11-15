@@ -744,6 +744,9 @@ try {
   await step("every stage opens its inspector, and it closes", async () => {
     const titles = { "Turn end": "Turn end", Output: "Output" };
     for (const label of await page.locator("button.stage .label").allInnerTexts()) {
+      // The persona is the thread's: it leads to the conversation (see the
+      // threads' steps)
+      if (label === "Persona") continue;
       await openStage(label, titles[label] ?? label);
       check((await inspector.locator("section, p, .s-option").count()) > 0, `${label} is empty`);
     }
@@ -912,7 +915,8 @@ try {
     await until("the reset", async () => !(await rpc("persona.get", { id: "computer" })).description.includes("Speak like a test."));
   });
 
-  await step("personas: a new one is created, becomes active, and is deleted", async () => {
+  await step("personas: a new one is created, opens in the editor, and is deleted", async () => {
+    const persona = config().persona;
     await page.locator("button.s-btn", { hasText: "New persona" }).click();
     await page.locator("input.title").fill("Testa");
     // Its wake word is its name
@@ -920,25 +924,34 @@ try {
     await page.locator("#persona-personality").fill("You are Testa, made by a test.");
     await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
     await until("Testa in the list", () => page.locator("button.card", { hasText: "Testa" }).count());
-    await until("Testa to be active", () => config().persona === "Testa", 60_000);
-    check(config().wake_word === "Testa", `Testa is woken by ${config().wake_word}`);
-    check(await page.locator("button.card", { hasText: "Testa" }).locator(".s-chip").count(), "not marked active");
+    await until("Testa's editor", async () => (await page.locator("input.title").inputValue()) === "Testa");
+    check((await rpc("persona.get", { id: "testa" })).wake_word === "Testa", "Testa is not woken by its name");
+    // The thread's persona stays: another is talked to in a thread of its own
+    check(config().persona === persona, `the thread's persona became ${config().persona}`);
+    check(!(await page.locator("button.card", { hasText: "Testa" }).locator(".s-chip").count()), "marked active");
     await page.locator("button.s-btn.danger", { hasText: "Delete" }).click();
     await page.locator("button.s-btn.danger", { hasText: "Confirm delete" }).click();
     await until("Testa to be gone", async () => !(await page.locator("button.card", { hasText: "Testa" }).count()));
-    await until("another persona to be active", () => config().persona !== "Testa", 60_000);
   });
 
-  await step("personas: Talk to makes another persona the active one", async () => {
+  await step("personas: Talk to opens a new thread with another persona", async () => {
+    const thread = (await rpc("threads.list")).open;
     const other = page.locator("button.card:not(:has(.s-chip))").first();
     const name = (await other.innerText()).trim().split("\n").pop();
     await other.click();
     await page.locator("button.s-btn", { hasText: "Talk to" }).click();
-    await until(`${name} to be active`, () => config().persona === name, 60_000);
+    await until(`${name} to be talked to`, () => config().persona === name, 60_000);
+    await page.locator("textarea").waitFor({ timeout: 5000 });
+    check((await page.locator(".thread-label").innerText()) === name, "the conversation is not with them");
+    check((await rpc("threads.list")).open === null, "the thread is not a new one");
+    // Back to the thread before, which is Iris's
+    await page.locator('button[title="Threads"]').click();
+    await page.locator(`[data-thread="${thread}"] button.open`).click();
+    await until("Iris to be talked to again", () => config().persona === "Iris", 60_000);
+    await page.locator('button[title="Threads"]').click();
+    await openSettings("Personas");
     await page.locator("button.card", { hasText: "Iris" }).first().click();
     await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
-    if (config().persona !== "Iris") await page.locator("button.s-btn", { hasText: "Talk to Iris" }).click();
-    await until("Iris to be active again", () => config().persona === "Iris", 60_000);
   });
 
   await step("personas: a voice plays while the microphone listens, and is not taken for the user", async () => {
@@ -2058,6 +2071,230 @@ try {
     check(went === "true,false,true,false,true,false", `presence went ${went}`);
   });
 
+  // ------------------------------------------------------------ threads
+
+  const sidebar = page.locator('aside[aria-label="Threads"]');
+  const threadItem = (id) => sidebar.locator(`[data-thread="${id}"]`);
+  const threadLabel = () => page.locator(".thread-label").innerText();
+  const tiles = page.locator('[role="radiogroup"][aria-label="Persona"] .tile');
+  const tile = (name) => tiles.filter({ has: page.locator(".name", { hasText: exactly(name) }) });
+  const threads = () => rpc("threads.list");
+  const shoot = (name) => page.screenshot({ path: path.join(OUT, `threads-${name}.png`) });
+
+  /** Show the threads beside the conversation, or hide them. */
+  async function showThreads(on = true) {
+    await toConversation();
+    if (((await sidebar.count()) > 0) !== on) await page.locator('button[title="Threads"]').click();
+    await sidebar.waitFor({ state: on ? "visible" : "detached", timeout: 5000 });
+  }
+
+  /** Open a thread from the sidebar, as it was left shown or hidden. */
+  async function openThread(id) {
+    await toConversation();
+    const shown = (await sidebar.count()) > 0;
+    await showThreads(true);
+    await threadItem(id).locator("button.open").click();
+    await until("the thread to open", async () => (await threads()).open === id, 30_000);
+    if (!shown) await showThreads(false);
+  }
+
+  /** A new thread from the sidebar, with a persona chosen on its tile. */
+  async function newThreadWith(name) {
+    await showThreads(true);
+    await sidebar.locator("button.new").click();
+    await until("the personas", () => tiles.count(), 10_000);
+    await tile(name).locator("button.pick").click();
+    await until(`${name} for the new thread`, () => config().persona === name, 60_000);
+  }
+
+  /** The thread Iris started in: the greeting stored it */
+  let firstThread = null;
+  /** A thread with HAL, started in a step below */
+  let halThread = null;
+
+  await step("threads: Iris starts in one thread with Iris, quietly named, the threads hidden", async () => {
+    await toConversation();
+    // The greeting, once heard, is the thread's first turn
+    const listed = await until("the first thread", async () => {
+      const now = await threads();
+      return now.open !== null && now;
+    });
+    firstThread = listed.open;
+    const first = listed.threads.find((t) => t.id === firstThread);
+    check(first.persona === "iris", `the first thread is with ${first.persona}`);
+    check((await threadLabel()) === "Iris", `the thread is labelled ${await threadLabel()}`);
+    check(!(await sidebar.count()), "the threads show from the start");
+    check(!(await tiles.count()), "the new thread's personas show");
+    await shoot("default");
+  });
+
+  await step("threads: the sidebar opens from the title bar and lists the thread", async () => {
+    await showThreads(true);
+    await threadItem(firstThread).waitFor({ timeout: 5000 });
+    check(await threadItem(firstThread).evaluate((el) => el.classList.contains("active")), "the open thread is not marked");
+    check((await threadItem(firstThread).locator(".who").innerText()) === "Iris", "the persona is not named");
+    check((await settings()).sidebar === true, "the sidebar is not kept open");
+    await shoot("sidebar");
+  });
+
+  await step("threads: a new thread starts from its empty screen, with a persona chosen and heard", async () => {
+    await sidebar.locator("button.new").click();
+    await until("the personas", async () => (await tiles.count()) >= 3, 10_000);
+    check(await tile("Iris").evaluate((el) => el.classList.contains("active")), "Iris is not chosen at first");
+    check(!(await page.locator(".thread-label").count()), "the label shows over the personas");
+    check((await threads()).open === null, "the new thread is stored before anything is said");
+    await shoot("new");
+    // A persona's voice plays from its tile
+    await tile("HAL").hover();
+    const since = Date.now();
+    await tile("HAL").locator("button.play").click();
+    await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
+    await voiceDone();
+    await tile("HAL").locator("button.pick").click();
+    await until("HAL for the new thread", () => config().persona === "HAL", 60_000);
+    check(await tile("HAL").evaluate((el) => el.classList.contains("active")), "HAL is not marked");
+    check(config().wake_word === "HAL", `HAL is woken by ${config().wake_word}`);
+    // The first message starts the thread
+    const typed = await ask("Reply with one word: hello.");
+    const done = await eventAfter("chat.done", typed, () => true, 180_000);
+    check(done.data.text.trim(), "HAL did not answer");
+    await voiceDone();
+    const listed = await threads();
+    halThread = listed.open;
+    check(halThread !== null && halThread !== firstThread, "the new thread was not stored");
+    check(listed.threads.find((t) => t.id === halThread).persona === "hal", "the thread is not HAL's");
+    check(listed.threads.find((t) => t.id === halThread).title === "Reply with one word: hello.",
+      "the thread is not titled by its first words");
+    await until("HAL's label", async () => (await threadLabel()) === "HAL");
+    await threadItem(halThread).waitFor({ timeout: 5000 });
+    check(!(await tiles.count()), "the personas still show");
+    await shoot("second");
+  });
+
+  await step("threads: switching brings each thread's transcript, memory and voice", async () => {
+    const halVoice = config().tts_voice;
+    await openThread(firstThread);
+    await until("Iris again", () => config().persona === "Iris", 60_000);
+    check(config().tts_voice !== halVoice, "the voice did not follow the thread");
+    check((await threadLabel()) === "Iris", "the label did not follow");
+    await until("Iris's transcript", async () => (await page.locator(".bubble.assistant").count()) > 0, 10_000);
+    check(!(await page.locator(".bubble.user", { hasText: "Reply with one word: hello." }).count()),
+      "HAL's thread shows in Iris's");
+    // The memory panel is the thread's
+    await page.locator('button[title="Memory"]').click();
+    const memoryPanel = page.locator('aside[aria-label="Memory"]');
+    const title = memoryPanel.locator("h2 span");
+    const firstTitle = (await threads()).threads.find((t) => t.id === firstThread).title;
+    await until("the thread's title in memory", async () => (await title.innerText()) === firstTitle, 5000);
+    await shoot("memory");
+    await page.locator('button[title="Close memory"]').click();
+    await openThread(halThread);
+    await until("HAL again", () => config().persona === "HAL" && config().tts_voice === halVoice, 60_000);
+    await page.locator(".bubble.user", { hasText: "Reply with one word: hello." }).waitFor({ timeout: 10_000 });
+    await page.locator('button[title="Memory"]').click();
+    await until("HAL's thread in memory", async () => (await title.innerText()) === "Reply with one word: hello.", 5000);
+    const topics = await rpc("memory.topics");
+    const listed = await memoryPanel.locator(".min-h-0 > div").count();
+    check(listed === topics.topics.length, `the memory panel lists ${listed} topics, the thread has ${topics.topics.length}`);
+    await page.locator('button[title="Close memory"]').click();
+  });
+
+  await step("threads: the pipeline tags what the persona and the thread govern, and nothing else changes", async () => {
+    await openSettings();
+    const labels = await page.locator("button.stage .label").allInnerTexts();
+    const expected = [
+      "Microphone", "Wake word", "Turn end", "Recognition", "Language model",
+      "Persona", "Tools", "Memory", "Voice", "Output",
+    ];
+    check(JSON.stringify(labels) === JSON.stringify(expected), `stages: ${labels.join(", ")}`);
+    const tagOf = (label) => stage(label).locator(".tag");
+    check((await stageValue("Wake word")) === config().wake_word, `the wake word shows ${await stageValue("Wake word")}`);
+    check((await tagOf("Wake word").innerText()).includes("HAL"), "the wake word is not tagged with HAL");
+    check((await tagOf("Voice").innerText()).includes("HAL"), "the voice is not tagged with HAL");
+    check(!(await stage("Voice").locator(".meta").count()), "the voice still names the persona beside it");
+    check((await stageValue("Persona")) === "HAL", `the persona shows ${await stageValue("Persona")}`);
+    check((await tagOf("Persona").innerText()).includes("Reply with one word: hello."), "the persona is not tagged with the thread");
+    for (const label of ["Microphone", "Turn end", "Recognition", "Language model", "Tools", "Memory", "Output"]) {
+      check(!(await tagOf(label).count()), `${label} is tagged`);
+    }
+    await shoot("pipeline");
+    // A tag opens where its value is set: the persona editor, and the thread
+    await tagOf("Wake word").click();
+    await until("HAL's editor", async () => (await page.locator("input.title").inputValue().catch(() => "")) === "HAL", 10_000);
+    check(!(await inspector.locator("h2", { hasText: "Wake word" }).count()), "the tag opened the inspector");
+    await openSettings();
+    await tagOf("Voice").click();
+    await until("HAL's editor", async () => (await page.locator("input.title").inputValue().catch(() => "")) === "HAL", 10_000);
+    await openSettings();
+    await stage("Persona").click();
+    await page.locator("textarea").waitFor({ timeout: 5000 });
+    check(!(await page.locator('nav[aria-label="Settings"]').count()), "the persona did not lead to the conversation");
+    // Untagged stages open their inspector, as before
+    await openStage("Wake word");
+  });
+
+  await step("threads: a restart opens the thread used last", async () => {
+    await toConversation();
+    const restarted = Date.now();
+    await restartCore();
+    await page.reload();
+    const started = await until("the app to start Iris", () =>
+      calls.find((c) => c.at >= restarted && c.method === "assistant.start"), 30_000);
+    check(started.params.thread === halThread, `Iris was started in thread ${started.params.thread}`);
+    await eventAfter("config", restarted, () => true, 180_000);
+    await rpc("mic.set", { on: false });
+    await until("HAL", () => config().persona === "HAL", 60_000);
+    check((await threads()).open === halThread, "another thread is open");
+    await page.locator(".bubble.user", { hasText: "Reply with one word: hello." }).waitFor({ timeout: 30_000 });
+    await until("HAL's label", async () => (await threadLabel()) === "HAL", 10_000);
+    // The sidebar is as it was left
+    await sidebar.waitFor({ timeout: 5000 });
+  });
+
+  await step("threads: the sidebar closes, and stays closed", async () => {
+    await showThreads(false);
+    check((await settings()).sidebar === false, "the sidebar is not kept closed");
+    check(!(await page.locator('[role="radiogroup"][aria-label="Persona"]').count()), "the personas show");
+  });
+
+  await step("threads: forgetting one from its menu, and the open one from memory, leaves no trace", async () => {
+    await openThread(firstThread);
+    await until("Iris", () => config().persona === "Iris", 60_000);
+    // HAL's thread, from its menu, confirmed in place
+    await showThreads(true);
+    await threadItem(halThread).hover();
+    await threadItem(halThread).locator("button.more").click();
+    await shoot("menu");
+    await threadItem(halThread).locator(".menu button", { hasText: "Forget this thread" }).click();
+    await threadItem(halThread).locator(".menu button", { hasText: "Confirm forget" }).click();
+    await threadItem(halThread).waitFor({ state: "detached", timeout: 10_000 });
+    check(!(await threads()).threads.some((t) => t.id === halThread), "HAL's thread is still there");
+    check((await threads()).open === firstThread, "the open thread changed");
+    // A thread with Computer, forgotten while open, from the memory panel
+    await newThreadWith("Computer");
+    const typed = await ask("Reply with one word: ready.");
+    await eventAfter("chat.done", typed, () => true, 180_000);
+    await voiceDone();
+    const computer = (await threads()).open;
+    check(computer !== null && computer !== firstThread, "Computer's thread was not stored");
+    await page.locator('button[title="Memory"]').click();
+    const memoryPanel = page.locator('aside[aria-label="Memory"]');
+    await memoryPanel.locator("button.s-btn", { hasText: "Forget this thread" }).click();
+    await shoot("forget");
+    await memoryPanel.locator(".confirm button", { hasText: "Forget this thread" }).click();
+    await until("the thread to be gone", async () => !(await threads()).threads.some((t) => t.id === computer), 10_000);
+    // What is left is a new thread with the same persona, and nothing of it
+    check((await threads()).open === null, "a stored thread is open");
+    check(config().persona === "Computer", `the persona is ${config().persona}`);
+    await until("an empty conversation", async () => !(await page.locator(".bubble.user, .bubble.assistant").count()), 5000);
+    check(!(await memoryPanel.locator("button.s-btn", { hasText: "Forget this thread" }).count()), "a new thread offers to be forgotten");
+    await page.locator('button[title="Close memory"]').click();
+    // Back to where the other steps talk
+    await openThread(firstThread);
+    await until("Iris", () => config().persona === "Iris", 60_000);
+    await showThreads(false);
+  });
+
   await step("the core stops: the app says so, starts it again, and goes on", async () => {
     await toConversation();
     const messages = page.locator(".bubble.user, .bubble.assistant, .bubble.error");
@@ -2107,12 +2344,19 @@ try {
     const bargeIn = config().barge_in_available;
     if (bargeIn) await setSwitch("Interrupt by voice", false, () => config().barge_in === false);
     await setSwitch("Speak replies", false, () => config().speak_replies === false);
-    await openStage("Persona");
-    await option("HAL").click();
+    // A thread with HAL, which a restart opens again
+    const irisThread = (await rpc("threads.list")).open;
+    await toConversation();
+    await page.locator('button[title="Threads"]').click();
+    await page.locator('aside[aria-label="Threads"] button.new').click();
+    await page.locator('[aria-label="Persona"] .tile', { hasText: "HAL" }).locator("button.pick").click();
     await until("HAL", () => config().persona === "HAL", 60_000);
+    await page.locator('button[title="Threads"]').click();
     // HAL's words: his name, and no sleep word
     check(config().wake_word === "HAL", `HAL is woken by ${config().wake_word}`);
     check(config().sleep_word === "", `HAL sleeps by ${config().sleep_word}`);
+    const said = await ask("Reply with one word: yes.");
+    await eventAfter("chat.done", said, () => true, 180_000);
     // Remembered before amnesia: what was typed
     await openStage("Memory");
     await setSwitch("Remember conversations", false, () => config().amnesia === true);
@@ -2186,9 +2430,11 @@ try {
     if (await stubRow.count()) await stubRow.locator('button[title="Remove"]').click();
     await openStage("Memory");
     await setSwitch("Remember conversations", true, () => config().amnesia === false);
-    await openStage("Persona");
-    await option("Iris").click();
+    await toConversation();
+    await page.locator('button[title="Threads"]').click();
+    await page.locator(`[data-thread="${irisThread}"] button.open`).click();
     await until("Iris", () => config().persona === "Iris", 60_000);
+    await page.locator('button[title="Threads"]').click();
     check(config().wake_word === WAKE_WORD, `Iris is woken by ${config().wake_word}`);
     check(config().sleep_word === "Goodnight", `Iris sleeps by ${config().sleep_word}`);
     await openStage("Output");

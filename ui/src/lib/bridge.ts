@@ -122,6 +122,7 @@ export interface AppInfo {
     tts_voice: string;
     input_device: string;
     speak_replies?: boolean;
+    thread?: number | null;
   };
 }
 
