@@ -188,8 +188,8 @@ def test_a_persona_whose_cloned_voice_is_not_here_is_told_to_choose_another():
     the cloned voice was gone. It says once which persona's voice it is,
     and where to choose another; nothing is made ready for it."""
     assistant = _speaker(ready=False)
-    assistant.tts_generator.voice = "clone:noam-2"
-    assistant.persona = SimpleNamespace(name="Noam")
+    assistant.tts_generator.voice = "clone:robin-2"
+    assistant.persona = SimpleNamespace(name="Robin")
     asked = []
     assistant.on_voice_not_ready = lambda *voice: asked.append(voice)
 
@@ -200,8 +200,8 @@ def test_a_persona_whose_cloned_voice_is_not_here_is_told_to_choose_another():
     assert asked == [] and assistant._reply_unspoken
     [notice] = [c.args[1] for c in assistant.event_bus.emit.call_args_list if c.args[0] == "notice"]
     assert notice == {
-        "message": "Noam's voice, Noam 2, cannot be found. "
-        "Choose another voice for Noam in the persona editor.",
+        "message": "Robin's voice, Robin 2, cannot be found. "
+        "Choose another voice for Robin in the persona editor.",
         "kind": "voice_missing",
     }
 
@@ -285,7 +285,7 @@ def test_a_cloned_voice_is_downloaded_for_then_made(hub):
 def test_a_cloned_voice_that_is_not_here_is_not_made_ready(hub):
     events = Events()
     jobs = _readier(events)
-    assert jobs.request("kyutai", "clone:noam-2", "de", "Noam 2", ["Noam"]) is None
+    assert jobs.request("kyutai", "clone:robin-2", "de", "Robin 2", ["Robin"]) is None
     assert jobs.jobs() == [] and events.jobs() == []
 
 

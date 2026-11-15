@@ -158,7 +158,7 @@ def voice_folder(voice: str) -> Path | None:
 
 def voice_name(folder: Path) -> str:
     """A cloned voice's name, as the editor shows it; for a folder that
-    keeps none (or is not there), its name as words ("noam-2" is Noam 2)."""
+    keeps none (or is not there), its name as words ("robin-2" is Robin 2)."""
     fallback = folder.name.replace("-", " ").title()
     try:
         info = yaml.safe_load((folder / INFO_FILE).read_text()) or {}
@@ -258,7 +258,7 @@ def add_voice(made: Path, base: str, name: str, taken: Callable[[str], bool]) ->
     persona, complete in made (a folder of its own in the voices folder,
     whose name no voice takes). It is kept in the folder base, numbered as
     make_voice numbers one when that is taken, and named name, numbered as
-    "Noam 2" when another cloned voice has it.
+    "Robin 2" when another cloned voice has it.
 
     Returns:
         Its folder

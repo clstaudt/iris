@@ -272,9 +272,9 @@ def test_a_voice_deleted_is_logged_with_its_folder(caplog):
 
 def test_a_cloned_voice_that_is_not_here_does_not_play():
     result = AssistantController(EventBus()).persona_preview(
-        {"name": "Noam", "engine": "kyutai", "voice": "clone:noam-2"}
+        {"name": "Robin", "engine": "kyutai", "voice": "clone:robin-2"}
     )
-    assert result == {"ok": False, "error": "The voice Noam 2 cannot be found"}
+    assert result == {"ok": False, "error": "The voice Robin 2 cannot be found"}
 
 
 # ---------------------------------------------------------------------------

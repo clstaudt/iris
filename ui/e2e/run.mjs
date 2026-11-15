@@ -3637,7 +3637,7 @@ try {
     sample = sample ?? speechSample();
     const prepared = await rpc("voice.sample", { data: sample.toString("base64"), name: "sample.wav" });
     check(prepared.ok, prepared.error);
-    const made = await rpc("voice.clone", { name: "Noam", sample: prepared.sample, languages: ["de"] });
+    const made = await rpc("voice.clone", { name: "Robin", sample: prepared.sample, languages: ["de"] });
     check(made.ok, made.error);
     const voice = made.voice.id;
     const cloned = await until("the voice made for German", async () => {
@@ -3645,19 +3645,19 @@ try {
       return found?.cloned.made.includes("de") ? found : null;
     }, 180_000);
     const saved = await rpc("persona.save", {
-      name: "Noam", engine: "kyutai", voice, speed: 1, audio_filter: "",
-      description: "You are Noam, made by a test.", wake_word: "", sleep_word: "",
+      name: "Robin", engine: "kyutai", voice, speed: 1, audio_filter: "",
+      description: "You are Robin, made by a test.", wake_word: "", sleep_word: "",
     });
     check(saved.ok, saved.error);
     // Exported from the persona editor, to the file the save dialog gives
     await openSettings("Personas");
-    await page.locator("button.card", { hasText: "Noam" }).click();
-    await until("Noam's form", async () => (await page.locator("input.title").inputValue()) === "Noam");
-    const file = path.join(coreHome, "Noam.irispersona");
+    await page.locator("button.card", { hasText: "Robin" }).click();
+    await until("Robin's form", async () => (await page.locator("input.title").inputValue()) === "Robin");
+    const file = path.join(coreHome, "Robin.irispersona");
     dialogs.save = file;
     await page.getByRole("button", { name: "Export", exact: true }).click();
     await until("the persona file", () => fs.existsSync(file), 30_000);
-    check(dialogs.asked.at(-1)?.kind === "save" && dialogs.asked.at(-1).name === "Noam",
+    check(dialogs.asked.at(-1)?.kind === "save" && dialogs.asked.at(-1).name === "Robin",
       `the save dialog was asked ${JSON.stringify(dialogs.asked.at(-1))}`);
     await page.screenshot({ path: path.join(OUT, "persona-export.png") });
     const held = execFileSync(python, ["-I", "-c", "import sys, zipfile; print(' '.join(sorted(zipfile.ZipFile(sys.argv[1]).namelist())))", file])
@@ -3667,7 +3667,7 @@ try {
     // The persona deleted, and its voice on the Voices page
     await page.locator("button.s-btn.danger", { hasText: "Delete" }).click();
     await page.locator("button.s-btn.danger", { hasText: "Confirm delete" }).click();
-    await until("Noam to be gone", async () => !(await page.locator("button.card", { hasText: "Noam" }).count()));
+    await until("Robin to be gone", async () => !(await page.locator("button.card", { hasText: "Robin" }).count()));
     await voicesPage();
     await card(voice).getByRole("button", { name: "Delete" }).click();
     await card(voice).getByRole("button", { name: "Confirm delete" }).click();
@@ -3680,26 +3680,26 @@ try {
     dialogs.open = junk;
     await page.getByRole("button", { name: "Import", exact: true }).click();
     await page.getByText("This is not an Iris persona file").waitFor({ timeout: 10_000 });
-    // Imported from the file the open dialog gives: Noam is back, and opens
+    // Imported from the file the open dialog gives: Robin is back, and opens
     dialogs.open = file;
     await page.getByRole("button", { name: "Import", exact: true }).click();
-    await until("Noam's form", async () => (await page.locator("input.title").inputValue()) === "Noam", 30_000);
-    check(await page.locator("button.card", { hasText: "Noam" }).count() === 1, "Noam is not in the list once");
+    await until("Robin's form", async () => (await page.locator("input.title").inputValue()) === "Robin", 30_000);
+    check(await page.locator("button.card", { hasText: "Robin" }).count() === 1, "Robin is not in the list once");
     check(!(await page.getByText("This is not an Iris persona file").count()), "the refusal stays");
     await page.screenshot({ path: path.join(OUT, "persona-import.png") });
     const back = await rpc("persona.get", { id: saved.id });
     const imported = await cloneOf(cloned.name);
-    check(back.ok && imported && back.voice === imported.id, `Noam speaks with ${back.voice}, the voice is ${imported?.id}`);
+    check(back.ok && imported && back.voice === imported.id, `Robin speaks with ${back.voice}, the voice is ${imported?.id}`);
     check(imported.cloned.made.join() === cloned.cloned.made.join(), `the voice is made for ${imported.cloned.made}, not ${cloned.cloned.made}`);
-    // Noam speaks with the voice, and the speaker plays it
+    // Robin speaks with the voice, and the speaker plays it
     const since = Date.now();
     await page.locator(".voice.active .play").click();
     await heard(since);
     const asked = calls.find((c) => c.at >= since && c.method === "persona.preview");
     check(asked?.params.voice === imported.id, `the preview asked for ${JSON.stringify(asked?.params)}`);
-    // And the voice is on the Voices page, with Noam
+    // And the voice is on the Voices page, with Robin
     await voicesPage();
-    await card(imported.id).locator(".user", { hasText: "Noam" }).waitFor({ timeout: 5000 });
+    await card(imported.id).locator(".user", { hasText: "Robin" }).waitFor({ timeout: 5000 });
   });
 
   await step("tour: run again from Settings, a skip midway puts back what the tour changed and keeps what the user did, and a restart does not start it", async () => {

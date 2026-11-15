@@ -145,9 +145,9 @@ def test_the_sleep_word_counts_only_said_on_its_own(monkeypatch, heard):
 @pytest.mark.parametrize(
     "heard, sleep_word, wake_word, asleep",
     [
-        ("Gute Nacht, Klaus.", "Gute Nacht", "Klaus", True),
-        ("Klaus, gute Nacht!", "Gute Nacht", "Klaus", True),
-        ("Gute Nacht und bis morgen, Klaus.", "Gute Nacht", "Klaus", False),
+        ("Gute Nacht, Felix.", "Gute Nacht", "Felix", True),
+        ("Felix, gute Nacht!", "Gute Nacht", "Felix", True),
+        ("Gute Nacht und bis morgen, Felix.", "Gute Nacht", "Felix", False),
         ("Bonne nuit, Iris.", "Bonne nuit", "Iris", True),
         ("おやすみ。", "おやすみ", "Iris", True),
         ("おやすみなさい、また明日。", "おやすみ", "Iris", False),
@@ -158,10 +158,10 @@ def test_a_sleep_word_in_another_language(heard, sleep_word, wake_word, asleep):
 
 
 def test_a_sleep_word_in_another_language_puts_iris_to_sleep(monkeypatch):
-    klaus = Persona("Klaus", "Dry.", voice="juergen", sleep_word="Gute Nacht")
-    a = _iris(monkeypatch, "Gute Nacht, Klaus.", sleep_word="Gute Nacht", persona=klaus)
+    felix = Persona("Felix", "Dry.", voice="juergen", sleep_word="Gute Nacht")
+    a = _iris(monkeypatch, "Gute Nacht, Felix.", sleep_word="Gute Nacht", persona=felix)
     a.wake_word = None
-    a.transcriber.transcribe = lambda path: ("Gute Nacht, Klaus.", "de")
+    a.transcriber.transcribe = lambda path: ("Gute Nacht, Felix.", "de")
     a._handle_heard("/clip.wav", dormant=False)
     assert a.replies == [] and a.dormant
 
