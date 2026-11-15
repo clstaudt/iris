@@ -48,8 +48,14 @@ class Assistant:
         self.pause_event = threading.Event()
         self.hold_event = threading.Event()
         self.interrupt_event = threading.Event()
-        self.conversation = SimpleNamespace(set_amnesia=lambda on: None)
-        self.memory = SimpleNamespace(store=SimpleNamespace(recent_turns=lambda: list(Assistant.turns)))
+        self.conversation = SimpleNamespace(set_amnesia=lambda on: None, thread=1)
+        self.memory = SimpleNamespace(
+            store=SimpleNamespace(
+                recent_turns=lambda thread: list(Assistant.turns),
+                thread=lambda thread: None,
+                last_thread=lambda: None,
+            )
+        )
 
     def config_info(self):
         return {}

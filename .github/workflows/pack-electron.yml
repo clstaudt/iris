@@ -1,9 +1,11 @@
 name: Pack Electron App
 
 on:
+  # Main is built once a week (Sundays), when it has changed since the last build, and
+  # by hand; not on every push: macOS minutes count ten times
+  schedule:
+    - cron: "0 3 * * 0"
   push:
-    branches:
-      - "main"
     tags:
       - "v*"
   # A pull request that changes how the app is built builds it too, as main
@@ -42,7 +44,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A scheduled build runs only when main has moved since the commit the
+  # latest pre-release was built from; the check runs on Linux, so an
+  # unchanged day costs no macOS minutes
+  changed:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+    - id: check
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        if [ "$GITHUB_EVENT_NAME" != schedule ]; then echo "build=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+        built=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" refs/tags/latest | cut -f1)
+        if [ "$built" = "$GITHUB_SHA" ]; then echo "build=false" >> "$GITHUB_OUTPUT"; else echo "build=true" >> "$GITHUB_OUTPUT"; fi
+
   build:
+    needs: changed
+    if: needs.changed.outputs.build == 'true'
     # Apple Silicon only: the core needs MLX. Pinned to macos-15 (not
     # macos-latest): on macOS 26.6 the `security set-key-partition-list`
     # command started verifying its -k argument, and electron-builder passes
@@ -112,7 +132,7 @@ jobs:
           gh release upload "$tag" "$f" --repo "$GITHUB_REPOSITORY" --clobber
         done
 
-    # Each build of main replaces the disk image of the rolling "latest"
+    # Each build of main (daily, or by hand) replaces the disk image of the rolling "latest"
     # pre-release, whose tag moves to the commit built. Release files do not
     # expire and do not count against Actions storage; it stays a
     # pre-release, so a version's release remains the latest release
@@ -131,11 +151,13 @@ jobs:
           gh release create latest --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
             --title "Iris (latest build of main)" --notes "$notes"
         fi
-        # The disk image's name holds the version: earlier ones go
-        for asset in $(gh release view latest --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
-          gh release delete-asset latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
-        done
+        # The new disk image goes up first, so there always is one to
+        # download; its name holds the version, and earlier ones go after
         gh release upload latest release/*.dmg --repo "$GITHUB_REPOSITORY" --clobber
+        keep=$(basename release/*.dmg)
+        for asset in $(gh release view latest --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
+          [ "$asset" = "$keep" ] || gh release delete-asset latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
+        done
 
     # A manual run on another branch can keep its disk image for three days;
     # a full storage quota does not fail the build

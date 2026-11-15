@@ -20,6 +20,7 @@ from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 from iris.events import EventBus
 from iris.llm import ConversationManager
 from iris.memory import MemoryStore
+from iris.personas import get_persona
 from iris.plugins import web
 from iris.status import StatusManager
 from iris.tools import Tools
@@ -33,6 +34,7 @@ from irisdev.voicetest.acoustics import (
     LOOKBACK,
     OUTPUT_LATENCY,
     RATE,
+    WAKE_IDLE,
     Room,
     Space,
     in_room,
@@ -57,8 +59,10 @@ from irisdev.voicetest.scripted import (
     holds,
     inner_silences,
     longest_busy_silence,
+    replayed,
     state_timeline,
     summarize,
+    voice_holds,
 )
 from irisdev.voicetest.selftalk import SelfTalk
 from irisdev.voicetest.stub_llm import (
@@ -111,7 +115,7 @@ def clock(monkeypatch):
 
 class TestSpeaker:
     def test_a_clip_is_heard_after_the_latency_until_it_ends(self):
-        speaker = Space().endpoint("a").speaker
+        speaker = Space(wake_latency=0).endpoint("a").speaker
         before = time.monotonic()
         latency = speaker.play(tone(0.5), RATE)
         clip = speaker.clips[-1]
@@ -120,8 +124,33 @@ class TestSpeaker:
         assert abs(clip.end - clip.started - 0.5) < 0.01
         assert speaker.playing()
 
+    def test_woken_from_a_silence_it_plays_later_than_it_says(self, monkeypatch):
+        """Each stream started after a silence comes out with a delay of its
+        own, as a real device's does; clips that follow one another keep it."""
+        clock = [100.0]
+        monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+        speaker = Space(wake_latency=0.2).endpoint("a").speaker
+
+        def late():
+            called = clock[0]
+            assert speaker.play(tone(0.5), RATE) == OUTPUT_LATENCY
+            return speaker.clips[-1].started - called - OUTPUT_LATENCY
+
+        lates = []
+        for _ in range(6):
+            lates.append(late())
+            # The next sentence, at once: the speaker is still awake
+            clock[0] = speaker.clips[-1].end
+            assert late() == pytest.approx(lates[-1])
+            clock[0] = speaker.clips[-1].end + WAKE_IDLE
+        assert all(0.0 <= value <= 0.2 for value in lates)
+        assert max(lates) - min(lates) > 0.05
+        # The same every time for a space with the same seed
+        speaker = Space(wake_latency=0.2).endpoint("a").speaker
+        assert late() == pytest.approx(lates[0])
+
     def test_stop_cuts_the_clip_and_a_new_one_ends_the_last(self, clock):
-        speaker = Space().endpoint("a").speaker
+        speaker = Space(wake_latency=0).endpoint("a").speaker
         speaker.play(tone(2.0), RATE)
         clock.sleep(0.2)
         speaker.stop()
@@ -444,7 +473,8 @@ class FakeAssistant:
 
 
 def test_self_talk_is_measured_turn_by_turn(clock):
-    space = Space(noise=0)
+    # Speakers that play when they say, so the gap is the one made here
+    space = Space(noise=0, wake_latency=0)
     a = FakeAssistant("iris", space.endpoint("iris"))
     b = FakeAssistant("hal", space.endpoint("hal"))
     start = clock.monotonic()
@@ -988,6 +1018,36 @@ class TestMeasures:
         [(start, end)] = inner_silences(audio, 0.15)
         assert start == pytest.approx(0.3, abs=0.03) and end == pytest.approx(0.5, abs=0.03)
 
+    def test_sound_played_twice_is_found(self):
+        speaker = Space().endpoint("a").speaker
+        audio = (np.random.default_rng(1).standard_normal(3 * RATE) * 0.2).astype(np.float32)
+        speaker.play(audio, RATE)
+        first = speaker.clips[-1]
+        first.stopped = first.started + 1.0
+        cut = int(1.0 * RATE)
+        # Going on 0.4 s or 0.1 s before the cut repeats that much; going on
+        # at the cut, nothing
+        for back in (0.4, 0.1):
+            again = type(first)(audio[cut - int(back * RATE):].copy(), first.stopped + 0.5)
+            assert replayed(first, again) == pytest.approx(back, abs=0.01)
+        exactly = type(first)(audio[cut:].copy(), first.stopped + 0.5)
+        assert replayed(first, exactly) is None
+        other = (np.random.default_rng(2).standard_normal(RATE) * 0.2).astype(np.float32)
+        assert replayed(first, type(first)(other, first.stopped + 0.5)) is None
+        assert replayed(first, type(first)(np.zeros(RATE, np.float32), first.stopped + 0.5)) is None
+
+    def test_what_the_voice_log_says_of_holds(self):
+        lines = [(0.0, "held: 0.13 s sure to be speech, canceller cancelling, suppression 13.5"),
+                 (0.1, "resumes at 0.52 s of 4.24 s (heard 0.87 s of this segment)"),
+                 (0.5, "echo: released after 0.00 s of speech while held; holds now need 0.99 s"),
+                 (2.0, "held: 0.13 s sure to be speech, canceller cancelling, suppression 20.1"),
+                 (2.5, "user: 0.32 s of speech while held"),
+                 (4.0, "not held: 0.29 s sure to be speech over the voice, at most 3.1 dB over its echo"),
+                 (5.0, "held: 0.13 s sure to be speech, 12.0 dB over the voice's echo"),
+                 (5.5, "aside: released after 0.19 s of speech while held, going on a little before where it "
+                       "was cut; holds now need 0.99 s")]
+        assert voice_holds(lines) == {"held": 3, "echo": 1, "aside": 1, "user": 1, "resumed": 1, "not_held": 1}
+
     def test_a_hold_is_found_with_what_it_repeated(self):
         speaker = Space().endpoint("a").speaker
         audio = (np.random.default_rng(1).standard_normal(3 * RATE) * 0.2).astype(np.float32)
@@ -1100,9 +1160,15 @@ def test_memory_starts_iris_again_with_a_memory_of_its_own(monkeypatch, tmp_path
                        (True, str(tmp_path / "memory-2.db"))]
 
     store = MemoryStore(":memory:")
-    iris.controller = SimpleNamespace(assistant=SimpleNamespace(memory=SimpleNamespace(store=store)))
+    conversation = ConversationManager.__new__(ConversationManager)
+    conversation.thread, conversation.persona = None, get_persona("iris")
+    iris.controller = SimpleNamespace(
+        assistant=SimpleNamespace(memory=SimpleNamespace(store=store), conversation=conversation)
+    )
     iris.seed_memory([{"title": "Nazaré", "gist": "a lighthouse", "summary": "A red lighthouse."}])
-    assert [t.title for t in store.topics()] == ["Nazaré"] and store.recent_turns() == []
+    thread = conversation.thread
+    assert [t.title for t in store.topics(thread)] == ["Nazaré"]
+    assert store.recent_turns(thread) == []
 
 
 # Holding conversations, with a stand-in assistant ---------------------------------------------
@@ -1235,7 +1301,8 @@ def held(monkeypatch):
     monkeypatch.setattr(scripted, "finished", lambda assistant, quiet=0.3: real_finished(assistant, 0.3))
     monkeypatch.setattr(scripted, "NO_REPLY_WATCH", 1.0)
     monkeypatch.setattr(scripted, "ASIDE_WATCH", 1.0)
-    space = Space(noise=0)
+    # A speaker that plays exactly when it says, for the measures to be exact
+    space = Space(noise=0, wake_latency=0)
     fake = StandIn(space)
     lines = []
     runner = ScriptedConversations(fake, space, FakeVoice(), check_replies=False, reply_timeout=10,

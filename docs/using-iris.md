@@ -38,7 +38,7 @@ The first time it opens, Iris walks you through getting ready, a step at a time;
 1. **Language model.** Conversations need a large language model. The walkthrough looks for Ollama on this computer and for OpenAI-compatible servers at their usual ports here (LM Studio, llama.cpp, vLLM, Jan), shows which answer, and takes any server you type. It offers the server's models, preferring `qwen3:1.7b`, then one that calls tools. Without a server it says what to install.
 2. **Speech models.** They download in the background from here on, the voices first (Kyutai's Pocket TTS with the personas' voices, Kokoro), then Smart Turn and Whisper, about 2 GB together; models already downloaded are reused. Each shows its progress in bytes, and a failed one can be tried again. Folders you already have can be used instead.
 3. **Microphone.** The walkthrough asks for the microphone (on macOS, the system's prompt), then shows its level and says when it hears your voice.
-4. **Voice.** Choose a persona; each one's voice can be played as soon as its engine is downloaded.
+4. **Voice.** The persona you talk to, Iris unless you made others; its voice can be played as soon as its engine is downloaded.
 5. **Wake word and tools**, both optional: whether Iris waits for its name, and whether it may use the camera, the screen and web search.
 6. **Ready.** A summary of the choices, each a click away. Iris starts, the iris bud at the top, which opened as the walkthrough came along, blooms into the orb, and Iris greets you in its persona's words. Downloads still running go on under the orb.
 
@@ -82,24 +82,18 @@ Iris keeps one continuous conversation that survives restarts and is remembered 
 
 ### Personas
 
-A persona is who Iris is: a name, a personality, a voice, and the words that wake it and send it to sleep. Iris ships three, chosen under Settings > Personas:
-
-- **Iris** (default): friendly and helpful.
-- **HAL**: inspired by HAL 9000, calm and mission-focused.
-- **Computer**: matter-of-fact, like the USS Enterprise computer.
-
-There you edit a persona or create one: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited built-in persona can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`); a change to the file of the persona in use is taken on while Iris runs, from its next reply:
+A persona is who Iris is: a name, a personality, a voice, and the words that wake it and send it to sleep. Iris ships one, **Iris**, friendly and helpful. Under Settings > Personas you edit it or create others: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited Iris can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`); a change to the file of the persona in use is taken on while Iris runs, from its next reply:
 
 ```yaml
-name: "HAL"
-engine: "kokoro"      # or "kyutai"
-voice: "bm_lewis"     # a voice of that engine
-speed: 1.1            # for engines whose voices take a speed (Kokoro)
+name: "Juno"
+engine: "kokoro"       # or "kyutai"
+voice: "af_sarah"      # a voice of that engine
+speed: 1.1             # for engines whose voices take a speed (Kokoro)
 audio_filter: "intercom"
-wake_word: "Hey HAL"  # optional; the name when left out
-sleep_word: "Goodbye" # optional; none when left out
+wake_word: "Hey Juno"  # optional; the name when left out
+sleep_word: "Goodbye"  # optional; none when left out
 description: |
-  You have the personality and speaking style of HAL 9000.
+  You are calm, precise and to the point.
 ```
 
 A persona keeps its voice in every language. The voice decides which languages are spoken: a reply in a language the persona's voice does not speak properly is shown and not spoken, and the conversation says so once; no other voice or engine speaks in its place. Kyutai's Pocket TTS sounds the most natural. It speaks English, French, German, Italian, Spanish, Portuguese and Dutch, each through that language's model with the voice's own prompt, and no Hindi, Japanese or Chinese. All its voices speak these languages but French, which 12 of its 27 voices do not speak properly: they keep so much of their accent that Whisper now and then hears English. Kokoro speaks English, French, Italian, Spanish, Portuguese, Hindi, Japanese and Chinese, but each of its voices only some of them properly: nearly every one English and the language it was made for, most Spanish, Portuguese and Mandarin, many Italian, few Hindi, five French and only the five Japanese voices Japanese; none speaks German or Dutch. Which languages each voice speaks properly was measured: Whisper hears the voice's sentences in the language, about as many of their words as from the voices made for it (`tests/unit/fixtures/voice_languages.json`). The persona editor lists the languages the persona's voice speaks and those it does not, shows each voice's languages, and filters the voices by the languages you need. Each part of a reply is spoken in the language it is written in, told from its words, so an Italian answer to an English question is not read with an English accent. A Kyutai voice can also be the path to a short audio file of a voice to clone.

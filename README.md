@@ -36,7 +36,7 @@ Settings > Pipeline: every stage from the microphone to the voice, and how long 
 
 The persona editor: personality, wake word, sleep word and voice, with every voice playable.
 
-<img src="docs/screenshots/persona-editor.png" alt="The persona editor showing HAL with its personality, wake word, sleep word, Kokoro voice, speed and effect">
+<img src="docs/screenshots/persona-editor.png" alt="The persona editor showing Iris with her personality, wake word, sleep word, Kyutai voice and effect">
 
 ## Getting started
 
@@ -50,7 +50,7 @@ ollama pull qwen3:1.7b
 
 For Apple Silicon Macs with macOS 14 or later:
 
-1. Download the disk image from [Releases](https://github.com/clstaudt/iris/releases), open it and drag **Iris** into **Applications**. Version releases are signed and notarized. The rolling [latest](https://github.com/clstaudt/iris/releases/tag/latest) pre-release holds the newest build of `main`; it is signed ad hoc, so macOS refuses it the first time: click **Open Anyway** in **System Settings > Privacy & Security**.
+1. Download the disk image from [Releases](https://github.com/clstaudt/iris/releases), open it and drag **Iris** into **Applications**. Version releases are signed and notarized. The rolling [latest](https://github.com/clstaudt/iris/releases/tag/latest) pre-release holds a build of `main`, made once a week when it has changed; it is signed ad hoc, so macOS refuses it the first time: click **Open Anyway** in **System Settings > Privacy & Security**.
 2. Open Iris and follow the walkthrough. It downloads the speech models (about 2 GB) while you go on.
 
 ### From source

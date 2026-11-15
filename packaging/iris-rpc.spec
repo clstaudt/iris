@@ -24,7 +24,7 @@ datas += [(os.path.join(mlx_lib, "mlx.metallib"), "mlx/lib")]
 # Packages that need their data files (models, tables, stubs) or native
 # libraries at runtime, beyond what PyInstaller finds through imports
 for package in (
-    "iris",  # personas
+    "iris",  # personas and roles
     "mlx_whisper",
     "faster_whisper",
     "ctranslate2",

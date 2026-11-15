@@ -251,6 +251,14 @@ def main(extra: dict | None = None):
         "memory.forget": lambda params: controller.memory_forget(params.get("id", -1)),
         "memory.forget_all": lambda params: controller.memory_forget_all(),
         "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
+        "memory.set_remember": lambda params: controller.set_remember(bool(params.get("on", True))),
+        # Threads: each a conversation with one persona and its own memory
+        "threads.list": lambda params: controller.threads_list(),
+        "threads.open": lambda params: controller.open_thread(params.get("id", -1)),
+        "threads.new": lambda params: controller.new_thread(
+            params.get("persona", "iris"), params.get("role")
+        ),
+        "threads.forget": lambda params: controller.forget_thread(params.get("id", -1)),
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
         # {"on": bool} switches the persona's wake word on or off; {"word"}
@@ -296,12 +304,20 @@ def main(extra: dict | None = None):
         "plugins.list": lambda params: controller.plugins_list(),
         "engines.list": lambda params: controller.engines_list(),
         "persona.list": lambda params: controller.list_personas(),
-        "persona.set": lambda params: controller.set_persona(params.get("name", "")),
+        # Roles: a focus a thread can be given
+        "roles.list": lambda params: controller.roles_list(),
+        "roles.save": lambda params: controller.role_save(params),
+        "roles.delete": lambda params: controller.role_delete(params.get("id", "")),
         "persona.get": lambda params: controller.persona_get(params.get("id", "")),
         "persona.voices": lambda params: controller.persona_voices(),
         "persona.save": lambda params: controller.persona_save(params),
         "persona.delete": lambda params: controller.persona_delete(params.get("id", "")),
         "persona.preview": lambda params: controller.persona_preview(params),
+        # A persona to a file of its own, and from one (iris.persona_files)
+        "persona.export": lambda params: controller.persona_export(
+            params.get("id", ""), params.get("path", "")
+        ),
+        "persona.import": lambda params: controller.persona_import(params.get("path", "")),
         # Cloning a voice for a persona (iris.cloning)
         "voice.clone_access": lambda params: controller.cloning.access(),
         "voice.clone_connect": lambda params: controller.cloning.connect(params.get("token", "")),
@@ -312,6 +328,12 @@ def main(extra: dict | None = None):
         "voice.sample": lambda params: controller.cloning.use_file(
             params.get("data", ""), params.get("name", "")
         ),
+        # A sample prepared is heard, and dropped unless it is cloned once
+        # the user confirms it
+        "voice.sample_play": lambda params: controller.voice_sample_play(
+            params.get("sample", ""), bool(params.get("on", True))
+        ),
+        "voice.sample_drop": lambda params: controller.cloning.drop(params.get("sample", "")),
         "voice.clone": lambda params: controller.voice_clone(params),
         # The Voices page: every voice, the cloned ones managed, and each
         # made ready for Iris's languages

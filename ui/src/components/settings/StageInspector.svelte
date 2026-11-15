@@ -17,7 +17,6 @@
     turn: "Turn end",
     stt: "Recognition",
     llm: "Language model",
-    persona: "Persona",
     tools: "Tools",
     memory: "Memory",
     voice: "Voice",
@@ -28,7 +27,6 @@
 
   onMount(() => {
     if (stage === "stt") store.loadRecognitionModels().catch(() => {});
-    if (stage === "persona") store.refreshPersonas().catch(() => {});
     if (stage === "voice" && !store.voices) store.loadVoices().catch(() => {});
     if (stage === "memory") store.loadMemory().catch(() => {});
   });
@@ -490,22 +488,6 @@
           <p class="s-status">Asking the server for its models</p>
         {/if}
       </section>
-    {:else if stage === "persona"}
-      <section class="sec">
-        {#each store.personas as id}
-          <button
-            onclick={() => store.setPersona(id).catch(fail("persona.set"))}
-            class="s-option {id === store.persona ? 'active' : ''}"
-          >
-            <span class="radio"></span>
-            <span class="name">{store.personaNames[id] ?? id}</span>
-          </button>
-        {/each}
-      </section>
-      <button class="s-btn self-start" onclick={() => store.editPersona(store.persona)}>
-        <Icon name="pencil" size={12} />
-        Edit {config?.persona}
-      </button>
     {:else if stage === "tools"}
       <section class="sec">
         {#each tools as tool}
@@ -547,9 +529,9 @@
           <span class="text-[12.5px] text-ink">Remember conversations</span>
           <Switch
             label="Remember conversations"
-            checked={!!config?.memory && !store.amnesia}
+            checked={!!config?.memory && store.memoryOn}
             disabled={!config?.memory}
-            onchange={() => store.toggleAmnesia().catch(fail("memory.set_amnesia"))}
+            onchange={(on) => store.setRemember(on).catch(fail("memory.set_remember"))}
           />
         </div>
         {#if config?.memory && store.remembersAnything}

@@ -100,38 +100,38 @@ def _device(monkeypatch):
     return clock, stream, played
 
 
-def _held(monkeypatch, audio, sample_rate, heard: float) -> float:
-    """Play a clip, pause it once so much of it was heard, and resume it;
-    where the rest was played from, in seconds."""
+def _hold(monkeypatch, after: float, rewind: bool) -> tuple[float, float]:
+    """Play a 2 s ramp, hold it after so many seconds (on the test's clock)
+    and let it go on; where it went on, and how much had been heard."""
+    sample_rate = 16000
+    audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)
     clock, stream, played = _device(monkeypatch)
     player = AudioPlayer()
     worker = threading.Thread(target=player._play_resumable, args=(audio, sample_rate, None))
     worker.start()
     assert _wait_for(lambda: played)
-    clock.now += heard
+    clock.now += after
     player.pause()
     assert _wait_for(lambda: not stream.active)  # the device is stopped
     # However long the pause lasts, it is not counted as heard
     clock.now += 5.0
     assert len(played) == 1 and player.paused
 
-    player.resume()
+    player.resume(rewind=rewind)
     assert _wait_for(lambda: len(played) == 2)
     stream.active = False  # the remainder finishes
     worker.join(timeout=10)
 
     assert not worker.is_alive()
     assert len(played) == 2
-    return (len(audio) - len(played[1])) / sample_rate
+    return (len(audio) - len(played[1])) / sample_rate, after
 
 
 def test_paused_playback_resumes_where_it_was_cut(monkeypatch):
     """A pause stops the device; resume plays the rest, slightly rewound."""
-    sample_rate = 16000
-    audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)  # 2 s, a ramp
-    resumed_at = _held(monkeypatch, audio, sample_rate, heard=0.8)
+    resumed_at, heard = _hold(monkeypatch, 0.8, rewind=True)
     # Restarted a little before the cut, never after it
-    assert resumed_at == pytest.approx(0.8 - audio_module.RESUME_REWIND, abs=0.001)
+    assert resumed_at == pytest.approx(heard - audio_module.RESUME_REWIND, abs=0.001)
 
 
 def test_playback_waits_until_the_stream_has_really_finished(monkeypatch):
@@ -165,10 +165,17 @@ def test_playback_waits_until_the_stream_has_really_finished(monkeypatch):
     assert time_module.monotonic() - started[0] >= 1.0
 
 
+@pytest.mark.parametrize("after", [0.3, 0.8])
+def test_a_hold_for_the_voices_own_echo_goes_on_where_it_was_cut(monkeypatch, after):
+    """Held for nothing (its own echo), early in a clip or later, the voice
+    goes on exactly where it was heard to: nothing is said twice."""
+    resumed_at, heard = _hold(monkeypatch, after, rewind=False)
+    assert resumed_at == pytest.approx(heard, abs=0.001)
+
+
 def test_a_clip_held_early_does_not_start_over(monkeypatch):
-    """A hold soon after a clip began goes back at most half of what was
-    heard: resuming from its start repeated the first words at every hold."""
-    sample_rate = 16000
-    audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)
-    # Held 0.3 s in, less than the rewind
-    assert _held(monkeypatch, audio, sample_rate, heard=0.3) == pytest.approx(0.15, abs=0.001)
+    """A user who interrupted it hears the cut word again, but a hold soon
+    after a clip began goes back at most half of what was heard: resuming
+    from its start repeated the first words at every hold."""
+    resumed_at, heard = _hold(monkeypatch, 0.3, rewind=True)
+    assert resumed_at == pytest.approx(heard / 2, abs=0.001)

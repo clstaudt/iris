@@ -25,6 +25,7 @@ from iris.tts import voice_languages
 from irisdev.voicetest import checks as c
 from irisdev.voicetest.fakesight import color_of
 from irisdev.voicetest.fakeweb import Each
+from irisdev.voicetest.isolation import TEST_PERSONAS
 from irisdev.voicetest.script import (
     At,
     Check,
@@ -64,6 +65,29 @@ __all__ = ["CONVERSATIONS", "Conversation", "GROUPS", "Turn", "all_conversations
 SLEEP_WORD = "That's all"
 
 # The everyday conversations ----------------------------------------------------------
+
+# Questions answered in a few sentences each, for replies listened to in silence
+QUIET_REPLIES = [
+    ("How do tides work?",
+     "Tides are the slow rise and fall of the sea. The moon pulls the oceans towards it as the earth turns "
+     "beneath them. The sun adds a weaker pull of its own. Most coasts see two high tides every day."),
+    ("Why do cats purr?",
+     "Cats purr when they are content, and sometimes when they are hurt. The sound comes from muscles in "
+     "the voice box that twitch many times a second. Purring may even help their bones heal. Kittens "
+     "start to purr when they are a few days old."),
+    ("What makes bread rise?",
+     "Bread rises because of yeast. The yeast eats the sugars in the dough and gives off carbon dioxide. "
+     "The gas is trapped in a web of gluten, which stretches like a balloon. Baking then sets the bubbles "
+     "in place."),
+    ("Why is the sea salty?",
+     "Rain wears tiny amounts of salt out of the rocks on land. Rivers carry it down to the sea, where it "
+     "stays. The sun takes the water away again, but leaves the salt behind. Over millions of years the "
+     "sea has become salty."),
+    ("How do bees make honey?",
+     "Bees gather nectar from flowers and carry it home in a second stomach. In the hive they pass it "
+     "from bee to bee, and it slowly thickens. They store it in wax cells and fan it with their wings to "
+     "dry it. Then they seal each cell with a lid of wax."),
+]
 
 CONVERSATIONS = [
     Conversation(
@@ -121,6 +145,28 @@ CONVERSATIONS = [
         [
             Turn(["Explain in detail how a rainbow forms."], listen_through=True),
         ],
+    ),
+    # Replies listened to in silence, one after another. The speaker's sound
+    # comes out with a delay of its own each time it starts after a silence,
+    # so the echo canceller lets the start of each reply through while it
+    # finds the voice again: Iris must not take that for the user, hold its
+    # voice and say the first words twice
+    Conversation(
+        "replies listened to in silence",
+        [Turn([question], listen_through=True, checks=[c.played_once()]) for question, _ in QUIET_REPLIES],
+        stub_rules=[Rule(re.escape(question[:-1]), reply) for question, reply in QUIET_REPLIES],
+        # A new Iris: its canceller learns the room in the first reply
+        fresh=True,
+        tags=["echo", "listen through"],
+    ),
+    # The same with a laptop's small speakers driven hard in a room that rings
+    Conversation(
+        "replies listened to in silence, laptop speakers",
+        [Turn([question], listen_through=True, checks=[c.played_once()]) for question, _ in QUIET_REPLIES],
+        stub_rules=[Rule(re.escape(question[:-1]), reply) for question, reply in QUIET_REPLIES],
+        echo=Echo(gain=0.3, room=0.4, drive=2.0),
+        fresh=True,
+        tags=["echo", "listen through", "loud speakers"],
     ),
     Conversation(
         "the stop button",
@@ -2554,16 +2600,16 @@ PERSONAS = [
         "switching persona mid-conversation",
         [
             Turn(["What is the capital of France?"], reply_mentions=["Paris"], checks=[voice_is("kyutai:anna")]),
-            Turn(["And roughly how many people live there?"], actions=[(At.finished(0.0), ("persona", "hal"))],
+            Turn(["And roughly how many people live there?"], actions=[(At.finished(0.0), ("persona", "test-kokoro"))],
                  at=At.event("config", 0.6), reply_mentions=["million"],
-                 checks=[voice_is("kokoro:bm_lewis"), c.request_holds(["HAL 9000", "You are now HAL"])]),
+                 checks=[voice_is("kokoro:bm_lewis"), c.request_holds(["calm, precise and polite", "You are now Test Kokoro"])]),
             Turn(["Explain in detail how a rainbow forms."], listen_through=True, checks=[voice_is("kokoro:bm_lewis")]),
             Turn(["Sorry, stop. What is two plus two?"], at=At.reply_audible(3.0),
                  checks=[voice_is("kokoro:bm_lewis")]),
-            Turn(["Tell me a long story about the sea."], actions=[(At.reply_audible(2.0), ("persona", "computer"))],
+            Turn(["Tell me a long story about the sea."], actions=[(At.reply_audible(2.0), ("persona", "test-sarah"))],
                  checks=[no_clip_after_done()]),
             Turn(["What day comes after Monday?"], reply_mentions=["Tuesday"],
-                 checks=[voice_is("kokoro:af_sarah"), notes_in_order(["You are now HAL", "You are now Computer"])]),
+                 checks=[voice_is("kokoro:af_sarah"), notes_in_order(["You are now Test Kokoro", "You are now Test Sarah"])]),
             Turn(["What was the first thing I asked you?"], actions=[(At.finished(0.0), ("persona", "iris"))],
                  at=At.event("config", 0.6), reply_mentions=["France", "Paris"], checks=[voice_is("kyutai:anna")]),
         ],
@@ -2595,14 +2641,15 @@ def persona_across_languages(persona: str, label: str, languages: list[str]) -> 
     editor tells them; in any other the reply is shown, not spoken by
     another voice, and the user is told so. Then the user goes back to
     English."""
-    shipped = Persona.from_file(BUILTIN_DIR / f"{persona}.yaml")
-    spoken = voice_languages(shipped.engine, shipped.voice)
+    fields = TEST_PERSONAS.get(persona)
+    speaker = Persona(**fields) if fields else Persona.from_file(BUILTIN_DIR / f"{persona}.yaml")
+    spoken = voice_languages(speaker.engine, speaker.voice)
     turns = []
     for language in languages:
         note = asks_for(NAME_OF[language]) if language != "en" else asks_for_nothing()
         heard = heard_as(language) if language in spoken else {"expect": "shown"}
         turns.append(Turn(**SAID_IN[language], reply_language=language, checks=[note, voice_is(
-            f"{shipped.engine}:{shipped.voice}")], **heard))
+            f"{speaker.engine}:{speaker.voice}")], **heard))
     turns.append(Turn(["Thank you. Back to English: what day comes after Monday?"], reply_language="en",
                       checks=[asks_for_english()], spoken_share=SPOKEN_SHARE))
     return Conversation(
@@ -2612,13 +2659,13 @@ def persona_across_languages(persona: str, label: str, languages: list[str]) -> 
     )
 
 
-# HAL and Computer speak with Kokoro, whose voices speak no German or Dutch;
+# The test personas speak with Kokoro, whose voices speak no German or Dutch;
 # Iris speaks with Pocket TTS, which speaks no Hindi, Japanese or Chinese.
 # No other voice speaks for them (Spanish, which needs Pocket TTS's Spanish
 # model, is in "across languages")
 PERSONAS += [
-    persona_across_languages("hal", "Kokoro", ["en", "fr", "pt", "es", "it", "hi", "ja", "zh", "de", "nl"]),
-    persona_across_languages("computer", "Kokoro", ["en", "es", "pt", "hi", "de"]),
+    persona_across_languages("test-kokoro", "Kokoro", ["en", "fr", "pt", "es", "it", "hi", "ja", "zh", "de", "nl"]),
+    persona_across_languages("test-sarah", "Kokoro", ["en", "es", "pt", "hi", "de"]),
     persona_across_languages("iris", "Kyutai", ["en", "fr", "it", "pt", "hi", "ja", "zh", "de", "nl"]),
 ]
 

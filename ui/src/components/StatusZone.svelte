@@ -1,6 +1,7 @@
 <script lang="ts">
   import { STATE_LABELS, store } from "../lib/state.svelte";
   import { percent } from "../lib/voices";
+  import { wakeHint } from "../lib/wakehint";
   import Circle from "./Circle.svelte";
   import Progress from "./Progress.svelte";
 
@@ -12,6 +13,14 @@
   const ORB = 112;
   const RING_BOTTOM = ORB / 2 + ORB * 0.25;
   const GAP = 16;
+
+  // Asleep with the wake word on: now and then the status names the word
+  const wakeWord = $derived(store.state === "dormant" ? store.config?.wake_word?.trim() ?? "" : "");
+  const asleep = $derived(!!wakeWord);
+  let hinting = $state(false);
+  $effect(() => {
+    if (asleep) return wakeHint((on) => (hinting = on));
+  });
 </script>
 
 <!-- Compact status under the composer: the orb and what it means -->
@@ -48,8 +57,27 @@
           class="w-[180px]"
         />
       {/key}
+    {:else if asleep}
+      <span class="grid justify-items-center">
+        <span class="wake-label" class:shown={!hinting} aria-hidden={hinting}>{STATE_LABELS.dormant}</span>
+        <span class="wake-label" class:shown={hinting} aria-hidden={!hinting} data-wake-hint
+          >Say "{wakeWord}" to wake</span>
+      </span>
     {:else}
       {STATE_LABELS[store.state] ?? ""}
     {/if}
   </div>
 </div>
+
+<style>
+  /* The sleeping label and the hint share a place and fade into each other */
+  .wake-label {
+    grid-area: 1 / 1;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 900ms ease-in-out;
+  }
+  .wake-label.shown {
+    opacity: 1;
+  }
+</style>

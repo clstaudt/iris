@@ -33,6 +33,7 @@ from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.plugin import Plugin, PluginContext
 from iris.plugins import BUILT_IN
+from iris.roles import find_role
 from iris.status import StatusManager
 from iris.timing import TurnTiming
 from iris.tools import Tools
@@ -117,6 +118,11 @@ def _sleep_chime() -> np.ndarray:
     return _chime_tones((990.0, 660.0))
 
 
+def _thread_chime() -> np.ndarray:
+    """One soft tone twice, neither rising nor falling: "another thread"."""
+    return _chime_tones((784.0, 784.0))
+
+
 def _echo_canceller() -> Optional[EchoCanceller]:
     """The echo canceller, or None where it cannot run."""
     if not HAS_ECHO_CANCELLATION:
@@ -194,6 +200,9 @@ class VoiceAssistant:
     _ending = False
     # Until then the microphone stays closed after parting words
     _quiet_until = 0.0
+    # Listening paused, as on opening another thread: shown as paused, the
+    # microphone closed until resumed, typed turns still answered
+    listening_paused = False
     # Told (engine, voice, language) when a reply comes to a language the
     # persona's voice speaks but is not ready for: the app makes it ready,
     # where the user sees it (iris.readiness)
@@ -253,8 +262,9 @@ class VoiceAssistant:
                 turns share one conversation and never overlap.
             speak_replies: If False, replies are streamed as text only
             ollama_host: Ollama server URL; None follows OLLAMA_HOST
-            memory: Keep one continuous conversation in long-term memory
-                (~/.iris/memory.db, or IRIS_MEMORY_DB), remembered by topic
+            memory: Keep the conversation in long-term memory (~/.iris/memory.db,
+                or IRIS_MEMORY_DB), in threads remembered by topic; it starts
+                in a new thread (see ConversationManager.open_thread)
             wake_word: If set, listen only for this word until addressed, and
                 fall dormant again after wake_window seconds without a turn
                 (the persona's, which the controller passes when it is on)
@@ -397,7 +407,8 @@ class VoiceAssistant:
                 store,
                 chat_json(lambda: self.conversation.host, lambda: self.conversation.model),
                 on_change=lambda: self.event_bus and self.event_bus.emit("memory.updated", {}),
-                busy=self._conversation_busy,
+                # Nor while memory is switched off: nothing is written then
+                busy=lambda: self._conversation_busy() or not self.conversation.remember,
             )
 
         # The plugins' tools, on as chosen; a plugin whose optional
@@ -424,6 +435,10 @@ class VoiceAssistant:
             vision_model=vision_model,
             host=ollama_host,
             memory=self.memory,
+        )
+        # The app lists the threads anew once one was talked in
+        self.conversation.on_stored = lambda: self.event_bus and self.event_bus.emit(
+            "threads.changed", {}
         )
         if self.memory:
             self.memory.start()
@@ -485,6 +500,8 @@ class VoiceAssistant:
         what the user chose."""
         return PluginContext(
             memory=self.memory.store if self.memory else None,
+            thread=lambda: self.conversation.thread,
+            remember=lambda: self.conversation.remember,
             sleep=self._end_conversation,
             can_sleep=lambda: bool(self.wake_word),
         )
@@ -512,14 +529,22 @@ class VoiceAssistant:
             "ollama_host": self.conversation.host or "",
             "ollama_url": effective_host(self.conversation.host),
             "memory": self.memory is not None,
+            # Memory switched on, for every thread, and the open thread in
+            # amnesia mode
+            "remember": self.conversation.remember,
             "amnesia": self.conversation.amnesia,
+            # The thread the conversation is in; None for a new one
+            "thread": self.conversation.thread,
+            # Its role, if it has one that is still there
+            "role": role.id if (role := find_role(self.conversation.role)) else None,
+            "role_name": role.name if role else "",
             "wake_word": self.wake_word or "",
             "wake_window": self.wake_window,
             "sleep_word": self.sleep_word or "",
             # The persona's wake word, shown while the wake word is off
             "persona_wake_word": self.persona.wake_word,
             "mic_on": not self.pause_event.is_set(),
-            "paused": self.suspend_event.is_set(),
+            "paused": self.suspend_event.is_set() or self.listening_paused,
             "tools": self.tools.states(),
             "engines": engines.describe(
                 speech=self.tts_generator.engine,
@@ -663,7 +688,7 @@ class VoiceAssistant:
 
     def _is_sleep_word(self, text: str) -> bool:
         """Whether this is the sleep word, said on its own or with the wake
-        word or the persona's name ("Goodbye, HAL" for a "Hey HAL")."""
+        word or the persona's name ("Goodbye, Iris" for a "Hey Iris")."""
         if not self.sleep_word:
             return False
         return any(
@@ -751,6 +776,11 @@ class VoiceAssistant:
         if self.speak_replies:
             self._play_chime(_wake_chime())
 
+    def thread_chime(self):
+        """Mark going on in another thread, or a new one."""
+        if self.speak_replies:
+            self._play_chime(_thread_chime())
+
     def _play_chime(self, sound: np.ndarray):
         """Play a chime. A speaker that cannot be opened leaves it unheard:
         the next reply tries it again, and says so if it fails too."""
@@ -788,6 +818,7 @@ class VoiceAssistant:
         return (
             self.pause_event.is_set()
             or self.suspend_event.is_set()
+            or self.listening_paused
             or self.hold_event.is_set()
             or self.stop_event.is_set()
         )
@@ -843,11 +874,13 @@ class VoiceAssistant:
                 closely), and not paused by the user."""
                 return self.speech_pipeline.is_active and not self.suspend_event.is_set()
 
-            def release():
+            def release(rewind: bool = True):
                 """Let the voice go on after a hold, unless the user paused
-                the conversation meanwhile."""
+                the conversation meanwhile: a little before where it was cut
+                (rewind), or exactly there, when the hold heard nothing of
+                the user."""
                 if not self.suspend_event.is_set():
-                    self.speech_pipeline.resume()
+                    self.speech_pipeline.resume(rewind)
 
             def listen_on(turn=audio_path):
                 whole_turn[0] = self.recorder.listen_on(
@@ -1213,7 +1246,7 @@ class VoiceAssistant:
         """Keep the exchange in the conversation as the user took it in: a
         reply cut short only as far as it was said, or shown, with the voice
         off or in a language it does not speak. Of a reply stopped before
-        anything was said, nothing is kept."""
+        anything was said, nothing is kept, not even the turn it answered."""
         if not cut:
             self.conversation.keep(prompt, self.conversation.reply or "", source)
             return
@@ -1223,6 +1256,8 @@ class VoiceAssistant:
             kept = self.conversation.clean_markdown(answer)
         if kept.strip():
             self.conversation.keep(prompt, kept, source)
+        else:
+            self.conversation.forgo()
 
     def chat(
         self,
@@ -1383,6 +1418,8 @@ class VoiceAssistant:
             # Clear all statuses on error
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = False
+            # Nothing of a reply that failed is kept, nor the turn it answered
+            self.conversation.forgo()
 
             conversation = self.conversation
             error_msg = failure_message(e, conversation.host, getattr(conversation, "asked", None))
@@ -1549,7 +1586,11 @@ class VoiceAssistant:
         # Paused, the user is typing, or nothing to recognize speech
         # with: keep the microphone closed (models stay loaded) and
         # keep watching for typed turns
-        closed = self.pause_event.is_set() or self.hold_event.is_set()
+        closed = (
+            self.pause_event.is_set()
+            or self.hold_event.is_set()
+            or self.listening_paused
+        )
         if closed or self.transcriber is None:
             self.recorder.close_microphone()
             with self.status_manager.status_lock:
@@ -1589,6 +1630,7 @@ class VoiceAssistant:
                 on_level=on_audio_level,
                 should_stop=lambda: self.pause_event.is_set()
                 or self.suspend_event.is_set()
+                or self.listening_paused
                 or self.hold_event.is_set()
                 or self.stop_event.is_set()
                 or not self.turn_queue.empty()

@@ -1,6 +1,7 @@
 <script lang="ts">
-  import type { PipelineSection, PipelineStage } from "../lib/pipeline";
+  import type { PipelineSection, PipelineStage, StageTag } from "../lib/pipeline";
   import Icon from "./Icon.svelte";
+  import PersonaRing from "./PersonaRing.svelte";
 
   /** The pipeline as one line of stages, in sections. With timings, each
    *  timed stage shows its slice of the time to the first word, and a total
@@ -73,14 +74,33 @@
   );
 
   const seconds = (ms: number) => `${(ms / 1000).toFixed(2)} s`;
+
+  /** A tag opens where its value is set, not the stage's inspector. */
+  function openTag(event: MouseEvent, tag: StageTag) {
+    event.stopPropagation();
+    tag.open();
+  }
   const opens = (stage: PipelineStage) => !!onselect && !stage.fixed;
 </script>
 
 {#snippet body(stage: PipelineStage, row: Row)}
   <Icon name={stage.icon} size={stage.branch ? 14 : compact ? 15 : 16} />
   <span class="label">{stage.label}</span>
-  <span class="value">
-    {stage.value}{#if stage.meta}<span class="meta">&nbsp;· {stage.meta}</span>{/if}
+  <span class="cell">
+    <span class="value">
+      {stage.value}{#if stage.meta}<span class="meta">&nbsp;· {stage.meta}</span>{/if}
+    </span>
+    {#if stage.tag}
+      {@const tag = stage.tag}
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <span class="tag" onclick={(e) => openTag(e, tag)} title="Open">
+        {#if tag.persona}
+          <PersonaRing name={tag.persona} size="xs" />{tag.persona}
+        {:else}
+          <Icon name="thread" size={11} />{tag.thread}
+        {/if}
+      </span>
+    {/if}
   </span>
   {#if timings}
     {#if stage.ms !== undefined}
@@ -265,12 +285,39 @@
     color: var(--color-ink-2);
     white-space: nowrap;
   }
+  .cell {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+  }
   .value {
     overflow: hidden;
     font-size: 13px;
     color: var(--color-ink);
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* A value set elsewhere: where, as a tag that opens it */
+  .tag {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 6px;
+    margin-left: 10px;
+    padding: 2px 9px 2px 6px;
+    border-radius: 9999px;
+    border: 1px solid var(--color-line-strong);
+    font-size: 11.5px;
+    color: var(--color-ink-2);
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color 150ms,
+      color 150ms;
+  }
+  .tag:hover {
+    background: var(--color-hover);
+    color: var(--color-ink);
   }
   .compact .value {
     font-size: 12.5px;

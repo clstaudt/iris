@@ -76,6 +76,33 @@ export interface MemoryTopicDetail extends Omit<MemoryTopic, "turns"> {
   turns: MemoryTurn[];
 }
 
+/** A thread: a conversation with one persona, with its own memory. */
+export interface ThreadInfo {
+  id: number;
+  /** The persona's id, Iris for one whose persona is gone */
+  persona: string;
+  persona_name: string;
+  /** Its role's id and name, if it has one */
+  role: string | null;
+  role_name: string;
+  /** Its earliest topic's, once memory has filed one; "" until then */
+  title: string;
+  created: number;
+  /** When it was last talked in (seconds since the epoch) */
+  updated: number;
+}
+
+/** A role: a focus a thread can be given. */
+export interface RoleInfo {
+  /** File name; none for a role not saved yet */
+  id?: string;
+  name: string;
+  focus: string;
+  /** Shipped with Iris: it can be reset once edited, but not deleted */
+  shipped?: boolean;
+  edited?: boolean;
+}
+
 /** A typed message waiting for the current turn to finish. */
 export interface PendingTurn {
   id: string;
@@ -175,6 +202,13 @@ export interface AssistantConfig {
   paused?: boolean;
   memory?: boolean;
   amnesia?: boolean;
+  /** Memory switched on, for every thread */
+  remember?: boolean;
+  /** The thread Iris is in; null for a new one, stored with its first turn */
+  thread?: number | null;
+  /** The thread's role, if it has one, and its name */
+  role?: string | null;
+  role_name?: string;
   tools?: Record<string, ToolState>;
   /** Swappable engines per slot (speech recognition, voice, ...), once the
    *  core reports them */
@@ -220,7 +254,7 @@ const SETUP_KEYS = [
 ] as const;
 
 /** The pages of the settings window. */
-export type SettingsPage = "pipeline" | "personas" | "voices";
+export type SettingsPage = "pipeline" | "personas" | "voices" | "roles";
 
 /** What ends a turn: Smart Turn hearing the user has finished, or a silence. */
 export type TurnDetection = "smart_turn" | "silence";
@@ -344,13 +378,24 @@ export interface VoiceOptions {
 /** User choices remembered across launches. */
 export interface SavedSettings {
   llm_model?: string;
+  /** The persona of the thread Iris is in, or of a new one */
   persona?: string;
+  /** The thread Iris is in, to open again; null for a new one */
+  thread?: number | null;
+  /** Whether the threads are shown beside the conversation, and whether
+   *  as a narrow strip of rings */
+  sidebar?: boolean;
+  sidebar_strip?: boolean;
   input_device?: string;
   speak_replies?: boolean;
   /** Speaking interrupts the voice */
   barge_in?: boolean;
   tools?: Record<string, boolean>;
   ollama_host?: string;
+  /** Memory switched on, for every thread; on unless switched off */
+  remember?: boolean;
+  /** Before amnesia was each thread's own: one switch for all, which goes
+   *  to the thread Iris starts in */
   amnesia?: boolean;
   /** The wake word switch; the words are each persona's own */
   wake_on?: boolean;
@@ -472,6 +517,29 @@ class IrisStore {
   jobs = $state<Record<string, VoiceJob>>({});
   private voicesStale: ReturnType<typeof setTimeout> | null = null;
   memoryTopics = $state<MemoryTopic[]>([]);
+  /** The threads, the one talked in last first */
+  threads = $state<ThreadInfo[]>([]);
+  /** The thread Iris is in; null for a new one */
+  openThread = $state<number | null>(null);
+  /** The threads are shown beside the conversation */
+  sidebar = $state(loadSettings().sidebar ?? false);
+  /** Shown, the threads are a narrow strip of their rings */
+  sidebarStrip = $state(loadSettings().sidebar_strip ?? false);
+  /** A new thread was asked for: its persona and role are chosen until
+   *  something is said */
+  choosing = $state(false);
+  /** A switch of thread asked for while Iris replies, to be confirmed */
+  switchAsked = $state<{
+    open?: number;
+    persona?: string;
+    role?: string | null;
+    choose?: boolean;
+  } | null>(null);
+  /** The roles, by name */
+  roles = $state<RoleInfo[]>([]);
+  /** The role open in the role editor; "" for a new one, null for the
+   *  first in the list */
+  editingRole = $state<string | null>(null);
   /** Turns the core keeps, filed under a topic or not yet */
   memoryTurns = $state(0);
   /** The walkthrough is shown instead of the conversation: on the first
@@ -512,8 +580,14 @@ class IrisStore {
     return this.state === "paused";
   }
 
+  /** The open thread is in amnesia mode: nothing of it is written */
   get amnesia() {
     return this.config?.amnesia ?? false;
+  }
+
+  /** Memory is switched on, for every thread */
+  get memoryOn() {
+    return this.config?.remember ?? true;
   }
 
   /** Whether there is anything to forget: topics, turns kept but not filed
@@ -559,6 +633,9 @@ class IrisStore {
         const previousServer = this.config?.ollama_url;
         this.config = data as unknown as AssistantConfig;
         this.persona = this.config.persona_id ?? this.config.persona.toLowerCase();
+        // Iris goes on with this persona, in this thread, when it starts again
+        saveSettings({ persona: this.persona });
+        if (this.config.thread !== undefined) this.settleThread(this.config.thread);
         this.speakReplies = this.config.speak_replies ?? true;
         if (previous && previous !== this.config.llm_model) {
           this.messages = this.messages.filter((m) => m.kind !== "model_missing");
@@ -615,6 +692,8 @@ class IrisStore {
         }
         this.streamingIndex = null;
         this.messages.push(message);
+        // Something was said: the new thread's persona is chosen
+        this.choosing = false;
         break;
       }
 
@@ -675,6 +754,23 @@ class IrisStore {
         break;
 
       case "memory.updated":
+        if (this.showsMemory) this.loadMemory();
+        // A topic filed may give a thread its title
+        this.loadThreads();
+        break;
+
+      case "threads.changed":
+        this.loadThreads();
+        break;
+
+      // Iris went on in another thread: its recent turns follow, restored
+      case "thread.opened":
+        for (const waiting of this.pending) releasePreviews(waiting.attachments);
+        this.pending = [];
+        this.messages = [];
+        this.restoredCount = 0;
+        this.streamingIndex = null;
+        this.settleThread((data.id as number | null) ?? null);
         if (this.showsMemory) this.loadMemory();
         break;
 
@@ -738,6 +834,10 @@ class IrisStore {
     this.restoredCount = 0;
     this.memoryTopics = [];
     this.memoryTurns = 0;
+    // Every thread is gone: Iris goes on in a new one
+    this.choosing = false;
+    this.settleThread(null);
+    this.threads = [];
     if (this.showsMemory) this.loadMemory();
   }
 
@@ -780,6 +880,7 @@ class IrisStore {
       });
       return false;
     }
+    this.choosing = false;
     const shown = files.map((f) => f.info);
     if (result.id && !this.startedTurns.has(result.id)) {
       this.pending.push({ id: result.id, text: value, attachments: shown });
@@ -804,11 +905,16 @@ class IrisStore {
     await rpc("mic.set", { on: !this.micOn });
   }
 
-  /** While on, nothing of the conversation is written to memory. */
+  /** While on, nothing of the open thread is written to memory; it stays
+   *  with the thread. */
   async toggleAmnesia() {
-    const on = !this.amnesia;
-    saveSettings({ amnesia: on });
-    await rpc("memory.set_amnesia", { on });
+    await rpc("memory.set_amnesia", { on: !this.amnesia });
+  }
+
+  /** Switch memory on or off, for every thread. */
+  async setRemember(on: boolean) {
+    saveSettings({ remember: on });
+    await rpc("memory.set_remember", { on });
   }
 
   /** Pause or resume the whole conversation: listening, reply and speech. */
@@ -827,10 +933,126 @@ class IrisStore {
     await rpc("assistant.interrupt");
   }
 
-  async setPersona(name: string) {
-    this.persona = name;
-    saveSettings({ persona: name });
-    await rpc("persona.set", { name });
+  // ------------------------------------------------------------------
+  // Threads
+  // ------------------------------------------------------------------
+
+  async loadThreads() {
+    try {
+      const result = await rpc<{ threads: ThreadInfo[]; open?: number | null }>("threads.list");
+      this.threads = result.threads;
+      // Told while Iris runs: a thread is stored with its first turn
+      if (result.open !== undefined) this.settleThread(result.open);
+    } catch (err) {
+      console.error("[store] threads.list failed:", err);
+    }
+  }
+
+  /** The thread Iris is in, kept to open again when it starts again. */
+  private settleThread(id: number | null) {
+    this.openThread = id;
+    saveSettings({ thread: id });
+  }
+
+  /** The open thread, as listed; none for a new one. */
+  get thread(): ThreadInfo | null {
+    return this.threads.find((t) => t.id === this.openThread) ?? null;
+  }
+
+  /** Go on in another thread: its persona and its memory. While Iris
+   *  replies, which that stops, it is asked first (switchAsked). */
+  async openThreadById(id: number, { confirmed = false } = {}) {
+    if (this.settingsPage) this.settingsPage = null;
+    if (id === this.openThread) {
+      this.choosing = false;
+      return;
+    }
+    if (this.busy && !confirmed) {
+      this.switchAsked = { open: id };
+      return;
+    }
+    this.choosing = false;
+    await rpc("threads.open", { id });
+  }
+
+  /** A new thread with a persona, and a role if one is given: Iris and no
+   *  role unless others are chosen. Choosing, they can be picked until
+   *  something is said. While Iris replies, which that stops, it is asked
+   *  first (switchAsked). */
+  async newThread(
+    persona = "iris",
+    { choose = true, role = null as string | null, confirmed = false } = {}
+  ) {
+    this.settingsPage = null;
+    if (this.busy && !confirmed) {
+      this.switchAsked = { persona, role, choose };
+      return;
+    }
+    this.choosing = choose;
+    await rpc("threads.new", { persona, ...(role ? { role } : {}) });
+  }
+
+  /** Go on with the switch asked for while Iris replied, or not. */
+  async answerSwitch(confirmed: boolean) {
+    const asked = this.switchAsked;
+    this.switchAsked = null;
+    if (!asked || !confirmed) return;
+    if (asked.open !== undefined) await this.openThreadById(asked.open, { confirmed: true });
+    else {
+      await this.newThread(asked.persona, { choose: asked.choose, role: asked.role, confirmed: true });
+    }
+  }
+
+  /** Forget a thread with its memory; the open one leaves a new thread. */
+  async forgetThread(id: number) {
+    await rpc("threads.forget", { id });
+    await this.loadThreads();
+  }
+
+  // ------------------------------------------------------------------
+  // Roles
+  // ------------------------------------------------------------------
+
+  async loadRoles() {
+    const result = await rpc<{ roles: RoleInfo[] }>("roles.list");
+    this.roles = result.roles;
+  }
+
+  /** Open the role editor on a role, or on a new one (no id). */
+  editRole(id?: string) {
+    this.editingRole = id ?? "";
+    this.settingsPage = "roles";
+    this.panel = null;
+  }
+
+  /** Save a role; its threads have the new focus from their next turn.
+   *  Returns an error message, or null once saved. */
+  async saveRole(settings: RoleInfo): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string; id: string; roles: RoleInfo[] }>(
+      "roles.save",
+      { ...settings }
+    );
+    if (!result.ok) return result.error ?? "Could not save the role";
+    this.roles = result.roles;
+    this.editingRole = result.id;
+    return null;
+  }
+
+  /** Delete the user's role, or reset an edited one that ships with Iris. */
+  async deleteRole(id: string) {
+    const result = await rpc<{ roles: RoleInfo[] }>("roles.delete", { id });
+    this.roles = result.roles;
+  }
+
+  toggleSidebar() {
+    this.sidebar = !this.sidebar;
+    saveSettings({ sidebar: this.sidebar });
+  }
+
+  /** The threads as a narrow strip of rings, or listed in full. */
+  toggleSidebarStrip() {
+    this.sidebarStrip = !this.sidebarStrip;
+    saveSettings({ sidebar_strip: this.sidebarStrip });
   }
 
   /** Open the persona editor on a persona, or on a new one (no id). */
@@ -909,7 +1131,11 @@ class IrisStore {
 
   /** Make a voice ready for languages (Iris's own without any). */
   async makeReady(engine: SpeechEngine, voice: string, languages?: string[]) {
-    const result = await rpc<{ jobs: VoiceJob[] }>("voice.ready", { engine, voice, languages });
+    const result = await rpc<{ jobs: VoiceJob[] }>("voice.ready", {
+      engine,
+      voice,
+      languages: languages ? [...languages] : undefined,
+    });
     for (const job of result.jobs ?? []) this.takeJob(job, false);
   }
 
@@ -935,7 +1161,7 @@ class IrisStore {
     return null;
   }
 
-  /** Save a persona; a new one becomes the current persona. Returns an error
+  /** Save a persona; a new one is edited from here on. Returns an error
    *  message, or null once saved. */
   async savePersona(settings: PersonaSettings): Promise<string | null> {
     const result = await rpc<{
@@ -948,7 +1174,7 @@ class IrisStore {
     if (!result.ok) return result.error ?? "Could not save the persona";
     this.personas = result.personas;
     this.personaNames = result.names;
-    if (!settings.id) await this.setPersona(result.id);
+    if (!settings.id) this.editingPersona = result.id;
     // The voices as they are now, with the personas that speak with each
     if (this.voices) await this.loadVoices();
     return null;
@@ -967,6 +1193,37 @@ class IrisStore {
       this.persona = result.persona;
       saveSettings({ persona: result.persona });
     }
+  }
+
+  /** Write a persona, as saved, to a file the user chooses, with its cloned
+   *  voice. Returns an error message, or null once written (or cancelled). */
+  async exportPersona(id: string, name: string): Promise<string | null> {
+    const path = await window.iris.savePersonaFile(name);
+    if (!path) return null;
+    const result = await rpc<{ ok: boolean; error?: string }>("persona.export", { id, path });
+    return result.ok ? null : (result.error ?? "The persona could not be exported");
+  }
+
+  /** Add a persona from a file the user chooses, with its cloned voice; it
+   *  opens in the editor. Returns an error message, or null once added (or
+   *  cancelled). */
+  async importPersona(): Promise<string | null> {
+    const path = await window.iris.openPersonaFile();
+    if (!path) return null;
+    const result = await rpc<{
+      ok: boolean;
+      error?: string;
+      id: string;
+      personas: string[];
+      names: Record<string, string>;
+    }>("persona.import", { path });
+    if (!result.ok) return result.error ?? "The persona could not be imported";
+    this.personas = result.personas;
+    this.personaNames = result.names;
+    this.editingPersona = result.id;
+    // Its cloned voice, in the library now
+    if (this.voices) await this.loadVoices();
+    return null;
   }
 
   /** Say a line in a voice as it is being edited. Returns an error message,
@@ -994,6 +1251,34 @@ class IrisStore {
     }
     if (error) this.previewing = null;
     return error;
+  }
+
+  /** Play a sample prepared for cloning, as a preview plays: marked
+   *  ("sample:<id>") from the click until it has been heard. Returns an
+   *  error message, or null once it is on its way. */
+  async playSample(sample: string): Promise<string | null> {
+    const playing = `sample:${sample}`;
+    this.previewing = playing;
+    this.previewHeard = false;
+    setTimeout(() => {
+      if (this.previewing === playing && !this.previewHeard) this.previewing = null;
+    }, PREVIEW_TIMEOUT);
+    let error: string | null = null;
+    try {
+      const result = await rpc<{ ok: boolean; error?: string }>("voice.sample_play", { sample });
+      if (!result.ok) error = result.error ?? "The sample could not be played";
+    } catch (err) {
+      error = `The sample could not be played: ${err}`;
+    }
+    if (error && this.previewing === playing) this.previewing = null;
+    return error;
+  }
+
+  /** Stop a sample playing, if one is. */
+  async stopSample() {
+    if (!this.previewing?.startsWith("sample:")) return;
+    this.previewing = null;
+    await rpc("voice.sample_play", { on: false }).catch(() => {});
   }
 
   /** A preview whose voice downloads first stays marked until it is heard,
@@ -1405,7 +1690,10 @@ class IrisStore {
       this.personaNames = info.persona_names ?? {};
       this.state = info.state as AssistantState;
       this.running = info.running;
-      if (info.config) this.config = info.config;
+      if (info.config) {
+        this.config = info.config;
+        this.openThread = info.config.thread ?? null;
+      }
       this.timings = info.timings ?? [];
 
       // After a reload the core still holds the conversation; rebuild it
@@ -1517,7 +1805,8 @@ class IrisStore {
       if (choices.llm_model && choices.llm_model !== this.config?.llm_model) {
         await this.setModel(choices.llm_model);
       }
-      if (choices.persona !== this.persona) await this.setPersona(choices.persona);
+      // Another persona is talked to in a thread of its own
+      if (choices.persona !== this.persona) await this.newThread(choices.persona, { choose: false });
       const device = this.inputDevices.find((d) => d.name === choices.input_device);
       if (device && device.name !== config?.input_device) await this.setMic(device.index);
       if (choices.wake_word !== undefined) {
@@ -1558,10 +1847,13 @@ class IrisStore {
     if (!restore) options.restore_thread = false;
     if (saved.llm_model) options.llm_model = saved.llm_model;
     if (saved.persona) options.persona = saved.persona;
+    // Without one, Iris opens the thread talked in last
+    if (saved.thread !== undefined) options.thread = saved.thread;
     if (saved.speak_replies !== undefined) options.speak_replies = saved.speak_replies;
     if (saved.barge_in !== undefined) options.barge_in = saved.barge_in;
     if (saved.tools) options.tools = saved.tools;
     if (saved.ollama_host) options.ollama_host = saved.ollama_host;
+    if (saved.remember === false) options.remember = false;
     if (saved.amnesia) options.amnesia = true;
     if (saved.wake_on) options.wake_on = true;
     if (saved.idle_sleep === false) options.wake_window = 0;
@@ -1573,6 +1865,8 @@ class IrisStore {
     if (saved.languages) options.languages = saved.languages;
     this.speakReplies = saved.speak_replies ?? true;
     await rpc("assistant.start", options);
+    // The old switch went to the thread Iris started in, once
+    if (saved.amnesia !== undefined) saveSettings({ amnesia: undefined });
   }
 
   /** The wake word and sleep word kept for all personas before each had
@@ -1597,6 +1891,8 @@ class IrisStore {
   }
 
   private loadLists() {
+    this.loadThreads();
+    this.loadRoles().catch((err) => console.error("[store] roles.list failed:", err));
     try {
       rpc<{ devices: { index: number; name: string }[] }>("audio.list_inputs").then(
         (inputs) => {

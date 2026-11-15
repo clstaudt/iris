@@ -10,7 +10,17 @@ from faster_whisper.vad import get_vad_model
 
 from iris import audio as audio_module
 from iris.audio import AudioRecorder
-from iris.turns import FRAME, PRE_SPEECH, SAMPLE_RATE, SpeechDetector, TurnTracker
+from iris.echo import EchoLevels
+from iris.turns import (
+    FRAME,
+    HOLD_TRIGGER,
+    HOLD_TRIGGER_AFTER_ECHO,
+    HOLD_TRIGGER_NEAR_ECHO,
+    PRE_SPEECH,
+    SAMPLE_RATE,
+    SpeechDetector,
+    TurnTracker,
+)
 
 FRAME_SECONDS = FRAME / SAMPLE_RATE
 
@@ -239,14 +249,18 @@ class Voice:
         self.releases = 0
         self.held_in: list[int] = []
         self.released_in: list[int] = []
+        # For each release, whether the voice was to go on a little before
+        # where it was cut
+        self.rewound: list[bool] = []
 
     def hold(self):
         self.holds += 1
         self.held_in.append(ScriptedSpeech.frames)
 
-    def release(self):
+    def release(self, rewind):
         self.releases += 1
         self.released_in.append(ScriptedSpeech.frames)
+        self.rewound.append(rewind)
 
 
 class TestOverTheVoice:
@@ -262,14 +276,21 @@ class TestOverTheVoice:
         cancelling=None,
         should_stop=None,
         speaking_until=None,
+        echo=None,
+        recorder=None,
     ):
         """Listen over a voice that speaks throughout, or (speaking_until)
-        until so many seconds into the recording."""
+        until so many seconds into the recording; echo is the canceller, one
+        that cannot tell how loud the voice's echo is by default. A recorder
+        given listens again (the next reply)."""
         monkeypatch.setattr(audio_module, "SpeechDetector", ScriptedSpeech)
         monkeypatch.setattr(ScriptedSpeech, "frames", 0)
         FakeStream.recording = recording.astype(np.float32)
         monkeypatch.setattr(audio_module.sd, "InputStream", FakeStream)
-        recorder = AudioRecorder(turn_end=Verdict(0.9), echo=PassThrough(settled, cancelling))
+        echo = echo if echo is not None else PassThrough(settled, cancelling)
+        if recorder is None:
+            recorder = AudioRecorder(turn_end=Verdict(0.9), echo=echo)
+        recorder.echo = echo
         voice, spoke, frames = Voice(), [], [0]
 
         def until():
@@ -377,10 +398,11 @@ class TestOverTheVoice:
         assert (voice.holds, voice.releases, spoke) == (1, 1, [])
 
     def test_echo_holds_the_voice_once_in_a_reply(self, monkeypatch):
-        # A canceller that takes out some of the voice, not enough: bursts of
-        # its echo every 1.2 s. Each hold stops and restarts the voice, so
-        # after the first that heard only echo, bursts like these no longer
-        # hold it: the voice goes on without stuttering
+        # A canceller that takes out some of the voice, not enough, and
+        # cannot tell how loud its echo is: bursts of the echo every 1.2 s.
+        # Each hold stops and restarts the voice, so after the first that
+        # heard only echo, bursts like these no longer hold it, and it goes
+        # on where it was cut: the voice goes on without stuttering
         burst = np.full(SAMPLE_RATE * 3 // 10, 0.8)
         gap = np.zeros(SAMPLE_RATE * 9 // 10)
         recording = np.concatenate([np.zeros(SAMPLE_RATE)] + [burst, gap] * 5 + [np.zeros(SAMPLE_RATE * 2)])
@@ -388,7 +410,12 @@ class TestOverTheVoice:
             monkeypatch, recording, answered_after=frames(8.0), cancelling=True
         )
         assert path is None and spoke == []
-        assert (voice.holds, voice.releases) == (1, 1)
+        assert (voice.holds, voice.releases, voice.rewound) == (1, 1, [False])
+        # A canceller that can tell holds it not even once
+        echo = Weighed(lambda t: (2.0, 1.0) if np.abs(_at(recording, t)).max() > 0.2 else (-20.0, -40.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(8.0), echo=echo)
+        assert path is None and spoke == []
+        assert (voice.holds, voice.releases) == (0, 0)
 
     def test_after_two_holds_for_echo_the_voice_is_not_held_again(self, monkeypatch):
         # Echo that stops once the voice is held: a short burst holds it,
@@ -445,14 +472,91 @@ class TestOverTheVoice:
         assert (voice.holds, voice.releases, spoke) == (1, 1, [True])
         assert len(turn) / SAMPLE_RATE > 2.0
 
-    def test_the_echo_dies_away_and_the_voice_goes_on(self, monkeypatch):
-        # A quarter second of echo, sure to be speech, gone once the voice is held
+    def test_the_echo_dies_away_and_the_voice_goes_on_where_it_was_cut(self, monkeypatch):
+        # A quarter second of sound sure to be speech, gone once the voice is
+        # held, from a canceller that cannot tell how loud the echo is: held
+        # for nothing, the voice goes on exactly where it was cut
         recording = np.concatenate(
             [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE // 4, 0.3), np.zeros(SAMPLE_RATE * 2)]
         )
         path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(2.5))
         assert path is None
         assert (voice.holds, voice.releases, spoke) == (1, 1, [])
+        assert voice.rewound == [False]
+
+    def test_a_back_channel_lets_the_voice_go_on_a_little_before_the_cut(self, monkeypatch):
+        # Speech that goes on a little into the hold, too little for a turn:
+        # the user spoke over the voice, and hears the cut word again
+        recording = np.concatenate(
+            [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 45 // 100, 0.3), np.zeros(SAMPLE_RATE * 2)]
+        )
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(2.5))
+        assert path is None
+        assert (voice.holds, voice.releases, spoke) == (1, 1, [])
+        assert voice.rewound == [True]
+
+    def test_the_voices_own_echo_is_not_held(self, monkeypatch):
+        # The start of a reply: the canceller finds the voice again and lets
+        # it through, sure to be speech for half a second at a time, about as
+        # loud as the voice's echo. The voice speaks on without a hold
+        burst = np.full(SAMPLE_RATE // 2, 0.8)
+        gap = np.zeros(SAMPLE_RATE * 7 // 10)
+        recording = np.concatenate([np.zeros(SAMPLE_RATE)] + [burst, gap] * 4 + [np.zeros(SAMPLE_RATE * 2)])
+        echo = Weighed(lambda t: (3.0, 1.5) if np.abs(_at(recording, t)).max() > 0.2 else (-20.0, -40.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(6.5), echo=echo)
+        assert path is None and spoke == []
+        assert (voice.holds, voice.releases) == (0, 0)
+
+    def test_what_the_canceller_leaves_of_the_voice_holds_nothing(self, monkeypatch):
+        # Faint, far below the echo: the VAD is sure of it all the same
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.3), np.zeros(SAMPLE_RATE * 2)])
+        echo = Weighed(lambda t: (-2.0, -25.0) if np.abs(_at(recording, t)).max() > 0.2 else (-20.0, -40.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(4.5), echo=echo)
+        assert path is None and spoke == []
+        assert (voice.holds, voice.releases) == (0, 0)
+
+    def test_a_user_who_stands_out_above_the_echo_holds_the_voice_at_once(self, monkeypatch):
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.3), np.zeros(SAMPLE_RATE * 4)])
+        echo = Weighed(lambda t: (14.0, 13.0) if np.abs(_at(recording, t)).max() > 0.2 else (-20.0, -40.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, echo=echo)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+        assert voice.held_in[0] - frames(1.0) <= frames(HOLD_TRIGGER) + 1
+
+    def test_after_a_hold_for_echo_near_its_level_such_speech_needs_longer_in_later_replies(self, monkeypatch):
+        # Echo let through for 0.7 s holds the voice once; in the next reply
+        # the same does not, until a hold hears the user
+        def burst(seconds):
+            recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(int(SAMPLE_RATE * seconds), 0.8),
+                                        np.zeros(SAMPLE_RATE * 2)])
+            echo = Weighed(lambda t: (3.0, 1.5) if np.abs(_at(recording, t)).max() > 0.2 else (-20.0, -40.0))
+            return recording, echo
+
+        recorder = AudioRecorder(turn_end=Verdict(0.9))
+        recording, echo = burst(0.7)
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(3.5), echo=echo,
+                                          recorder=recorder)
+        assert path is None and (voice.holds, voice.releases, voice.rewound) == (1, 1, [False])
+        assert recorder.near_echo_needs == HOLD_TRIGGER_AFTER_ECHO
+        recording, echo = burst(0.8)
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(3.5), echo=echo,
+                                          recorder=recorder)
+        assert path is None and (voice.holds, voice.releases) == (0, 0)
+        # The user speaks on, about as loud as the echo: held once they have
+        # gone on longer, and the bar is back where it was
+        recording, echo = burst(2.5)
+        path, voice, spoke = self._listen(monkeypatch, recording, echo=echo, recorder=recorder)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+        assert recorder.near_echo_needs == HOLD_TRIGGER_NEAR_ECHO
+
+    def test_a_user_as_loud_as_the_echo_holds_the_voice_once_they_go_on(self, monkeypatch):
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.3), np.zeros(SAMPLE_RATE * 4)])
+        echo = Weighed(lambda t: (3.0, 2.0) if np.abs(_at(recording, t)).max() > 0.2 else (-20.0, -40.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, echo=echo)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+        assert abs(voice.held_in[0] - frames(1.0) - frames(HOLD_TRIGGER_NEAR_ECHO)) <= 1
 
     def test_not_listened_to_until_the_canceller_has_learned_the_room(self, monkeypatch):
         recording = np.concatenate(
@@ -465,9 +569,16 @@ class TestOverTheVoice:
         assert (voice.holds, voice.releases, spoke) == (0, 0, [])
 
 
+def _at(recording, t):
+    """The frame of the recording t seconds into it."""
+    i = max(0, int(t * SAMPLE_RATE))
+    return recording[i : i + FRAME] if i < len(recording) else np.zeros(1)
+
+
 class PassThrough:
-    """An echo canceller with nothing to cancel; cancelling says whether it
-    measurably takes the voice out (None: it does not say)."""
+    """An echo canceller with nothing to cancel, that cannot tell how loud
+    the voice's echo is; cancelling says whether it measurably takes the
+    voice out (None: it does not say)."""
 
     def __init__(self, settled=False, cancelling=None):
         self.settled = settled
@@ -476,3 +587,23 @@ class PassThrough:
 
     def clean(self, audio, captured):
         return audio
+
+
+class Weighed(PassThrough):
+    """A settled canceller that tells how loud what was heard is against the
+    voice's echo: levels(t) gives (heard, left) in dB at t seconds into the
+    recording."""
+
+    def __init__(self, levels):
+        super().__init__(settled=True, cancelling=True)
+        self.levels = levels
+        self._first = None
+
+    def clean(self, audio, captured):
+        if self._first is None:
+            self._first = captured
+        return audio
+
+    def against_echo(self, start, end):
+        heard, left = self.levels((end - FRAME / SAMPLE_RATE) - self._first)
+        return EchoLevels(heard, left)

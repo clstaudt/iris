@@ -106,6 +106,11 @@ class PluginContext:
 
     #: Long-term memory, when it is on
     memory: Optional[MemoryStore] = None
+    #: The thread the conversation is in, whose memory the conversation
+    #: draws on; None for a new one, which remembers nothing yet
+    thread: Callable[[], Optional[int]] = lambda: None
+    #: Whether memory is switched on now; off, its tools are not offered
+    remember: Callable[[], bool] = lambda: True
     #: Ends the conversation: once the reply being given has been spoken,
     #: Iris goes to sleep as its sleep word puts it. None where there is no
     #: conversation to end

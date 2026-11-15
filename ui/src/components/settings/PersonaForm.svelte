@@ -145,9 +145,8 @@
       if (failed) {
         error = failed;
       } else {
+        // A new persona is edited from here on (savePersona opens it)
         saved = editable(draft);
-        // A new persona is now the current one; edit it from here on
-        if (isNew) store.editingPersona = store.persona;
       }
     } catch (err) {
       error = String(err);
@@ -163,6 +162,16 @@
       return;
     }
     await load(draft.id!);
+  }
+
+  async function exportFile() {
+    if (!draft?.id) return;
+    error = "";
+    try {
+      error = (await store.exportPersona(draft.id, draft.name)) ?? "";
+    } catch (err) {
+      error = String(err);
+    }
   }
 
   async function remove() {
@@ -199,7 +208,7 @@
         <button
           class="s-btn"
           disabled={changed}
-          onclick={() => store.setPersona(draft!.id!)}
+          onclick={() => store.newThread(draft!.id!, { choose: false })}
         >
           Talk to {draft.name}
         </button>
@@ -346,17 +355,20 @@
     </div>
 
     <div class="flex items-center justify-between gap-2 border-t border-line pt-4">
-      <div class="min-w-0">
+      <div class="flex min-w-0 gap-1.5">
         {#if error}
           <p class="s-status error truncate" title={error}>{error}</p>
-        {:else if draft.id && (!draft.shipped || draft.edited)}
-          <button class="s-btn danger" onclick={remove} onblur={() => (confirmDelete = false)}>
-            {#if draft.shipped}
-              {confirmDelete ? "Confirm reset" : "Reset"}
-            {:else}
-              {confirmDelete ? "Confirm delete" : "Delete"}
-            {/if}
-          </button>
+        {:else if draft.id}
+          {#if !draft.shipped || draft.edited}
+            <button class="s-btn danger" onclick={remove} onblur={() => (confirmDelete = false)}>
+              {#if draft.shipped}
+                {confirmDelete ? "Confirm reset" : "Reset"}
+              {:else}
+                {confirmDelete ? "Confirm delete" : "Delete"}
+              {/if}
+            </button>
+          {/if}
+          <button class="s-btn" disabled={changed} onclick={exportFile}>Export</button>
         {/if}
       </div>
       <div class="flex shrink-0 gap-1.5">

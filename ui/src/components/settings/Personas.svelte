@@ -12,6 +12,17 @@
   });
 
   const name = (id: string) => store.personaNames[id] ?? id;
+
+  let importError = $state("");
+
+  async function importFile() {
+    importError = "";
+    try {
+      importError = (await store.importPersona()) ?? "";
+    } catch (err) {
+      importError = String(err);
+    }
+  }
 </script>
 
 <div class="grid max-w-[980px] grid-cols-[200px_minmax(0,1fr)] items-start gap-6">
@@ -36,6 +47,13 @@
       <Icon name="plus" size={13} />
       New persona
     </button>
+    <button onclick={importFile} class="s-btn">
+      <Icon name="download" size={13} />
+      Import
+    </button>
+    {#if importError}
+      <p class="s-status error" role="alert">{importError}</p>
+    {/if}
   </div>
 
   {#key store.editingPersona}

@@ -5,6 +5,13 @@
   let openId = $state<number | null>(null);
   let detail = $state<MemoryTopicDetail | null>(null);
 
+  // Another thread: its own topics, none of them open
+  $effect(() => {
+    void store.openThread;
+    openId = null;
+    detail = null;
+  });
+
   function relativeDay(ts: number): string {
     const days = Math.floor((Date.now() / 1000 - ts) / 86400);
     if (days <= 0) return "today";
@@ -32,9 +39,15 @@
 
 <aside
   class="flex w-[340px] shrink-0 flex-col overflow-hidden rounded-[14px] border border-line bg-panel"
+  aria-label="Memory"
 >
   <div class="flex h-12 shrink-0 items-center justify-between pl-5 pr-2.5">
-    <h2 class="text-[13px] font-semibold text-ink">Memory</h2>
+    <h2 class="flex min-w-0 items-baseline gap-2 text-[13px] font-semibold text-ink">
+      Memory
+      <span class="truncate text-[12px] font-normal text-ink-3"
+        >{store.thread?.title || "New thread"}</span
+      >
+    </h2>
     <button
       onclick={() => (store.panel = null)}
       class="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-hover hover:text-ink"

@@ -4,8 +4,11 @@
   import Composer from "./components/Composer.svelte";
   import Icon from "./components/Icon.svelte";
   import Memory from "./components/Memory.svelte";
+  import NewThread from "./components/NewThread.svelte";
   import SettingsWindow from "./components/settings/SettingsWindow.svelte";
   import StatusZone from "./components/StatusZone.svelte";
+  import SwitchConfirm from "./components/SwitchConfirm.svelte";
+  import Threads from "./components/Threads.svelte";
   import Transcript from "./components/Transcript.svelte";
   import Walkthrough from "./components/walkthrough/Walkthrough.svelte";
   import { connectConversation } from "./lib/orb.svelte";
@@ -16,11 +19,25 @@
     // Presence is a window of its own; this one hands it the orb
     return connectConversation();
   });
+
+  // The window's own buttons sit at the top left on macOS
+  const mac = window.iris?.platform === "darwin";
 </script>
 
 <main class="flex h-screen flex-col bg-frame text-ink">
   <!-- Drag region for the hidden-inset title bar -->
   <header class="drag-region relative flex h-11 shrink-0 items-center justify-center">
+    <button
+      onclick={() => store.toggleSidebar()}
+      class="no-drag absolute flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-hover hover:text-ink {mac
+        ? 'left-[84px]'
+        : 'left-3'} {store.sidebar ? 'bg-hover text-ink' : 'text-ink-3'} {store.needsSetup
+        ? 'hidden'
+        : ''}"
+      title="Threads"
+    >
+      <Icon name="panel" size={15} />
+    </button>
     <span class="text-[13px] font-medium tracking-[0.08em] text-ink-3">iris</span>
     <div class="no-drag absolute right-3 flex items-center gap-1 {store.needsSetup ? 'hidden' : ''}">
       <button
@@ -60,20 +77,40 @@
       </div>
     {:else}
       <div class="flex min-h-0 gap-2 px-2 pb-2" in:fade={{ duration: 600, delay: 400 }}>
+        {#if store.sidebar && !store.settingsPage}
+          <Threads />
+        {/if}
+        <!-- Memory beside the threads, left of the conversation -->
+        {#if store.panel === "memory" && !store.settingsPage}
+          <Memory />
+        {/if}
         <!-- The settings window covers the conversation without unmounting it -->
         <section
           class="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-line bg-panel {store.settingsPage
             ? 'hidden'
             : ''}"
         >
-          <Transcript />
+          <!-- Who the thread is with -->
+          <div class="flex h-10 shrink-0 items-center px-4">
+            {#if !store.choosing && store.config}
+              <span class="thread-label text-[13px] text-ink-2"
+                >{store.config.persona}{#if store.config.role_name}<span class="text-ink-3"
+                    >&nbsp;· {store.config.role_name}</span
+                  >{/if}</span
+              >
+            {/if}
+          </div>
+          {#if store.choosing}
+            <NewThread />
+          {:else}
+            <Transcript />
+          {/if}
           <Composer />
           <StatusZone />
+          <SwitchConfirm />
         </section>
         {#if store.settingsPage}
           <SettingsWindow />
-        {:else if store.panel === "memory"}
-          <Memory />
         {/if}
       </div>
     {/if}

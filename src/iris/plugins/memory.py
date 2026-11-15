@@ -1,11 +1,15 @@
-"""Memory: Iris recalls earlier conversations by topic and searches them.
+"""Memory: Iris recalls what was said in the thread by topic and searches it.
 
-The topic index in the system prompt tells the model what it remembers;
-these tools are how it fetches the details. They come with long-term memory
-and cannot be switched off on their own.
+The topic index in the system prompt tells the model what it remembers of
+the thread; these tools are how it fetches the details, from that thread
+only. They come with long-term memory and cannot be switched off on their
+own.
 """
 
-from iris.memory import RECALL_TOKENS, MemoryStore, estimate_tokens, relative_day
+from collections.abc import Callable
+from typing import Optional
+
+from iris.memory import RECALL_TOKENS, MemoryStore, Topic, estimate_tokens, relative_day
 from iris.plugin import Plugin, PluginContext, Tool
 
 
@@ -17,13 +21,19 @@ def _topic_id(value) -> int:
 
 
 class Recall:
-    """The memory tools over one store."""
+    """The memory tools over one store, for the thread the conversation is in."""
 
-    def __init__(self, store: MemoryStore):
+    def __init__(self, store: MemoryStore, thread: Callable[[], Optional[int]]):
         self.store = store
+        self.thread = thread
+
+    def _topic(self, topic_id) -> Optional[Topic]:
+        """One of the thread's topics; a new thread has none."""
+        thread = self.thread()
+        return self.store.topic(_topic_id(topic_id), thread) if thread is not None else None
 
     def recall(self, topic_id=None, **kwargs) -> dict:
-        topic = self.store.topic(_topic_id(topic_id))
+        topic = self._topic(topic_id)
         if topic is None:
             return {"success": False, "message": f"No topic #{topic_id} in memory"}
         # The summary, then as many of the latest exchanges as fit
@@ -48,7 +58,7 @@ class Recall:
         }
 
     def search_memory(self, query: str = "", **kwargs) -> dict:
-        hits = self.store.search(query)
+        hits = self.store.search(self.thread(), query)
         if not hits:
             return {"success": True, "result": f"Nothing in memory matches '{query}'."}
         lines = [
@@ -61,7 +71,7 @@ class Recall:
 
     def topic_title(self, arguments: dict) -> str:
         """The recalled topic's title, for the transcript."""
-        topic = self.store.topic(_topic_id(arguments.get("topic_id")))
+        topic = self._topic(arguments.get("topic_id"))
         return topic.title if topic else ""
 
 
@@ -73,7 +83,7 @@ class Memory(Plugin):
     def tools(self, context: PluginContext) -> list[Tool]:
         if context.memory is None:
             return []
-        memory = Recall(context.memory)
+        memory = Recall(context.memory, context.thread)
         return [
             Tool(
                 name="recall",
@@ -87,6 +97,7 @@ class Memory(Plugin):
                 required=("topic_id",),
                 label="Recalled",
                 detail=memory.topic_title,
+                offered=context.remember,
             ),
             Tool(
                 name="search_memory",
@@ -98,6 +109,7 @@ class Memory(Plugin):
                 parameters={"query": {"type": "string", "description": "Words to look for"}},
                 required=("query",),
                 label="Searched memory",
+                offered=context.remember,
             ),
         ]
 

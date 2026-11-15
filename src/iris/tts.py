@@ -1262,6 +1262,13 @@ class SpeechPipeline:
         language = language or self.current_language
         self.text_queue.put((text, language, self._epoch, sound))
 
+    def queue_audio(self, audio_file: str | Path):
+        """Play an audio file as it is, after what is queued, outside any
+        reply: no voice says it, and no effect is put on it (a sample heard
+        before a voice is cloned of it). The file is removed once played,
+        or once stop() drops it."""
+        self.audio_queue.put((str(audio_file), self._epoch, "", {"audio_filter": ""}))
+
     def begin_reply(self):
         """Start keeping track of what is said of a new reply."""
         with self._status_lock:
@@ -1293,9 +1300,10 @@ class SpeechPipeline:
         """Hold speech mid-sentence; queued text keeps being synthesized."""
         self.player.pause()
 
-    def resume(self):
-        """Continue speech from where pause() held it."""
-        self.player.resume()
+    def resume(self, rewind: bool = True):
+        """Continue speech from where pause() held it: a little before it
+        (rewind), or exactly there (see AudioPlayer.resume)."""
+        self.player.resume(rewind)
 
     def stop(self):
         """Stop the speech pipeline immediately: what plays, what waits, and
