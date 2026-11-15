@@ -1,8 +1,9 @@
-"""Unit tests for the soft tone Iris sounds now and then while a reply is
+"""Unit tests for the low ping Iris sounds now and then while a reply is
 long in coming: none for a reply that comes quickly, the first after a few
 seconds of silence, then one every few seconds, never over the voice, none
 once the reply is stopped or Iris goes to sleep, and none the microphone
-takes for the user.
+takes for the user: the echo canceller is told of it once it has learned
+the room, and not before.
 
 Silent: the clock is the test's, moved on by it, and the speaker a stand-in
 that notes what it is given; the model is scripted.
@@ -10,6 +11,7 @@ that notes what it is given; the model is scripted.
 
 import functools
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -20,26 +22,31 @@ import pytest
 from iris import assistant as assistant_module
 from iris import audio as audio_module
 from iris.assistant import (
+    THINKING_PING_LEVEL,
     THINKING_TONE_AFTER,
     THINKING_TONE_EVERY,
     ThinkingTones,
     VoiceAssistant,
     _sleep_chime,
-    _thinking_tone,
+    _thinking_ping,
     _thread_chime,
     _wake_chime,
 )
 from iris.audio import AudioRecorder
 from iris.controller import AssistantController
+from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus
 from iris.llm import ConversationManager
 from iris.plugin import PluginContext
 from iris.tools import Tools
 from iris.tts import SpeechPipeline
-from iris.turns import FRAME, SAMPLE_RATE
+from iris.turns import FRAME, SAMPLE_RATE, SpeechDetector, TurnTracker
 from irisdev.voicetest.acoustics import in_room, room, to_rate
+from tests.unit.test_echo import _voice
 from tests.unit.test_sleep_tool import HeldPlayer, InstantGenerator, Status, _wait
-from tests.unit.test_turn_taking import FakeStream, PassThrough, Verdict, _turn_file
+from tests.unit.test_turn_taking import FakeStream, Verdict, _turn_file
+
+needs_canceller = pytest.mark.skipif(not HAS_ECHO_CANCELLATION, reason="no echo canceller here")
 
 
 class Clock:
@@ -121,7 +128,7 @@ def test_no_tone_while_one_may_not_sound_nor_once_stopped():
     assert len(played) == 1
 
 
-# -- the tone ----------------------------------------------------------------------
+# -- the ping ----------------------------------------------------------------------
 
 
 def _loudest(sound: np.ndarray, rate: int = 24000) -> float:
@@ -133,37 +140,155 @@ def _loudest(sound: np.ndarray, rate: int = 24000) -> float:
     )
 
 
-def test_the_tone_is_softer_and_gentler_than_the_chimes():
-    tone = _thinking_tone()
+def test_the_ping_is_low_soft_and_gives_way_to_the_next_without_a_click():
+    ping = _thinking_ping()
+    assert ping is _thinking_ping()  # made once
+    _thinking_ping.cache_clear()
+    assert np.array_equal(ping, _thinking_ping())  # the same every time
+    assert abs(np.abs(ping).max() - THINKING_PING_LEVEL) < 1e-6
     for chime in (_wake_chime(), _sleep_chime(), _thread_chime()):
-        assert np.abs(tone).max() <= np.abs(chime).max() / 2.5
-        assert _loudest(tone) <= _loudest(chime) / 2
-    # It swells in and dies away, with no edge to click
-    assert tone[0] == 0.0 and np.abs(tone[-240:]).max() < 0.001
-    assert np.abs(np.diff(tone)).max() < 0.02
-    # One low tone: next to nothing of it above 1 kHz
-    power = np.abs(np.fft.rfft(tone)) ** 2
-    frequencies = np.fft.rfftfreq(len(tone), 1 / 24000)
+        assert np.abs(ping).max() <= np.abs(chime).max() / 4
+        assert _loudest(ping) <= _loudest(chime) / 3
+    # It swells in, with no edge to click
+    assert abs(ping[0]) < 1e-9 and np.abs(np.diff(ping)).max() < 0.002
+    # It ends faded out just before the next one is due
+    assert THINKING_TONE_EVERY - 0.2 < len(ping) / 24000 < THINKING_TONE_EVERY
+    assert np.abs(ping[-24:]).max() < 1e-4
+    # Low and round: next to nothing of it above 1 kHz
+    power = np.abs(np.fft.rfft(ping)) ** 2
+    frequencies = np.fft.rfftfreq(len(ping), 1 / 24000)
     assert power[frequencies > 1000].sum() < 1e-4 * power.sum()
 
 
-@pytest.mark.parametrize("canceller", [False, True], ids=["alone", "through the echo canceller"])
-def test_the_microphone_does_not_take_the_tone_for_the_user(monkeypatch, canceller):
+def test_the_voice_cuts_its_tail_low():
+    """The voice starting cuts the ping wherever it is: at most at its
+    peak, 30 dB under the voice's (0.85), and a few seconds in, far lower."""
+    ping = _thinking_ping()
+    assert np.abs(ping).max() <= 0.85 * 10 ** (-30 / 20)
+    assert np.abs(ping[3 * 24000 :]).max() < 0.25 * THINKING_PING_LEVEL
+
+
+def _turns(x: np.ndarray) -> int:
+    """How many turns Iris's turn tracker, with Silero VAD, starts on this
+    16 kHz audio: listening starts afresh after each, as on_speech would."""
+    detector = SpeechDetector()
+    tracker, turns = TurnTracker(detector, None, 3.5), 0
+    for i in range(0, len(x) - FRAME + 1, FRAME):
+        tracker.feed(x[i : i + FRAME])
+        if tracker.started:
+            turns += 1
+            detector.reset()
+            tracker = TurnTracker(detector, None, 3.5)
+    return turns
+
+
+class Room:
+    """A room with Iris's speaker and microphone in it: what is played into
+    it is heard back on demand. The speaker plays one clip at a time, the
+    microphone hears it through the room 60 ms later, over a noise floor,
+    and the echo canceller cleans what it hears."""
+
+    def __init__(self, echo: EchoCanceller):
+        self.echo = echo
+        self.start = time.monotonic()
+        self.clips: list[tuple[int, np.ndarray, int]] = []  # (from, clip, rate)
+        self.heard_to = 0  # samples heard and cleaned so far
+        self.response = room(0.4, 9.0)
+        self.noise = np.random.default_rng(7)
+
+    def play(self, audio, sample_rate, **options) -> float:
+        """The speaker, as the assistant plays on it: the clip is heard from
+        where the microphone has got to, and that moment is told back as its
+        latency."""
+        self.clips.append((self.heard_to, np.asarray(audio), sample_rate))
+        return self.start + self.heard_to / SAMPLE_RATE - time.monotonic()
+
+    def say(self, voice: np.ndarray):
+        """The voice (16 kHz), told to the canceller as the player tells it."""
+        started = time.monotonic()
+        self.echo.played(started + self.play(voice, SAMPLE_RATE), voice, SAMPLE_RATE)
+
+    def _speaker(self, until: int) -> np.ndarray:
+        speaker = np.zeros(until, dtype=np.float32)
+        for begin, clip, rate in self.clips:
+            clip = to_rate(clip, rate)[: max(0, until - begin)]
+            speaker[begin:] = 0.0  # a new clip ends the one before
+            speaker[begin : begin + len(clip)] = clip
+        return speaker
+
+    def listen(self, seconds: float) -> tuple[np.ndarray, np.ndarray]:
+        """The next seconds the microphone hears: (what it heard, what the
+        canceller left of it)."""
+        a = self.heard_to
+        b = a + int(seconds * SAMPLE_RATE) // 480 * 480
+        delayed = np.concatenate([np.zeros(960, dtype=np.float32), self._speaker(b)])[:b]
+        heard = in_room(delayed, self.response)[a:b]
+        heard = (heard + self.noise.standard_normal(len(heard)) * 0.0005).astype(np.float32)
+        cleaned = np.concatenate([
+            self.echo.clean(heard[i : i + 480], self.start + (a + i) / SAMPLE_RATE)
+            for i in range(0, len(heard), 480)
+        ])
+        self.heard_to = b
+        return heard, cleaned
+
+
+def _energy(x: np.ndarray) -> float:
+    return float(np.mean(x**2))
+
+
+@needs_canceller
+def test_the_canceller_is_told_of_the_ping_once_it_has_learned_the_room():
+    """Told of the ping before it has found the voice's way to the
+    microphone, the canceller lets more of it through, and more like speech,
+    than untold: so it is told of it only once it has heard enough of the
+    voice. Either way the speech detector hears nobody in it."""
+    a = object.__new__(VoiceAssistant)
+    a.echo = EchoCanceller()
+    listening = Room(a.echo)
+    a.player = SimpleNamespace(audio=listening)
+    listening.listen(1.0)
+
+    # Fresh: the ping is not told
+    a._play_thinking_ping()
+    assert not a.echo._played
+    heard, cleaned = listening.listen(THINKING_TONE_EVERY)
+    assert _turns(heard) == 0 and _turns(cleaned) == 0
+
+    # Once it has heard the voice for a while (this one is voiced half the
+    # time), it is told, and takes it out
+    listening.say(_voice(24.0))
+    listening.listen(25.0)
+    assert a.echo.learned
+    a._play_thinking_ping()
+    assert abs(len(a.echo._played[-1][1]) - len(_thinking_ping()) * 2 / 3) <= 1
+    heard, cleaned = listening.listen(THINKING_TONE_EVERY)
+    assert _turns(cleaned) == 0
+    assert _energy(cleaned) < _energy(heard) / 10
+
+
+@pytest.mark.parametrize("canceller", [
+    pytest.param(False, id="alone"),
+    pytest.param(True, id="through an echo canceller not told of it", marks=needs_canceller),
+])
+def test_the_microphone_does_not_take_the_ping_for_the_user(monkeypatch, canceller):
     """While the model thinks, the microphone listens on for the user going
-    on (AudioRecorder.listen_on), with Silero VAD as Iris runs it: the tones
-    it hears through the room, as loud as they are played and louder, start
-    no turn and interrupt nothing."""
-    tone = to_rate(_thinking_tone(), 24000)
-    pause = np.zeros(SAMPLE_RATE, dtype=np.float32)
-    heard = [pause]
+    on (AudioRecorder.listen_on), with Silero VAD as Iris runs it: a ping
+    every few seconds, heard through the room as loud as it is played,
+    quieter and louder, starts no turn and interrupts nothing, on the
+    microphone alone and through an echo canceller that has not learned
+    the room yet."""
+    ping = to_rate(_thinking_ping(), 24000)
+    speaker = [np.zeros(SAMPLE_RATE, dtype=np.float32)]
     for gain in (0.3, 1.0, 3.0):
-        heard += [in_room(tone * gain, room(0.4, 9.0)), pause]
-    recording = np.concatenate(heard)
+        clip = np.zeros(int(THINKING_TONE_EVERY * SAMPLE_RATE), dtype=np.float32)
+        clip[: len(ping)] = ping * gain
+        speaker.append(clip)
+    speaker = np.concatenate(speaker)
+    recording = in_room(speaker, room(0.4, 9.0))[: len(speaker)]
     noise = np.random.default_rng(7).standard_normal(len(recording)).astype(np.float32)
     monkeypatch.setattr(FakeStream, "recording", recording + 0.0005 * noise)
     monkeypatch.setattr(audio_module.sd, "InputStream", FakeStream)
-    echo = PassThrough(settled=True) if canceller else None
-    recorder = AudioRecorder(turn_end=Verdict(0.9), echo=echo)
+    recorder = AudioRecorder(turn_end=Verdict(0.9), echo=EchoCanceller() if canceller else None)
     looks = [0]
 
     def all_heard() -> bool:
@@ -187,7 +312,7 @@ def test_the_microphone_does_not_take_the_tone_for_the_user(monkeypatch, cancell
 
 
 class Speaker:
-    """The speaker as the chimes and tones reach it: what it was given, and
+    """The speaker as the chimes and pings reach it: what it was given, and
     how often it was stopped."""
 
     def __init__(self):
@@ -280,7 +405,7 @@ def _assistant(*parts, wake_word=None) -> VoiceAssistant:
     [lambda a: a.interrupt_event.set(), lambda a: a.stop_event.set()],
     ids=["the reply stopped", "Iris shutting down"],
 )
-def test_no_tone_may_sound_once_stopped(stop):
+def test_no_ping_may_sound_once_stopped(stop):
     a = _assistant()
     assert a._may_think_aloud()
     stop(a)
@@ -330,7 +455,7 @@ def test_a_long_wait_has_tones_that_never_sound_over_the_voice(answering):
     tones = a.player.audio.played
     clock.advance(THINKING_TONE_AFTER)
     assert _wait(lambda: len(tones) == 1)  # the first after a few seconds
-    assert np.array_equal(tones[0], _thinking_tone())
+    assert np.array_equal(tones[0], _thinking_ping())
     clock.advance(THINKING_TONE_EVERY)
     assert _wait(lambda: len(tones) == 2)  # and again while the wait goes on
 
