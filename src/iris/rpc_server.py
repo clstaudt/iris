@@ -313,6 +313,11 @@ def main(extra: dict | None = None):
         "persona.save": lambda params: controller.persona_save(params),
         "persona.delete": lambda params: controller.persona_delete(params.get("id", "")),
         "persona.preview": lambda params: controller.persona_preview(params),
+        # A persona to a file of its own, and from one (iris.persona_files)
+        "persona.export": lambda params: controller.persona_export(
+            params.get("id", ""), params.get("path", "")
+        ),
+        "persona.import": lambda params: controller.persona_import(params.get("path", "")),
         # Cloning a voice for a persona (iris.cloning)
         "voice.clone_access": lambda params: controller.cloning.access(),
         "voice.clone_connect": lambda params: controller.cloning.connect(params.get("token", "")),

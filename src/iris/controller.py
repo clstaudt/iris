@@ -12,7 +12,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from iris import cloning, downloads, engines, readiness, servers, speech_models
+from iris import cloning, downloads, engines, persona_files, readiness, servers, speech_models
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AUDIO_FILTERS, AudioPlayer, AudioRecorder, SoundCheck, get_filter
@@ -1659,6 +1659,41 @@ class AssistantController:
             current = persona_id if still_there else "iris"
             self.set_persona(current)
         return {"ok": True, "persona": current, **self.list_personas()}
+
+    def persona_export(self, persona_id: str, path: str) -> dict:
+        """Write a persona, as saved, to a persona file the user chose, with
+        its cloned voice if it speaks with one (iris.persona_files)."""
+        if not path:
+            return {"ok": False, "error": "No file was chosen"}
+        reload_personas()
+        persona = find_persona(persona_id)
+        if persona is None:
+            return {"ok": False, "error": f"Unknown persona: {persona_id}"}
+        try:
+            persona_files.export_persona(persona, Path(path))
+        except persona_files.PersonaFileError as e:
+            return {"ok": False, "error": str(e)}
+        except OSError as e:
+            logger.warning("The persona file could not be written: %s", e)
+            return {"ok": False, "error": f"The file could not be written: {brief(e)}"}
+        return {"ok": True}
+
+    def persona_import(self, path: str) -> dict:
+        """Add the persona of a persona file the user chose, with its cloned
+        voice if it has one, once all of it is checked (iris.persona_files).
+        Its voice is made ready for Iris's languages, as a saved persona's."""
+        if not path:
+            return {"ok": False, "error": "No file was chosen"}
+        try:
+            persona_id = persona_files.import_persona(Path(path))
+        except persona_files.PersonaFileError as e:
+            logger.info("Refused the persona file %s: %s", path, e)
+            return {"ok": False, "error": str(e)}
+        except OSError as e:
+            logger.warning("The persona file could not be imported: %s", e)
+            return {"ok": False, "error": f"The file could not be imported: {brief(e)}"}
+        self._ready_personas(readiness.VOICES, {persona_id})
+        return {"ok": True, "id": persona_id, **self.list_personas()}
 
     # ------------------------------------------------------------------
     # Iris's languages, and the voices made ready for them

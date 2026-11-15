@@ -266,7 +266,15 @@ def save_persona(settings: dict, persona_id: Optional[str] = None) -> str:
                 persona_id, n = f"{base}-{n}", n + 1
         path = USER_DIR / f"{persona_id}.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        f.write(dump(file_data(settings)))
 
+    reload_personas()
+    return path.stem.lower()
+
+
+def file_data(settings: dict) -> dict:
+    """A persona's settings as its file holds them."""
     data = {
         "name": settings["name"].strip(),
         "engine": settings["engine"],
@@ -284,11 +292,32 @@ def save_persona(settings: dict, persona_id: Optional[str] = None) -> str:
         data["sleep_word"] = sleep_word
     description = settings.get("description", "").strip()
     data["description"] = description + "\n" if description else ""
-    with open(path, "w") as f:
-        yaml.dump(data, f, Dumper=_PersonaDumper, sort_keys=False, allow_unicode=True)
+    return data
 
-    reload_personas()
-    return path.stem.lower()
+
+def dump(data: dict) -> str:
+    """Persona settings as YAML, the way the persona files are written."""
+    return yaml.dump(data, Dumper=_PersonaDumper, sort_keys=False, allow_unicode=True)
+
+
+def unused_name(name: str) -> str:
+    """A name for a persona added under this one (imported from a file):
+    the name itself, unless another persona has it or the file it would be
+    kept in, then with a number, as "Noam 2"."""
+    taken = {persona.name.casefold() for persona in PERSONAS.values()}
+
+    def free(candidate: str) -> bool:
+        persona_id = slug(candidate)
+        return (
+            candidate.casefold() not in taken
+            and persona_id not in PERSONAS
+            and not (USER_DIR / f"{persona_id}.yaml").exists()
+        )
+
+    candidate, n = name, 2
+    while not free(candidate):
+        candidate, n = f"{name} {n}", n + 1
+    return candidate
 
 
 def delete_persona(persona_id: str) -> bool:
