@@ -861,6 +861,23 @@ try {
     check((await settings()).wake_on === true, "the switch is not kept");
   });
 
+  await step("wake word: asleep, the status line names the wake word", async () => {
+    await toConversation();
+    // A word switched on starts Iris asleep
+    await rpc("wake.set", { on: false });
+    await rpc("wake.set", { on: true });
+    await rpc("mic.set", { on: true });
+    await until("Iris asleep", () => rpc("app.info").then((info) => info.state === "dormant"), 15_000);
+    const hint = page.locator("[data-wake-hint]");
+    const shown = () => hint.evaluate((el) => getComputedStyle(el).opacity === "1");
+    await until("the hint", async () => (await hint.count()) > 0 && (await shown()), 5000);
+    const text = (await hint.innerText()).trim();
+    check(text === `Say "${WAKE_WORD}" to wake`, `the hint says ${text}`);
+    await page.screenshot({ path: path.join(OUT, "wake-hint.png") });
+    await rpc("mic.set", { on: false });
+    await until("the hint to go with the microphone", async () => (await hint.count()) === 0, 5000);
+  });
+
   await step("voice: the persona's voice plays", async () => {
     await openStage("Voice");
     const since = Date.now();
