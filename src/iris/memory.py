@@ -27,6 +27,7 @@ A filing step that read the turns before writes nothing afterwards.
 """
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -39,6 +40,8 @@ from typing import Optional
 import ollama
 
 from iris.llm_client import MODEL_TIMEOUT, OpenAIClient, is_openai
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PATH = Path.home() / ".iris" / "memory.db"
 
@@ -359,7 +362,8 @@ class MemoryStore:
 # -- filing ------------------------------------------------------------------
 
 # chat(messages, schema, abort) -> parsed JSON object; raises FilingInterruptedError
-# when abort() turns true while the call runs
+# when abort() turns true while the call runs, ValueError when the model gives
+# no usable JSON even when asked again
 ChatFn = Callable[..., dict]
 
 
@@ -388,6 +392,8 @@ class Filer:
     it completes, so the next run picks up exactly where this one stopped.
     Once everything is forgotten, filing stops too, a call underway is cut
     off, and nothing it read is written back (see MemoryStore.generation).
+    One the model gives no usable answer for is left to the next run, and
+    the others go on.
     """
 
     def __init__(self, store: MemoryStore, chat: ChatFn):
@@ -422,8 +428,15 @@ class Filer:
         for exchange in self.store.unfiled_exchanges():
             if should_yield():
                 return
-            decision = self._decide(exchange, before)
-            before = exchange.text
+            said_before, before = before, exchange.text
+            try:
+                decision = self._decide(exchange, said_before)
+            except ValueError as e:
+                # No usable answer, even when asked again: the exchange stays
+                # unfiled for a later quiet spell, and the next one goes on
+                first = exchange.turn_ids[0]
+                logger.warning("Memory filing left the exchange of turn %d for later: %s", first, e)
+                continue
             topic_id = None
             if decision.get("remember"):
                 topic_id = decision.get("topic_id") or 0
@@ -437,7 +450,11 @@ class Filer:
         for topic_id, exchanges in self.store.pending_summaries().items():
             if should_yield():
                 return
-            self._summarize(topic_id, exchanges)
+            try:
+                self._summarize(topic_id, exchanges)
+            except ValueError as e:
+                logger.warning("Memory filing left topic #%s's summary for later: %s", topic_id, e)
+                continue
             self.store.mark_summarized([t for e in exchanges for t in e.turn_ids], generation)
             self._changed = True
 
@@ -529,7 +546,7 @@ class MemoryKeeper:
                 self.on_change()
         except Exception as e:
             # Nothing is lost: what was not filed is filed in a later quiet spell
-            print(f"[memory] filing failed: {e}")
+            logger.warning("Memory filing failed: %s", e)
         finally:
             self._filing.release()
 
@@ -657,6 +674,6 @@ def chat_json(get_host: Callable[[], Optional[str]], get_model: Callable[[], str
                 {"role": "assistant", "content": reply},
                 {"role": "user", "content": "Reply with only the JSON object, nothing else."},
             ]
-        raise ValueError(f"{model} gave no usable JSON: {reply[:120]!r}")
+        raise ValueError(f"{model} gave no usable JSON, asked twice: {reply[:120]!r}")
 
     return chat

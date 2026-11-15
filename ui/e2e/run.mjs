@@ -68,6 +68,8 @@ const python =
 
 /** Every event the core pushed, and the bridge told, in order. */
 const events = [];
+/** Every line the core logged, in order. */
+const logged = [];
 let pushEvent = () => {};
 let bridge;
 
@@ -88,7 +90,10 @@ function startCore(log) {
     },
     { command: python, args: ["-m", "irisdev.e2e_core"] }
   );
-  bridge.onLog = (line) => coreLog.write(line + "\n");
+  bridge.onLog = (line) => {
+    coreLog.write(line + "\n");
+    logged.push({ line, at: Date.now() });
+  };
   bridge.onEvent = (type, data) => {
     events.push({ type, data, at: Date.now() });
     pushEvent(type, data);
@@ -1399,6 +1404,51 @@ try {
     check(!(await page.locator('nav[aria-label="Settings"]').count()), "the settings are still open");
     await page.locator('button[title="Close memory"]').click();
     await page.locator('button[title="Close memory"]').waitFor({ state: "detached", timeout: 5000 });
+  });
+
+  await step("memory: the model files an exchange into a topic in a quiet spell, and the memory panel shows it", async () => {
+    // Worth remembering, in a word no model makes up
+    const word = "Quillwort";
+    const since = await ask(`Please remember this: my neighbour's tortoise is called ${word}.`);
+    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
+    await voiceDone();
+    // Filed with Iris's own requests, which ask the model to answer without
+    // reasoning first: a test core that asks that of every request
+    // (e2e.reasoning) leaves them as Iris makes them meanwhile
+    await rpc("e2e.reasoning", { on: true }).catch(() => {});
+    try {
+      await page.locator('button[title="Memory"]').click();
+      const panel = page.locator("aside", { has: page.locator('button[title="Close memory"]') });
+      // Iris files it as in the app, once the conversation has been quiet
+      // for a while, not when the test asks (e2e.file_memory), and says so
+      // (memory.updated); then the exchange is under a topic, summed up
+      let looked = since;
+      const filed = async () => {
+        if (!events.some((e) => e.at >= looked && e.type === "memory.updated")) return null;
+        looked = Date.now();
+        for (const { id } of (await rpc("memory.topics")).topics) {
+          const topic = await rpc("memory.topic", { id });
+          if (topic.ok && topic.summary && topic.turns.some((turn) => turn.text.includes(word))) return topic;
+        }
+        return null;
+      };
+      const topic = await until("the exchange to be filed", filed, 240_000);
+      // With no call the model gave no usable answer to, which the core
+      // logs as a warning
+      const failed = logged.filter((l) => l.at >= since && /Memory filing (failed|left)/.test(l.line));
+      check(failed.length === 0, `filing failed: ${failed.map((l) => l.line).join(" | ")}`);
+      // The panel, open meanwhile, shows the topic, and in it the exchange
+      const row = panel.locator("button", { hasText: topic.title }).first();
+      await row.waitFor({ timeout: 10_000 });
+      await row.click();
+      await panel.getByText(topic.summary.slice(0, 40)).first().waitFor({ timeout: 5000 });
+      await panel.getByText(word).first().waitFor({ timeout: 5000 });
+      await page.screenshot({ path: path.join(OUT, "memory-filed.png") });
+    } finally {
+      await rpc("e2e.reasoning", { on: false }).catch(() => {});
+    }
+    await toConversation();
   });
 
   await step("memory: Forget everything in the settings asks first, then forgets all that is remembered and the conversation", async () => {
