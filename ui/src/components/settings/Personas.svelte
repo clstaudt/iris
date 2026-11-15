@@ -15,7 +15,7 @@
 </script>
 
 <div class="grid max-w-[980px] grid-cols-[200px_minmax(0,1fr)] items-start gap-6">
-  <div class="flex flex-col gap-1.5">
+  <div class="flex flex-col gap-1.5" data-tour="personas">
     {#each store.personas as id}
       <button
         onclick={() => (store.editingPersona = id)}

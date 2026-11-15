@@ -72,7 +72,7 @@
     aria-label="Threads"
   >
     <div class="flex flex-col items-center gap-1 pb-1.5 pt-2.5">
-      <button onclick={() => store.newThread()} class="new square" title="New thread" aria-label="New thread">
+      <button onclick={() => store.newThread()} class="new square" title="New thread" aria-label="New thread" data-tour="new-thread">
         <Icon name="plus" size={15} />
       </button>
       <button
@@ -116,7 +116,7 @@
   aria-label="Threads"
 >
   <div class="flex gap-1.5 px-2.5 pb-1.5 pt-2.5">
-    <button onclick={() => store.newThread()} class="new">
+    <button onclick={() => store.newThread()} class="new" data-tour="new-thread">
       <Icon name="plus" size={15} />
       New thread
     </button>

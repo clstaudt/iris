@@ -30,6 +30,7 @@
     disabled={store.state === "starting"}
     class="rounded-full"
     title={store.paused ? "Resume the conversation" : "Pause the conversation"}
+    data-tour="orb"
   >
     <Circle size={ORB} />
   </button>
