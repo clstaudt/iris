@@ -85,7 +85,7 @@ INFO_FILE = "voice.yaml"
 LISTED_AS = "Cloned"
 # The voice a persona speaks with once its cloned voice is deleted: Kyutai's
 # default, a new persona's
-FALLBACK_VOICE = "anna"
+FALLBACK_VOICE = "eve"
 
 # Where cloned voices are kept, unless IRIS_VOICES_DIR names another folder
 DEFAULT_DIR = Path.home() / ".iris" / "voices"

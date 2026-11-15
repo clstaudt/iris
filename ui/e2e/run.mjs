@@ -1341,7 +1341,7 @@ try {
   });
 
   // Iris's voice before she is given a cloned one, to give back at the end
-  let shippedVoice = "anna";
+  let shippedVoice = "eve";
 
   await step("voice cloning: Hugging Face is connected, a sample is heard and cloned once confirmed, and Iris speaks in the voice", async () => {
     await openSettings("Personas");
@@ -3256,7 +3256,7 @@ try {
 
   await step("voices: a voice plays from its tile, through the editor's preview, and reaches the speaker", async () => {
     await voicesPage();
-    const voice = (await library()).kyutai.find((v) => !v.cloned && v.id !== "anna" && v.ready.includes(v.languages[0]));
+    const voice = (await library()).kyutai.find((v) => !v.cloned && v.id !== "eve" && v.ready.includes(v.languages[0]));
     check(voice, "no voice of Kyutai is ready");
     const since = Date.now();
     await tile(voice.id).locator(".s-play").click();
@@ -3354,7 +3354,7 @@ try {
     check(!(await cloneOf("Testa")) && !fs.existsSync(folder), "the voice is still there");
   });
 
-  await step("voices: a voice a persona speaks with asks before it is deleted, and the persona speaks with Anna", async () => {
+  await step("voices: a voice a persona speaks with asks before it is deleted, and the persona speaks with Eve", async () => {
     // A voice made of the sample as the cloning steps make one, and Iris
     // speaking with it
     const data = sample.toString("base64");
@@ -3371,14 +3371,14 @@ try {
     await card(voice).locator(".user", { hasText: "Iris" }).waitFor({ timeout: 5000 });
     await card(voice).getByRole("button", { name: "Delete" }).click();
     const guard = card(voice).locator(".guard");
-    await guard.getByText("Iris speaks with this voice, and will speak with Anna.").waitFor({ timeout: 5000 });
+    await guard.getByText("Iris speaks with this voice, and will speak with Eve.").waitFor({ timeout: 5000 });
     await guard.getByRole("button", { name: "Cancel" }).click();
     check(await card(voice).count(), "the voice went without being deleted");
     await card(voice).getByRole("button", { name: "Delete" }).click();
     await card(voice).locator(".guard").getByRole("button", { name: "Delete" }).click();
     await card(voice).waitFor({ state: "detached", timeout: 10_000 });
-    await until("Iris on Anna", () => config().tts_voice === "anna", 15_000);
-    check((await rpc("persona.get", { id: "iris" })).voice === "anna", "Iris was not saved with Anna");
+    await until("Iris on Eve", () => config().tts_voice === "eve", 15_000);
+    check((await rpc("persona.get", { id: "iris" })).voice === "eve", "Iris was not saved with Eve");
   });
 
   await step("voices: a voice cloned in the persona editor stays, saved or not, until it is deleted here", async () => {
@@ -3415,14 +3415,14 @@ try {
       check((await clones()).some((v) => v.id === voice.id), `${voice.name} is not listed ${when}`);
       check(fs.existsSync(folderOf(voice.id)), `the folder of ${voice.name} is gone ${when}`);
     };
-    check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
+    check(config().tts_voice === "eve", `Iris speaks with ${config().tts_voice}`);
 
     // Cloned, and the editor left without saving
     await editIris();
     const first = await cloneHere("Clone a voice");
     await openSettings();
     await quiet(1000);
-    check((await rpc("persona.get", { id: "iris" })).voice === "anna", "Iris was saved with the voice");
+    check((await rpc("persona.get", { id: "iris" })).voice === "eve", "Iris was saved with the voice");
     await kept(first, "once the editor is left");
     // Opened again, the editor offers it, and so does the Voices page
     await editIris();
@@ -3458,10 +3458,10 @@ try {
     await until(`${second.name} to be offered`, async () => (await offered()).includes(second.name));
     check(!(await offered()).includes(first.name), `the editor still offers ${first.name}`);
 
-    // Iris speaks with Anna again, as the next step has her
-    await pickVoice("Anna").click();
+    // Iris speaks with Eve again, as the next step has her
+    await pickVoice("Eve").click();
     await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
-    await until("Iris on Anna", () => config().tts_voice === "anna", 15_000);
+    await until("Iris on Eve", () => config().tts_voice === "eve", 15_000);
     await toConversation();
   });
 
@@ -3473,11 +3473,11 @@ try {
     try {
       // Italian's model is not here: the stand-in downloads it slowly
       huggingFace({ hidden: ["italian"] });
-      check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
+      check(config().tts_voice === "eve", `Iris speaks with ${config().tts_voice}`);
       const question = "Reply only in Italian, in one short sentence: what is the capital of Italy?";
       const since = await ask(question);
       const done = await replyEvent("chat.done", since);
-      const job = await eventAfter("voice.job", since, (data) => data.voice === "anna" && data.language === "it", 30_000);
+      const job = await eventAfter("voice.job", since, (data) => data.voice === "eve" && data.language === "it", 30_000);
       check(job.data.origin === "conversation", `the download was started by ${job.data.origin}`);
       // The reply is shown at once, and the download in the conversation and
       // under the orb, with its progress, while it goes on
@@ -3491,11 +3491,11 @@ try {
       // Nothing was spoken of the reply meanwhile
       const sounded = events.filter((e) => e.type === "audio.output" && e.data.rms > 0 && e.at >= done.at && e.at <= ready.at);
       check(!sounded.length, `${sounded.length} audible moments while the voice was not ready`);
-      await page.getByText("Anna's voice is ready for Italian").waitFor({ timeout: 5000 });
+      await page.getByText("Eve's voice is ready for Italian").waitFor({ timeout: 5000 });
       // The next reply in Italian is spoken, and reaches the speaker
       const next = await ask(question);
       const timing = await replyEvent("turn.timing", next);
-      check(timing.data.components.voice === "kyutai:anna", `spoken by ${timing.data.components.voice}`);
+      check(timing.data.components.voice === "kyutai:eve", `spoken by ${timing.data.components.voice}`);
       await heard(next);
     } finally {
       await rpc("e2e.reasoning", { on: false });

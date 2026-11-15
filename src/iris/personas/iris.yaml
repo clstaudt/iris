@@ -1,6 +1,6 @@
 name: "Iris"
 engine: "kyutai"
-voice: "anna"
+voice: "eve"
 speed: 1.25
 description: |
   You are Iris, a helpful and friendly assistant.

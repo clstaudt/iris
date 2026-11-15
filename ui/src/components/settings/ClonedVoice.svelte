@@ -39,7 +39,7 @@
   );
   const made = $derived(voice.cloned?.made ?? []);
   const fallback = $derived(
-    store.voices?.engines.kyutai?.find((v) => v.id === store.voices?.fallback)?.name ?? "Anna"
+    store.voices?.engines.kyutai?.find((v) => v.id === store.voices?.fallback)?.name ?? "Eve"
   );
   const jobs = $derived(
     Object.values(store.jobs).filter((j) => j.voice === voice.id && j.state !== "ready")

@@ -59,7 +59,7 @@ KOKORO_LANGUAGES = {
 CLONE_PROMPT = "Hello, I am reading this short passage so my voice can be recognized clearly."
 # Pocket TTS's own voices (each speaks every language it has) that stand in
 # for a woman's and a man's cloned voice where it cannot clone
-CLONE_STAND_INS = {"f": "eve", "m": "michael"}
+CLONE_STAND_INS = {"f": "anna", "m": "michael"}
 # Whisper for finding where the pieces of a spliced sentence meet
 SPLICE_MODEL = "base"
 
