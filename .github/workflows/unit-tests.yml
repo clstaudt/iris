@@ -10,8 +10,10 @@ jobs:
       fail-fast: false
       matrix:
         # macOS as the app is built on (pack-electron.yml), for its own code
-        # paths: MLX, CoreAudio, the platform branches
-        os: [ubuntu-latest, macos-15]
+        # paths: MLX, CoreAudio, the platform branches. Its minutes count ten
+        # times, so it runs on main and when started by hand, not on every
+        # branch pushed
+        os: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest", "macos-15"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
