@@ -1,5 +1,7 @@
 """Unit tests for getting speech models: local folders, downloads, checks."""
 
+from pathlib import Path
+
 import pytest
 
 from iris import downloads, transcription, tts
@@ -116,11 +118,17 @@ def test_first_start_fetches_what_is_missing_with_progress(tmp_path, monkeypatch
         fetched.extend(target.name for _, target in files)
         on_progress(3, 4)
 
+    def download_hub_files(files, on_progress):
+        fetched.extend(Path(file.filename).name for file in files)
+        on_progress(7, 8)
+
     monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: False)
+    monkeypatch.setattr(downloads, "files_cached", lambda files: False)
     monkeypatch.setattr(downloads, "download", download)
     monkeypatch.setattr(downloads, "download_files", download_files)
-    monkeypatch.setattr("iris.controller.find_kokoro_models", lambda: None)
-    monkeypatch.setattr("iris.controller.DEFAULT_KOKORO_DIR", tmp_path)
+    monkeypatch.setattr(downloads, "download_hub_files", download_hub_files)
+    monkeypatch.setattr("iris.speech_models.find_kokoro_models", lambda: None)
+    monkeypatch.setattr("iris.speech_models.DEFAULT_KOKORO_DIR", tmp_path)
 
     bus = EventBus()
     events = _record(bus)
@@ -128,17 +136,46 @@ def test_first_start_fetches_what_is_missing_with_progress(tmp_path, monkeypatch
         {"whisper_model": "small", "whisper_engine": "faster-whisper", "whisper_device": "cpu"}
     )
 
+    # The voices first, so they can be heard while the rest arrives
     assert fetched == [
-        "Systran/faster-whisper-small",
-        SMART_TURN_FILE,
+        "model.safetensors",
+        "tokenizer.json",
+        "anna.safetensors",
         tts.KOKORO_MODEL_FILE,
         tts.KOKORO_VOICES_FILE,
+        SMART_TURN_FILE,
+        "Systran/faster-whisper-small",
     ]
     progress = [data for kind, data in events if kind == "setup.progress"]
-    steps = [(p["model"], p["done"], p["total"]) for p in progress[:3]]
-    assert steps == [("stt", 50, 100), ("turn", 50, 100), ("tts", 3, 4)]
+    steps = [(p["model"], p["done"], p["total"]) for p in progress[:4]]
+    assert steps == [("kyutai", 7, 8), ("kokoro", 3, 4), ("turn", 50, 100), ("stt", 50, 100)]
     # Done: the UI drops its progress and leaves the setup screen
     assert progress[-1]["label"] == ""
+
+
+def test_a_failed_download_is_reported_and_the_others_still_come(tmp_path, monkeypatch):
+    fetched = []
+
+    def download(repo, on_progress, filename=None):
+        if filename is None:
+            raise ConnectionError("Max retries exceeded: connection refused")
+        fetched.append(filename)
+
+    monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: False)
+    monkeypatch.setattr(downloads, "files_cached", lambda files: True)
+    monkeypatch.setattr(downloads, "download", download)
+    monkeypatch.setattr("iris.speech_models.find_kokoro_models", lambda: tmp_path)
+
+    bus = EventBus()
+    events = _record(bus)
+    AssistantController(bus)._fetch_models(
+        {"whisper_model": "small", "whisper_engine": "faster-whisper", "whisper_device": "cpu"}
+    )
+    assert fetched == [SMART_TURN_FILE]
+    errors = [data["message"] for kind, data in events if kind == "error"]
+    assert errors == [
+        "Could not download the speech recognition model: Max retries exceeded: connection refused"
+    ]
 
 
 def test_chosen_folders_are_used_as_they_are(tmp_path, monkeypatch):
@@ -147,8 +184,10 @@ def test_chosen_folders_are_used_as_they_are(tmp_path, monkeypatch):
     (stt / "model.bin").write_bytes(b"")
     monkeypatch.setattr(downloads, "download", lambda *a, **k: pytest.fail("downloaded"))
     monkeypatch.setattr(downloads, "download_files", lambda *a: pytest.fail("downloaded"))
-    # Smart Turn has no folder to choose: it is fetched unless cached
+    # Smart Turn and Pocket TTS have no folder to choose: they are fetched
+    # unless cached
     monkeypatch.setattr(downloads, "is_cached", lambda repo, filename=None: True)
+    monkeypatch.setattr(downloads, "files_cached", lambda files: True)
 
     bus = EventBus()
     events = _record(bus)

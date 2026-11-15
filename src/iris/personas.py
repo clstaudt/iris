@@ -1,12 +1,12 @@
 """Persona definitions for the Iris voice assistant."""
 
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
+from iris import names
 from iris.tts import KOKORO_VOICE_NAME
 
 
@@ -49,7 +49,8 @@ VOICE_ASSISTANT_BASE = (
 
 
 class Persona:
-    """A persona with name, description, voice, and optional audio filter."""
+    """A persona with name, description, voice, optional audio filter, and
+    the words that wake it and send it to sleep."""
 
     def __init__(
         self,
@@ -61,6 +62,8 @@ class Persona:
         engine: Optional[str] = None,
         persona_id: Optional[str] = None,
         path: Optional[Path] = None,
+        wake_word: Optional[str] = None,
+        sleep_word: Optional[str] = None,
     ):
         """
         Initialize a persona.
@@ -75,6 +78,10 @@ class Persona:
                 voice name means Kokoro
             persona_id: Key the persona is known by (its file name)
             path: File the persona was loaded from
+            wake_word: Said to wake the persona, when the wake word is on;
+                its name when none is set
+            sleep_word: Said while awake, sends it back to sleep; none when
+                none is set
         """
         self.name = name
         # The personality as written, and combined with the base voice traits
@@ -88,6 +95,9 @@ class Persona:
         self.engine = engine
         self.id = persona_id or slug(name)
         self.path = path
+        # Iris is woken by calling it by its name, unless told otherwise
+        self.wake_word = str(wake_word or "").strip() or name
+        self.sleep_word = str(sleep_word or "").strip()
 
     @classmethod
     def from_file(cls, filepath: Path) -> "Persona":
@@ -104,6 +114,8 @@ class Persona:
             engine=data.get("engine"),
             persona_id=filepath.stem.lower(),
             path=filepath,
+            wake_word=data.get("wake_word"),
+            sleep_word=data.get("sleep_word"),
         )
 
     @property
@@ -120,12 +132,15 @@ class Persona:
             "speed": self.speed,
             "audio_filter": self.audio_filter or "",
             "description": self.personality,
+            "wake_word": self.wake_word,
+            "sleep_word": self.sleep_word,
         }
 
 
 def slug(name: str) -> str:
-    """A file name for a persona called this."""
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "persona"
+    """A file name for a persona called this ("Der Führer" is der-fuehrer).
+    A persona keeps the file it was saved in under an earlier spelling."""
+    return names.slug(name, "persona")
 
 
 class _PersonaDumper(yaml.SafeDumper):
@@ -184,7 +199,7 @@ def load_all_personas() -> dict[str, Persona]:
         personas["iris"] = Persona(
             name="Iris",
             description="You are Iris, a helpful and friendly assistant. Be conversational, warm, and natural.",
-            voice="alba",
+            voice="anna",
             persona_id="iris",
         )
 
@@ -260,6 +275,13 @@ def save_persona(settings: dict, persona_id: Optional[str] = None) -> str:
     }
     if settings.get("audio_filter"):
         data["audio_filter"] = settings["audio_filter"]
+    # Written only where they are the persona's own: a wake word that is its
+    # name follows the name when it is renamed
+    wake_word = (settings.get("wake_word") or "").strip()
+    if wake_word and wake_word.casefold() != data["name"].casefold():
+        data["wake_word"] = wake_word
+    if sleep_word := (settings.get("sleep_word") or "").strip():
+        data["sleep_word"] = sleep_word
     description = settings.get("description", "").strip()
     data["description"] = description + "\n" if description else ""
     with open(path, "w") as f:
@@ -284,9 +306,48 @@ def delete_persona(persona_id: str) -> bool:
     return persona_id in PERSONAS
 
 
+def persona_stamp(persona_id: str) -> Optional[tuple]:
+    """Which file the persona of this id is read from, and when it last
+    changed, to notice it changing on disk; None when no file holds it."""
+    found = None
+    for persona_dir in get_persona_dirs():
+        for path in persona_dir.glob("*.yaml"):
+            if path.stem.lower() == persona_id:
+                found = path
+    if found is None:
+        return None
+    try:
+        stat = found.stat()
+    except OSError:
+        return None
+    return (str(found), stat.st_mtime_ns, stat.st_size)
+
+
 def find_persona(persona_id: str) -> Optional[Persona]:
     """The persona of this id, or None."""
     return PERSONAS.get(persona_id)
+
+
+def speaking_with(voice: str) -> list[Persona]:
+    """The personas that speak with this voice, as their files say now, by
+    name."""
+    found = [persona for persona in load_all_personas().values() if persona.voice == voice]
+    return sorted(found, key=lambda persona: persona.name.casefold())
+
+
+def voice_in_use(voice: str) -> bool:
+    """Whether a persona speaks with this voice, as its files say now (a
+    cloned voice is kept while one does)."""
+    return bool(speaking_with(voice))
+
+
+def voice_users() -> dict[tuple[str, str], list[Persona]]:
+    """The personas that speak with each voice, by (engine, voice), as their
+    files say now, by name."""
+    users: dict[tuple[str, str], list[Persona]] = {}
+    for persona in sorted(load_all_personas().values(), key=lambda p: p.name.casefold()):
+        users.setdefault((persona.engine, persona.voice), []).append(persona)
+    return users
 
 
 def shipped(persona_id: str) -> bool:

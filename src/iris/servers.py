@@ -3,6 +3,8 @@
 A server is Ollama, answering at its root, or any server with the
 OpenAI-compatible API, answering at .../v1. The check is a plain request with
 a short timeout, so a list of servers can be checked while the app shows it.
+The walkthrough also looks for servers on this computer at the ports they
+usually take.
 """
 
 import os
@@ -16,6 +18,17 @@ from iris.llm import effective_host
 PROBE_TIMEOUT = 3.0
 # A server that answers but wants a key is there
 ANSWERS = (200, 401, 403)
+
+# Servers with the OpenAI-compatible API, where they usually listen on this
+# computer: LM Studio, llama.cpp's server (and MLX's), vLLM, Jan
+LOCAL_SERVERS = (
+    "http://localhost:1234/v1",
+    "http://localhost:8080/v1",
+    "http://localhost:8000/v1",
+    "http://localhost:1337/v1",
+)
+# Seconds each gets: on this computer an answer is quick, or none comes
+DISCOVER_TIMEOUT = 1.0
 
 
 def reachable(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
@@ -34,6 +47,26 @@ def reachable(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
         except Exception:
             continue
     return False
+
+
+def model_server(url: str, timeout: float = DISCOVER_TIMEOUT) -> bool:
+    """Whether a server with the OpenAI-compatible API answers at this URL
+    (.../v1) with a list of models, not merely something on that port."""
+    try:
+        response = httpx.get(f"{url.rstrip('/')}/models", timeout=timeout)
+        return response.status_code == 200 and isinstance(response.json().get("data"), list)
+    except Exception:
+        return False
+
+
+def discover(
+    candidates: tuple[str, ...] = LOCAL_SERVERS, timeout: float = DISCOVER_TIMEOUT
+) -> list[str]:
+    """The model servers that answer on this computer at their usual ports,
+    besides Ollama (the default server), asked side by side."""
+    with ThreadPoolExecutor(max_workers=len(candidates) or 1) as pool:
+        found = list(pool.map(lambda url: model_server(url, timeout), candidates))
+    return [url for url, ok in zip(candidates, found) if ok]
 
 
 def check(urls: list[str], timeout: float = PROBE_TIMEOUT) -> list[dict]:

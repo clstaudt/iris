@@ -90,7 +90,9 @@ def _assistant(conversation) -> VoiceAssistant:
     assistant.speak_replies = True
     assistant.conversation = conversation
     assistant.speech_pipeline = Pipeline()
-    assistant.tts_generator = SimpleNamespace(languages=lambda: frozenset({"en"}))
+    assistant.tts_generator = SimpleNamespace(
+        languages=lambda: frozenset({"en"}), speaks=lambda language: True, ready=lambda language: True
+    )
     assistant.interrupt_event = threading.Event()
     assistant.suspend_event = threading.Event()
     assistant.tools = conversation.tools

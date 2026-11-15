@@ -5,7 +5,10 @@
 // through the app's own bridge (electron/python-bridge.ts), which reports a
 // core that stops and starts it again. The core gets a home folder of its
 // own, so the tester's personas, memory and settings are left alone; the
-// speech models already on this computer are used.
+// speech models already on this computer are used. The app opens as on a
+// first launch, with empty settings: the test goes through the walkthrough,
+// which starts Iris. Presence, the orb's round window of its own, is a second
+// page, with the orb relayed between the two as the app's main process does.
 // Its microphone and speaker are a virtual room (irisdev.e2e_core), which
 // holds only Iris's own voice coming back: the real room is never heard, and
 // nothing sounds on the speakers. Iris sleeps until a wake word nobody says.
@@ -21,10 +24,11 @@
 //   E2E_HOST    model server URL (default: the core's default)
 //   E2E_PYTHON  Python to run the core with (default: <repo>/.venv/bin/python)
 //   E2E_ONLY    run only the steps whose name contains this text, or one of
-//               several split by "|"; the steps that start Iris and choose
-//               the model always run
+//               several split by "|"; the walkthrough's steps, which start
+//               Iris and choose the model, always run
 //   E2E_HEADED  set to watch the browser
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -50,6 +54,11 @@ fs.mkdirSync(OUT, { recursive: true });
 // ---------------------------------------------------------------- the core
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "iris-e2e-"));
+// Where the test breaks the room's speaker, as the core's stand-in reads it
+// (irisdev/e2e_core.py)
+const AUDIO_FAULTS = path.join(home, ".e2e-audio.json");
+// The steps keep setups' homes under that name; the core's is this one
+const coreHome = home;
 /** Iris's memory, in the test's home */
 const MEMORY_DB = path.join(home, "memory.db");
 const realHome = os.homedir();
@@ -162,12 +171,14 @@ const stubUrl = `http://127.0.0.1:${stub.address().port}/v1`;
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
 const server = http.createServer((request, response) => {
-  const file = path.join(DIST, request.url === "/" ? "index.html" : request.url.split("?")[0]);
-  if (request.url === "/favicon.ico") {
+  // Presence's window is the same page, as /?window=presence
+  const route = request.url.split("?")[0];
+  const file = path.join(DIST, route === "/" ? "index.html" : route);
+  if (route === "/favicon.ico") {
     response.writeHead(204).end();
     return;
   }
-  if (!file.startsWith(DIST) || !fs.existsSync(file)) {
+  if (!file.startsWith(DIST) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     response.writeHead(404).end();
     return;
   }
@@ -195,15 +206,45 @@ await page.exposeFunction("__irisRpc", async (method, params) => {
 });
 /** What the page asked of the window: presence on or off, in order. */
 const presence = [];
-await page.exposeFunction("__irisPresence", (on) => presence.push(on));
-await page.addInitScript(
-  ({ settings }) => {
+/** Presence's window: a page of its own, opened when first needed */
+let presencePage = null;
+
+/** At each switch the orb passes from the window that hides to the one that
+ *  shows, as main.ts hands it over. */
+async function handOver(on) {
+  if (!presencePage) return;
+  const [from, to] = on ? [page, presencePage] : [presencePage, page];
+  const handoff = await from.evaluate(() => window.__irisOrb.release());
+  await to.evaluate((h) => void window.__irisOrb.adopt(h), handoff);
+  await from.evaluate(() => void window.__irisOrb.rest());
+}
+
+await page.exposeFunction("__irisPresence", async (on) => {
+  presence.push(on);
+  await handOver(on);
+});
+// What the orb shows goes from the conversation to presence
+await page.exposeFunction("__irisOrbInputs", (inputs) =>
+  presencePage?.evaluate((i) => window.__irisOrb.inputs(i), inputs).catch(() => {})
+);
+
+/** window.iris as Electron's preload gives it, for both windows. */
+function stubIris({ settings }) {
     // Seeded once; a reload finds what the app saved
     if (localStorage.getItem("iris.settings") === null) {
       localStorage.setItem("iris.settings", JSON.stringify(settings));
     }
     const listeners = [];
     window.__irisEvent = (type, data) => listeners.forEach((listener) => listener(type, data));
+    // The orb between this window and the other, relayed by the test
+    const orb = { handlers: null, inputs: [], commands: [] };
+    window.__irisOrb = {
+      release: () => orb.handlers?.release() ?? null,
+      adopt: (handoff) => orb.handlers?.adopt(handoff),
+      rest: () => orb.handlers?.rest(),
+      inputs: (inputs) => orb.inputs.forEach((listener) => listener(inputs)),
+      command: (command) => orb.commands.forEach((listener) => listener(command)),
+    };
     // Links go to the system browser, as main.ts routes window.open there
     window.__opened = [];
     window.open = (target) => {
@@ -217,29 +258,35 @@ await page.addInitScript(
         return () => listeners.splice(listeners.indexOf(callback), 1);
       },
       micStatus: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
+      askMicrophone: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
       isPackaged: async () => false,
       chooseFolder: async () => null,
       presence: false,
       setPresence: (on) => window.__irisPresence(on),
-      onOrb: () => () => {},
-      sendOrbInputs: () => {},
-      onOrbInputs: () => () => {},
-      presenceCommand: () => {},
-      onPresenceCommand: () => () => {},
+      onOrb: (handlers) => {
+        orb.handlers = handlers;
+        return () => {
+          if (orb.handlers === handlers) orb.handlers = null;
+        };
+      },
+      sendOrbInputs: (inputs) => window.__irisOrbInputs?.(inputs),
+      onOrbInputs: (listener) => {
+        orb.inputs.push(listener);
+        return () => orb.inputs.splice(orb.inputs.indexOf(listener), 1);
+      },
+      presenceCommand: (command) => window.__irisPresenceCommand?.(command),
+      onPresenceCommand: (listener) => {
+        orb.commands.push(listener);
+        return () => orb.commands.splice(orb.commands.indexOf(listener), 1);
+      },
       presenceHover: () => {},
+      // Never a drag: a press and release is a click
       presenceDrag: async () => false,
       platform: "test",
     };
-  },
-  {
-    settings: {
-      setup_done: true,
-      // Iris sleeps until a word nobody says
-      wake_word: WAKE_WORD,
-      ...(process.env.E2E_HOST ? { ollama_host: process.env.E2E_HOST } : {}),
-    },
-  }
-);
+}
+// A first launch: the walkthrough sets the server, the model and the wake word
+await page.addInitScript(stubIris, { settings: {} });
 pushEvent = (type, data) => {
   page.evaluate(([t, d]) => window.__irisEvent?.(t, d), [type, data]).catch(() => {});
 };
@@ -250,7 +297,7 @@ const results = [];
 
 async function step(name, body) {
   const only = process.env.E2E_ONLY?.toLowerCase().split("|");
-  const always = ["the app starts", "language model: the server's models"];
+  const always = ["first run", "the app starts", "language model: the server's models"];
   if (only && !only.some((part) => name.toLowerCase().includes(part)) && !always.some((s) => name.startsWith(s))) {
     return;
   }
@@ -365,9 +412,27 @@ async function openStage(label, title = label) {
 }
 
 /** Out of presence, if a step left the window there. */
+/** Presence's window, the orb alone: index.html?window=presence. */
+async function openPresence() {
+  if (presencePage) return presencePage;
+  presencePage = await browser.newPage({ viewport: { width: 220, height: 220 } });
+  presencePage.on("pageerror", (error) => pageErrors.push(`presence: ${error}`));
+  await presencePage.exposeFunction("__irisRpc", (method, params) => rpc(method, params));
+  await presencePage.exposeFunction("__irisPresence", () => {});
+  // What presence asks (leave, pause) goes to the conversation window
+  await presencePage.exposeFunction("__irisPresenceCommand", (command) =>
+    page.evaluate((c) => window.__irisOrb.command(c), command)
+  );
+  await presencePage.addInitScript(stubIris, { settings: {} });
+  await presencePage.goto(`${url}?window=presence`);
+  await presencePage.locator('[aria-label="iris"]').waitFor({ timeout: 5000 });
+  return presencePage;
+}
+
 async function leavePresence() {
-  const leave = page.locator('main.presence button[title="Conversation"]');
-  if (await leave.count()) await leave.click();
+  if (presence.at(-1) !== true) return;
+  await presencePage.keyboard.press("Escape");
+  await until("the conversation", () => presence.at(-1) === false, 5000);
 }
 
 async function openSettings(pageName = "Pipeline") {
@@ -379,6 +444,9 @@ async function openSettings(pageName = "Pipeline") {
 }
 
 const config = () => events.findLast((e) => e.type === "config")?.data;
+const exactly = (text) => new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+const walkthroughStep = (name) => page.locator(`section[data-step="${name}"]`);
+const footerButton = (text) => page.locator("footer button", { hasText: text });
 const settings = () => page.evaluate(() => JSON.parse(localStorage.getItem("iris.settings") ?? "{}"));
 
 /** Back to the conversation from the settings or the memory panel. */
@@ -405,6 +473,97 @@ async function ask(text) {
 const voiceDone = (timeout = 60_000) =>
   until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), timeout);
 
+/** Seconds of sound the virtual speaker played from a moment on (until
+ *  another, or now): what was heard, not what the core says it played. */
+const heard = async (since, until) => (await rpc("e2e.speaker", { since, until })).seconds;
+
+// Sound enough to be a voice: a preview's sentence gives seconds of it, and
+// so does a short reply; a click or a breath, a few hundredths
+const SPOKEN = 0.5;
+
+/** Wait for a voice to reach the speaker from a moment on: SPOKEN seconds of
+ *  sound at least. */
+async function checkHeard(since, what, timeout = 60_000) {
+  let seconds = 0;
+  await until(`${what} to be heard`, async () => (seconds = await heard(since)) >= SPOKEN, timeout).catch(() => {
+    throw new Error(`${what} reached the speaker as ${seconds.toFixed(2)} s of sound`);
+  });
+}
+
+/** That the speaker played no sound from a moment on. */
+async function checkSilent(since) {
+  const seconds = await heard(since);
+  check(seconds === 0, `the speaker played ${seconds.toFixed(2)} s of sound after Stop`);
+}
+
+/** The model's streamed replies begun since a moment, its reasoning included,
+ *  which the app is never shown: when their first and last lines came. */
+async function modelOutput(since) {
+  const streams = (await rpc("e2e.model")).streams.filter((s) => s.first >= since);
+  if (!streams.length) return null;
+  return {
+    first: Math.min(...streams.map((s) => s.first)),
+    last: Math.max(...streams.map((s) => s.last)),
+    lines: streams.reduce((sum, s) => sum + s.lines, 0),
+  };
+}
+
+// The longest the model may stream nothing before the reply is given up on,
+// as the core gives up on a server silent for longer
+const MODEL_SILENCE = 60_000;
+
+/** Wait for something a reply asked for at `since` brings (its first words,
+ *  a tool), however long the model thinks before: a reasoning model streams
+ *  minutes of reasoning first against a slow server. It is waited for while
+ *  the model streams; a model that says nothing at all, or goes silent
+ *  before it, fails. */
+async function afterThinking(what, since, found) {
+  await until("the model's first output", () => modelOutput(since), 180_000);
+  return until(what, async () => {
+    const got = await found();
+    if (got) return got;
+    const output = await modelOutput(since);
+    const silent = Date.now() - output.last;
+    check(silent < MODEL_SILENCE, `the model streamed ${output.lines} lines, then nothing for ${Math.round(silent / 1000)} s`);
+    return null;
+  }, 900_000);
+}
+
+/** An event of a reply asked for at `since` (its end, its timing), waited for
+ *  as long as the model streams (see afterThinking). */
+const replyEvent = (type, since) =>
+  afterThinking(`the ${type} event`, since, () => events.find((e) => e.at >= since && e.type === type));
+
+// Hugging Face as the core's stand-in has it (irisdev/e2e_core.py): the
+// token it takes, and what the account did on the website
+const CLONE_TOKEN = "hf_e2e_test_token";
+function huggingFace(changes) {
+  const file = path.join(home, ".e2e-huggingface.json");
+  const state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+  fs.writeFileSync(file, JSON.stringify({ ...state, ...changes }));
+}
+
+/** Speech to clone a voice from: one of Pocket TTS's own voices reading a
+ *  few lines, written to a WAV file by the core's Python (nothing plays). */
+function speechSample() {
+  const file = path.join(home, "sample.wav");
+  const script = [
+    "import sys",
+    "import soundfile as sf",
+    "import torch",
+    "from pocket_tts import TTSModel",
+    "model = TTSModel.load_model(language='english')",
+    "state = model.get_state_for_audio_prompt('alba')",
+    "lines = ['Have you ever noticed how different a familiar street looks early in the morning?',",
+    "         'The shops are still closed, and the only sounds are a few birds.',",
+    "         'I like to walk down to the river then, and watch the light move across the water.']",
+    "audio = torch.cat([model.generate_audio(state, line) for line in lines])",
+    "sf.write(sys.argv[1], audio.numpy(), model.sample_rate)",
+  ].join("\n");
+  execFileSync(python, ["-c", script, file], { stdio: "ignore" });
+  return fs.readFileSync(file);
+}
+
 // -------------------------------------------------------------------- steps
 
 console.log(`Iris UI against the core (${python})`);
@@ -412,6 +571,148 @@ let model = process.env.E2E_MODEL ?? "";
 
 try {
   await page.goto(url);
+
+  // The address the core keeps for the test's server: .../v1 for one with
+  // the OpenAI-compatible API, the root for Ollama
+  let serverHost = "";
+
+  await step("first run: the walkthrough welcomes a new user, and nothing starts yet", async () => {
+    await page.getByText("Welcome to Iris").waitFor({ timeout: 30_000 });
+    check(!(await page.locator("textarea").count()), "the conversation shows before the walkthrough");
+    await footerButton("Get started").click();
+    await walkthroughStep("server").waitFor({ timeout: 5000 });
+    const started = events.find((e) => e.type === "state" && e.data.state === "starting");
+    check(!started, "Iris started before the walkthrough was done");
+  });
+
+  await step("first run: a server typed without /v1 is kept as the core resolves it, and a model chosen", async () => {
+    const models = page.locator('[aria-label="Model"] .s-option');
+    if (process.env.E2E_HOST) {
+      // As a user might type it: an OpenAI-compatible server without /v1
+      serverHost = (await rpc("llm.probe", { url: process.env.E2E_HOST })).host;
+      const typed = process.env.E2E_HOST.replace(/\/v1\/?$/, "");
+      await page.locator("button.s-btn", { hasText: "Add server" }).click();
+      await page.locator('input[aria-label="Server address"]').fill(typed);
+      await page.locator('input[aria-label="Server address"]').press("Enter");
+      await until(
+        "the server to be chosen",
+        async () =>
+          (await page.locator(".server.active .name").getAttribute("title").catch(() => null)) === serverHost,
+        30_000
+      );
+    } else {
+      // This computer's server, chosen as the first that answers
+      await page.locator(".server.active").waitFor({ timeout: 30_000 });
+    }
+    await until("the server's models", () => models.count(), 60_000);
+    if (!model) {
+      model = (await page.locator('[aria-label="Model"] .s-option.active .name').innerText()).trim();
+    }
+    await models.filter({ has: page.locator(".name", { hasText: exactly(model) }) }).click();
+    await page.locator('[aria-label="Model"] .s-option.active', { hasText: model }).waitFor({ timeout: 5000 });
+    await footerButton("Continue").click();
+  });
+
+  await step("first run: the speech models download in the background, the voices first", async () => {
+    await walkthroughStep("models").waitFor({ timeout: 5000 });
+    await until("the speech models", () => page.locator("[data-model]").count(), 10_000);
+    const ids = await page.locator("[data-model]").evaluateAll((rows) => rows.map((row) => row.dataset.model));
+    check(ids[0] === "kyutai" && ids[1] === "kokoro", `the voices do not come first: ${ids.join(", ")}`);
+    check(ids.includes("turn") && ids.includes("stt"), `models missing: ${ids.join(", ")}`);
+    // On this computer they are there already, or arrive with their bytes
+    await until(
+      "every model to be in",
+      async () => (await page.locator("[data-model]:not([data-state=done])").count()) === 0,
+      900_000
+    );
+    for (const update of events.filter((e) => e.type === "setup.models")) {
+      for (const m of update.data.models) {
+        check(m.state !== "downloading" || !m.total || m.done <= m.total, `${m.id}: ${m.done} of ${m.total} bytes`);
+      }
+    }
+    await footerButton("Continue").click();
+  });
+
+  await step("first run: the microphone's sound check shows its level, and closes", async () => {
+    await walkthroughStep("microphone").waitFor({ timeout: 5000 });
+    await page.locator('select[aria-label="Microphone"]').waitFor({ timeout: 10_000 });
+    const since = Date.now();
+    // A computer without a microphone says so instead
+    await until(
+      "the microphone's level",
+      async () =>
+        events.some((e) => e.at >= since && e.type === "mic.check") ||
+        (await page.getByText("The microphone could not be opened").count()),
+      10_000
+    );
+    check(await page.locator(".s-meter i").count(), "no level meter");
+    await footerButton("Continue").click();
+    await walkthroughStep("voice").waitFor({ timeout: 5000 });
+    await quiet(800);
+    const late = events.filter((e) => e.type === "mic.check" && e.at > Date.now() - 400);
+    check(late.length === 0, "the sound check goes on after its step");
+  });
+
+  await step("first run: a persona's voice plays before Iris runs", async () => {
+    await until("the personas", async () => (await page.locator(".persona").count()) >= 3);
+    const since = Date.now();
+    await page.locator('button[aria-label="Play HAL"]').click();
+    await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
+    await eventAfter("state", since, (data) => data.state === "idle", 60_000);
+    check(!events.some((e) => e.at >= since && e.type === "error"), "the preview failed");
+    await checkHeard(since, "HAL's voice");
+    await page.locator(".persona", { hasText: "Iris" }).locator("button.pick").click();
+    await footerButton("Continue").click();
+  });
+
+  await step("first run: the wake word is set, and the tools are offered", async () => {
+    await walkthroughStep("extras").waitFor({ timeout: 5000 });
+    for (const name of ["Camera", "Screen", "Web search"]) {
+      await page.getByRole("switch", { name }).waitFor({ timeout: 10_000 });
+    }
+    // The persona's words: its name, and no sleep word
+    const word = page.locator('input[aria-label="Wake word"]');
+    await until("the persona's name as its wake word", async () => (await word.inputValue()) === "Iris");
+    check((await page.locator("#walkthrough-sleep-word").inputValue()) === "", "a sleep word is set");
+    check(await page.getByRole("switch", { name: "Sleep when idle" }).isDisabled(), "sleeping when idle is offered without a wake word");
+    await page.getByRole("switch", { name: "Wake word" }).click();
+    await word.fill(WAKE_WORD);
+    await footerButton("Continue").click();
+  });
+
+  await step("first run: Iris starts with the choices, and greets the user", async () => {
+    await walkthroughStep("ready").waitFor({ timeout: 5000 });
+    const stage = (id) => walkthroughStep("ready").locator(`[data-stage="${id}"]`);
+    check((await stage("llm").innerText()).includes(model), "the pipeline does not show the model");
+    check((await stage("wake").innerText()).includes(WAKE_WORD), "the pipeline does not show the wake word");
+    // A stage leads back to the step that sets it
+    await stage("wake").click();
+    await walkthroughStep("extras").waitFor({ timeout: 5000 });
+    await page.locator('nav[aria-label="Steps"] button[aria-label="Ready"]').click();
+    await walkthroughStep("ready").waitFor({ timeout: 5000 });
+    const since = Date.now();
+    await footerButton("Start talking").click();
+    await until("the conversation", () => page.locator("textarea").count(), 10_000);
+    const started = await eventAfter("config", since, () => true, 600_000);
+    // Typed turns need no microphone; the greeting keeps Iris awake meanwhile
+    await rpc("mic.set", { on: false });
+    check(started.data.wake_word === WAKE_WORD, `the wake word is ${started.data.wake_word}`);
+    check(started.data.wake_window === 30, `Iris falls asleep after ${started.data.wake_window} s`);
+    check((await rpc("persona.get", { id: "iris" })).wake_word === WAKE_WORD, "the wake word is not Iris's own");
+    check(started.data.llm_model === model, `the model is ${started.data.llm_model}`);
+    check(started.data.persona === "Iris", `the persona is ${started.data.persona}`);
+    if (serverHost) check(started.data.ollama_host === serverHost, `the server is ${started.data.ollama_host}`);
+    const greeting = await replyEvent("chat.done", since);
+    const errors = events.filter((e) => e.at >= since && e.type === "error").map((e) => e.data.message);
+    check(!errors.length, `the greeting failed: ${errors.join(" | ")}`);
+    check(greeting.data.text.trim().length > 0, "the greeting is empty");
+    check(!events.some((e) => e.at >= since && e.type === "chat.user"), "a turn of the user's came before the greeting");
+    await until("the greeting in the conversation", () => page.getByText(greeting.data.text.trim().slice(0, 12)).count());
+    await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
+    const saved = await settings();
+    check(saved.setup_done === true, "the walkthrough is not marked done");
+    if (serverHost) check(saved.ollama_host === serverHost, `the server is kept as ${saved.ollama_host}`);
+  });
 
   await step("the app starts and the core loads its models", async () => {
     await eventAfter("config", 0, () => true, 180_000);
@@ -447,7 +748,8 @@ try {
 
   await step("language model: the server's models are listed and one is chosen", async () => {
     await openStage("Language model");
-    await until("the model list", () => option("").count(), 60_000);
+    // The models, not the servers above them
+    await until("the model list", () => inspector.locator("button.s-option").count(), 60_000);
     if (!model) {
       model = (await inspector.locator(".s-option:has(.s-chip:text('tools')) .name").first().innerText()).trim();
     }
@@ -548,6 +850,7 @@ try {
     await until("the chain to show Off", async () => (await stageValue("Wake word")) === "Off");
     await toggle.click();
     await until("the chain to show the word", async () => (await stageValue("Wake word")) === WAKE_WORD);
+    check((await settings()).wake_on === true, "the switch is not kept");
   });
 
   await step("voice: the persona's voice plays", async () => {
@@ -556,6 +859,7 @@ try {
     await inspector.locator('button[aria-label="Play"]').click();
     await eventAfter("audio.output", since, (data) => data.rms > 0, 60_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 30_000);
+    await checkHeard(since, "the persona's voice");
   });
 
   await step("personas: each one opens, and a voice tile plays that voice", async () => {
@@ -570,6 +874,7 @@ try {
     await eventAfter("audio.output", since, (data) => data.rms > 0, 60_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 30_000);
     await page.locator(".voice .play.playing").waitFor({ state: "detached", timeout: 5000 });
+    await checkHeard(since, "the voice tile's voice");
   });
 
   await step("personas: a voice of the other engine plays too", async () => {
@@ -581,6 +886,7 @@ try {
     await page.locator(".voice .play").first().click();
     await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 30_000);
+    await checkHeard(since, "the other engine's voice");
     await page.locator("button.s-btn", { hasText: "Cancel" }).click();
   });
 
@@ -604,10 +910,13 @@ try {
   await step("personas: a new one is created, becomes active, and is deleted", async () => {
     await page.locator("button.s-btn", { hasText: "New persona" }).click();
     await page.locator("input.title").fill("Testa");
+    // Its wake word is its name
+    check((await page.locator("#persona-wake-word").inputValue()) === "Testa", "the wake word does not follow the name");
     await page.locator("#persona-personality").fill("You are Testa, made by a test.");
     await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
     await until("Testa in the list", () => page.locator("button.card", { hasText: "Testa" }).count());
     await until("Testa to be active", () => config().persona === "Testa", 60_000);
+    check(config().wake_word === "Testa", `Testa is woken by ${config().wake_word}`);
     check(await page.locator("button.card", { hasText: "Testa" }).locator(".s-chip").count(), "not marked active");
     await page.locator("button.s-btn.danger", { hasText: "Delete" }).click();
     await page.locator("button.s-btn.danger", { hasText: "Confirm delete" }).click();
@@ -628,16 +937,17 @@ try {
   });
 
   await step("personas: a voice plays while the microphone listens, and is not taken for the user", async () => {
-    await rpc("wake.set", { word: "" });
+    await rpc("wake.set", { on: false });
     await rpc("mic.set", { on: true });
     await until("Iris to listen", () => rpc("app.info").then((info) => info.state === "listening"), 15_000);
     const since = Date.now();
     await page.locator(".voice .play").nth(1).click();
     await eventAfter("audio.output", since, (data) => data.rms > 0, 60_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 30_000);
+    await checkHeard(since, "the voice played while the microphone listens");
     await new Promise((resolve) => setTimeout(resolve, 6000));
     await rpc("mic.set", { on: false });
-    await rpc("wake.set", { word: WAKE_WORD });
+    await rpc("wake.set", { on: true });
     const heard = events.find((e) => e.at >= since && e.type === "chat.user");
     check(!heard, `the preview was heard as the user saying: ${heard?.data.text}`);
     // And once more: the voice still plays after the first preview
@@ -645,6 +955,7 @@ try {
     await page.locator(".voice .play").nth(2).click();
     await eventAfter("audio.output", again, (data) => data.rms > 0, 60_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 30_000);
+    await checkHeard(again, "the voice played next");
   });
 
   await step("personas: saving the current persona applies it at once", async () => {
@@ -661,7 +972,7 @@ try {
     const voice = `${config().tts_engine}:${config().tts_voice}`;
     // The next reply is spoken in it
     const since = await ask("Reply with one word: yes.");
-    const timing = await eventAfter("turn.timing", since, () => true, 180_000);
+    const timing = await replyEvent("turn.timing", since);
     check(timing.data.components.voice === voice, `the reply was spoken by ${timing.data.components.voice}, not ${voice}`);
     await voiceDone();
     // Reset brings her shipped voice back, at once too
@@ -671,6 +982,129 @@ try {
     await page.locator("button.s-btn.danger", { hasText: "Reset" }).click();
     await page.locator("button.s-btn.danger", { hasText: "Confirm reset" }).click();
     await until("her shipped voice", () => config().tts_voice === shipped, 10_000);
+    // And her name as the wake word; the test's own is set in the editor again
+    await until("her name as the wake word", () => config().wake_word === "Iris", 10_000);
+    await until("Iris's form", async () => (await page.locator("#persona-wake-word").inputValue()) === "Iris");
+    await page.locator("#persona-wake-word").fill(WAKE_WORD);
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("the test's wake word", () => config().wake_word === WAKE_WORD, 10_000);
+  });
+
+  // Iris's voice before she is given a cloned one, to give back at the end
+  let shippedVoice = "anna";
+
+  await step("voice cloning: Hugging Face is connected, a sample is cloned, and Iris speaks in the voice", async () => {
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Iris" }).first().click();
+    await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
+    shippedVoice = (await rpc("persona.get", { id: "iris" })).voice;
+    await page.getByRole("button", { name: "Clone a voice" }).click();
+    // No login yet: the model page opens in the browser, and a token is asked for
+    await page.locator('.clone[data-step="connect"]').waitFor({ timeout: 10_000 });
+    await page.getByRole("button", { name: "Open the model page" }).click();
+    check((await page.evaluate(() => window.__opened)).includes("https://huggingface.co/kyutai/pocket-tts"),
+      "the model page did not go to the browser");
+    const token = page.locator('input[aria-label="Hugging Face access token"]');
+    check((await token.getAttribute("type")) === "password", "the token shows");
+    await token.fill("hf_not_the_one");
+    await page.getByRole("button", { name: "Check", exact: true }).click();
+    await page.getByText("Hugging Face did not accept the token").waitFor({ timeout: 10_000 });
+    await token.fill(CLONE_TOKEN);
+    await page.getByRole("button", { name: "Check", exact: true }).click();
+    // Logged in, the terms not accepted yet
+    await page.getByText("then check again").waitFor({ timeout: 10_000 });
+    const answers = JSON.stringify(calls.filter((c) => c.method.startsWith("voice.")).map((c) => c.result));
+    check(!answers.includes(CLONE_TOKEN), "the token came back from the core");
+    // Accepted on the website: the cloning model downloads, with progress
+    huggingFace({ terms: true });
+    const since = Date.now();
+    await page.getByRole("button", { name: "Check", exact: true }).click();
+    await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    check(events.some((e) => e.at >= since && e.type === "clone.progress" && e.data.done === e.data.total),
+      "the download showed no progress");
+    await page.getByText("Only clone a voice you have permission to use.").waitFor();
+    // A sample from a file: the voice is made, chosen, and says the preview
+    const sample = speechSample();
+    const made = Date.now();
+    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+    await page.getByRole("button", { name: "Clone again" }).waitFor({ timeout: 120_000 });
+    check(await page.locator(".voice.active", { hasText: "Iris" }).count(), "the cloned voice is not chosen");
+    await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
+    await voiceDone();
+    await checkHeard(made, "the cloned voice's first words");
+    // Its tile plays it as well
+    const played = Date.now();
+    await page.locator(".voice.active .play").click();
+    await eventAfter("audio.output", played, (data) => data.rms > 0, 90_000);
+    await voiceDone();
+    await checkHeard(played, "the cloned voice's tile");
+    // Saved, Iris speaks in it at once
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("the cloned voice", () => config().tts_voice === "clone:iris", 10_000);
+    check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "Iris was not saved with the cloned voice");
+    const sent = await ask("Reply with one word: yes.");
+    const timing = await replyEvent("turn.timing", sent);
+    check(timing.data.components.voice === "kyutai:clone:iris", `the reply was spoken by ${timing.data.components.voice}`);
+    await voiceDone();
+  });
+
+  await step("voice cloning: a recording of the empty room is refused as too short", async () => {
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Iris" }).first().click();
+    await page.getByRole("button", { name: "Clone again" }).click();
+    await page.getByRole("button", { name: "Record", exact: true }).click();
+    await page.locator('.clone[data-step="recording"]').waitFor({ timeout: 10_000 });
+    const since = Date.now();
+    await eventAfter("clone.level", since, (data) => data.seconds > 1.5, 10_000);
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    await page.getByText("Too short").waitFor({ timeout: 15_000 });
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await quiet(500);
+    const late = events.filter((e) => e.type === "clone.level" && e.at > Date.now() - 300);
+    check(late.length === 0, "the microphone still records");
+    check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "the voice changed");
+  });
+
+  await step("voice cloning: Save is offered for what changed, a voice cloned again too, and Cancel takes it back", async () => {
+    const save = page.locator("button.s-btn.primary", { hasText: "Save" });
+    const effect = (name) => page.locator("button.toggle", { hasText: exactly(name) });
+    // By its name alone: the tile shows the languages it speaks beside it
+    const pick = (name) => page.locator(".voice button.pick", { has: page.locator(".name", { hasText: exactly(name) }) });
+    const chosen = (name) => page.locator(".voice.active .pick .name", { hasText: exactly(name) });
+    const offered = async (yes, after) =>
+      check((await save.isEnabled()) === yes, `Save is ${yes ? "not " : ""}offered after ${after}`);
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Iris" }).first().click();
+    await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
+    await offered(false, "opening her");
+    await effect("Phone").click();
+    await offered(true, "choosing an effect");
+    await effect("None").click();
+    await offered(false, "choosing no effect again");
+    await pick("Anna").click();
+    await offered(true, "choosing another voice");
+    await pick("Iris").click();
+    await offered(false, "choosing her cloned voice again");
+    // A voice cloned again is chosen, and is hers once saved
+    await page.getByRole("button", { name: "Clone again" }).click();
+    await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    const made = Date.now();
+    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: speechSample() });
+    await until("the voice cloned again", () => chosen("Iris 2").count(), 120_000);
+    await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
+    await voiceDone();
+    await offered(true, "cloning a voice");
+    await effect("Phone").click();
+    await effect("None").click();
+    await offered(true, "an effect and back, with the voice cloned again");
+    await pick("Iris").click();
+    await offered(false, "choosing her saved voice");
+    await pick("Iris 2").click();
+    await offered(true, "choosing the voice cloned again");
+    // Cancel goes back to what is saved
+    await page.locator("button.s-btn", { hasText: "Cancel" }).click();
+    await until("her saved voice", () => chosen("Iris").count());
+    await offered(false, "Cancel");
   });
 
   await step("setups: a new one, renamed, switched and deleted", async () => {
@@ -765,12 +1199,14 @@ try {
     await until("Stub small's server, model and web search", runs(stubUrl, "stub-small", false), 30_000);
     await quiet(1000);
     check(runs(stubUrl, "stub-small", false)(), `Stub small runs ${config().llm_model}`);
-    // Its replies come from that server
+    // Its replies come from that server, in Amnesia mode (see amnesia())
+    await amnesia(true);
     const since = await ask("Hello there.");
     const done = await eventAfter("chat.done", since, () => true, 60_000);
     check(done.data.text.includes("the stub's answer"), `the reply came from elsewhere: ${done.data.text}`);
     check(stubRequests.at(-1)?.model === "stub-small", `the server was asked for ${stubRequests.at(-1)?.model}`);
     await voiceDone();
+    await amnesia(false);
     await useSetup("Stub large");
     await until("Stub large's model", runs(stubUrl, "stub-large", false), 30_000);
   });
@@ -823,11 +1259,12 @@ try {
     const since = Date.now();
     await page.locator("textarea").fill("Say hello in five words.");
     await page.locator("textarea").press("Enter");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     const error = events.find((e) => e.at >= since && e.type === "error");
     check(!error, `the reply failed: ${error?.data.message}`);
     check(done.data.text.trim().length > 0, "the reply is empty");
     await until("the reply in the conversation", () => page.getByText(done.data.text.trim().slice(0, 12)).count());
+    await checkHeard(since, "the reply");
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
   });
 
@@ -858,7 +1295,7 @@ try {
     check(!events.find((e) => e.at >= since && e.type === "chat.user"), "a message was taken while paused");
     await boxButton("Resume the conversation").click();
     await until("the core to resume", () => config().paused === false);
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     check(done.data.text.trim(), "no reply after Resume");
     await page.locator(".bubble.pending").waitFor({ state: "detached", timeout: 5000 });
     const sent = page.locator(".row", { has: page.locator(".bubble.user", { hasText: "Reply with one word: ready." }) });
@@ -896,7 +1333,7 @@ try {
     await until("the voice off", () => config().speak_replies === false);
     check((await boxButton("Speak replies").innerText()).trim() === "Voice off", "the button does not say Voice off");
     const since = await ask("Reply with exactly: text only today.");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     check(done.data.text.trim(), "the reply is empty");
     await until("the reply in the conversation", () => page.getByText(done.data.text.trim().slice(0, 12)).count());
     const timing = await eventAfter("turn.timing", since, () => true, 10_000);
@@ -969,7 +1406,7 @@ try {
     const word = "Quillwort";
     const stored = (await rpc("e2e.memory")).turns;
     const since = await ask(`Please remember this: my neighbour's tortoise is called ${word}.`);
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
     // Kept once it has been heard to the end
     const kept = async (turns) => (await rpc("e2e.memory")).turns === turns;
@@ -1034,7 +1471,7 @@ try {
 
     // The next message is answered as ever, and remembered
     const next = await ask("Reply with exactly: a clean slate.");
-    const reply = await eventAfter("chat.done", next, () => true, 180_000);
+    const reply = await replyEvent("chat.done", next);
     check(!reply.data.interrupted && reply.data.text.trim(), "the reply did not come");
     await until("the next exchange to be remembered", () => kept(2), 120_000);
     const said = await page.locator(".bubble.user").allInnerTexts();
@@ -1112,6 +1549,15 @@ try {
       images: parts.filter((p) => p.type === "image_url").map((p) => p.image_url.url),
     };
   };
+  /** Amnesia on or off. The test's own server answers in Amnesia mode, so its
+   *  replies are forgotten once the conversation leaves it: kept, the real
+   *  model, which answers without reasoning first (irisdev/e2e_core.py),
+   *  imitated them instead of answering */
+  async function amnesia(on) {
+    await rpc("memory.set_amnesia", { on });
+    await until(`amnesia ${on ? "on" : "off"}`, () => config().amnesia === on);
+  }
+
   /** Switch the core to a server and model through the Language model stage. */
   async function runOn(server, llm) {
     await openStage("Language model");
@@ -1127,6 +1573,7 @@ try {
     await until(`${llm} on offer`, () => option(llm).count(), 30_000);
     if (config().llm_model !== llm) await option(llm).first().click();
     await until(`${llm} in use`, () => config().llm_model === llm, 30_000);
+    await amnesia(server === stubUrl);
   }
 
   const NOTES = "The lighthouse keeper's cat is called Saffron Quill.";
@@ -1148,7 +1595,7 @@ try {
     const user = await eventAfter("chat.user", since, (data) => data.source === "text", 30_000);
     check(described(user.data) === "notes.txt:document,leaflet.pdf:document", `the files arrived as ${described(user.data)}`);
     check(!(await drafts.count()), "the files are still in the message box");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     check(/saffron/i.test(done.data.text) && /marigold/i.test(done.data.text),
       `the reply does not answer from the files: ${done.data.text}`);
     // The core keeps the files with the message, for an app that reloads
@@ -1175,7 +1622,7 @@ try {
     const user = await eventAfter("chat.user", since, (data) => data.source === "text", 30_000);
     check(described(user.data) === "first.png:image,second.jpg:image", `the files arrived as ${described(user.data)}`);
     check(user.data.attachments.every((f) => f.preview?.startsWith("data:image/jpeg;base64,")), "a picture has no preview");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await replyEvent("chat.done", since);
     if (sees) {
       check(/lemon/i.test(done.data.text) && /orbit/i.test(done.data.text), `the model did not read the pictures: ${done.data.text}`);
     } else {
@@ -1261,6 +1708,9 @@ try {
       }
       check(sent.images.length >= 2 && sent.images.every((url) => url.startsWith("data:image/jpeg;base64,")),
         `the model was sent ${sent.images.length} pictures`);
+      // The stub answers at once: its reply is spoken after this, unless
+      // waited for, and the next steps' messages would wait behind it
+      await eventAfter("audio.output", since, (data) => data.rms > 0, 60_000);
       await voiceDone();
     } finally {
       await runOn(usual.host, usual.model);
@@ -1335,13 +1785,15 @@ try {
 
   await step("Stop silences a reply being spoken, and Iris stays silent", async () => {
     const since = await ask("Count from one to forty in words, one number per sentence.");
-    await eventAfter("audio.output", since, (data) => data.rms > 0.001, 180_000);
+    await afterThinking("the voice", since, () =>
+      events.find((e) => e.at >= since && e.type === "audio.output" && e.data.rms > 0.001));
     await quiet(2500);
     const pressed = Date.now();
     await stopButton.click();
     await quiet(8000);
     const after = activity(pressed + 600, Date.now());
     check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
+    await checkSilent(pressed + 600);
     check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
     check(!(await stopButton.count()), "the Stop button is still there");
     const info = await rpc("app.info");
@@ -1350,15 +1802,18 @@ try {
 
   await step("after Stop the next message is answered and spoken", async () => {
     const since = await ask("Reply with exactly: ready when you are.");
-    const done = await eventAfter("chat.done", since, () => true, 180_000);
+    const done = await afterThinking("the reply", since, () =>
+      events.find((e) => e.at >= since && e.type === "chat.done"));
     check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
     await eventAfter("audio.output", since, (data) => data.rms > 0.001, 60_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
+    await checkHeard(since, "the reply after Stop");
   });
 
   await step("Stop while the reply is still being written silences it too", async () => {
     const since = await ask("Tell a story about a lighthouse keeper in about three hundred words.");
-    await eventAfter("chat.chunk", since, () => true, 180_000);
+    await afterThinking("the reply's first words", since, () =>
+      events.find((e) => e.at >= since && e.type === "chat.chunk"));
     await quiet(1200);
     const pressed = Date.now();
     await stopButton.click();
@@ -1367,20 +1822,81 @@ try {
     const chunks = events.filter((e) => e.at >= pressed + 600 && e.type === "chat.chunk").length;
     check(chunks === 0, `the reply went on: ${chunks} more chunks`);
     check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
+    await checkSilent(pressed + 600);
     check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
   });
 
   await step("Stop during a tool ends the turn", async () => {
-    const since = await ask("Search the web for the population of Reykjavik and tell me.");
-    await until("a tool to run", () => events.find((e) => e.at >= since && e.type === "tool.use"), 180_000);
-    const pressed = Date.now();
-    await stopButton.click();
-    await quiet(10_000);
-    const after = activity(pressed + 1500, Date.now());
-    check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
-    check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
-    const info = await rpc("app.info");
-    check(!["thinking", "speaking", "searching", "browsing"].includes(info.state), `Iris is ${info.state}`);
+    // Answering without reasoning first (irisdev/e2e_core.py), the model
+    // answered from what it knew after the conversation so far, or said it
+    // could not search; thinking first, it searches
+    await rpc("e2e.reasoning", { on: true });
+    try {
+      const since = await ask("Search the web for the population of Reykjavik and tell me.");
+      await afterThinking("a tool to run", since, () => events.find((e) => e.at >= since && e.type === "tool.use"));
+      const pressed = Date.now();
+      await stopButton.click();
+      await quiet(10_000);
+      const after = activity(pressed + 1500, Date.now());
+      check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
+      await checkSilent(pressed + 1500);
+      check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
+      const info = await rpc("app.info");
+      check(!["thinking", "speaking", "searching", "browsing"].includes(info.state), `Iris is ${info.state}`);
+    } finally {
+      await rpc("e2e.reasoning", { on: false });
+    }
+  });
+
+  await step("a speaker that cannot be opened is told once, and Iris goes on: Pause, Resume and a preview work after", async () => {
+    // As when AirPods disconnect under PortAudio
+    fs.writeFileSync(AUDIO_FAULTS, JSON.stringify({ speaker: "broken" }));
+    let since;
+    try {
+      await toConversation();
+      since = await ask("Reply with exactly: the speaker is quiet.");
+      const done = await replyEvent("chat.done", since);
+      check(done.data.text.trim(), "the reply did not come");
+      const told = await eventAfter(
+        "error",
+        since,
+        (data) => data.message.startsWith("The speaker could not be opened:"),
+        60_000
+      );
+      check(told.data.message.includes("PaErrorCode -9986"), `told: ${told.data.message}`);
+      await page.locator(".bubble.error", { hasText: "The speaker could not be opened" }).waitFor({ timeout: 5000 });
+      // The reply is shown all the same
+      await until("the reply in the conversation", async () =>
+        (await page.locator(".bubble.assistant").last().innerText()).trim()
+      );
+      // The next reply is not spoken either, and not told again
+      const again = await ask("Reply with exactly: still quiet.");
+      await replyEvent("chat.done", again);
+      await voiceDone();
+    } finally {
+      fs.rmSync(AUDIO_FAULTS, { force: true });
+    }
+    const errors = events.filter((e) => e.at >= since && e.type === "error").map((e) => e.data.message);
+    const speaker = errors.filter((message) => message.startsWith("The speaker could not be opened"));
+    check(speaker.length === 1, `told ${speaker.length} times`);
+    check(!errors.some((message) => message.startsWith("Assistant loop failed")), "the loop failed");
+    check((await rpc("app.info")).running, "Iris no longer runs");
+    // Pause and Resume still steer Iris
+    await boxButton("Pause the conversation").click();
+    await until("the paused state", async () => (await state()) === "paused");
+    await boxButton("Resume the conversation").click();
+    await until("the core to resume", () => config().paused === false);
+    await until("Iris no longer paused", async () => (await state()) !== "paused", 5000);
+    // The speaker works again: a preview plays, and a reply is spoken
+    await openStage("Voice");
+    const played = Date.now();
+    await inspector.locator('button[aria-label="Play"]').click();
+    await eventAfter("audio.output", played, (data) => data.rms > 0, 60_000);
+    await voiceDone();
+    const spoken = await ask("Reply with exactly: I can be heard again.");
+    await replyEvent("chat.done", spoken);
+    await eventAfter("audio.output", spoken, (data) => data.rms > 0.001, 60_000);
+    await voiceDone();
   });
 
   /** Whether a notice is in sight, below the conversation (not above it, where
@@ -1424,18 +1940,48 @@ try {
     await toConversation();
   });
 
-  await step("a silent microphone is warned about once, also under the orb, and presence comes and goes", async () => {
+  await step("presence shows only the orb, a click pauses, the mark and Escape lead back, and a silent microphone tints it", async () => {
     await toConversation();
     await rpc("mic.set", { on: false });
-    // Only the orb shows
+    // A warning left by an earlier step (the denied microphone) would be the
+    // orb's to show, and the expand mark gives way to it: a reply after it,
+    // so nothing needs the user
+    await rpc("debug.emit", { type: "chat.done", data: { text: "Nothing needs you now.", interrupted: false } });
+    await until("the reply", () => page.getByText("Nothing needs you now.").count(), 5000);
+    const shown = presence.length;
+    const orb = (await openPresence()).locator('[aria-label="iris"]');
+    const mark = presencePage.locator(".mark");
+    const at = (x, y) => presencePage.mouse.click(x, y);
+    // Presence is a window of its own: the conversation window asks for it,
+    // and presence holds nothing but the orb
     await page.locator('button[title="Presence"]').click();
-    await until("only the orb", async () => !(await page.locator("textarea").count()));
-    check(presence.at(-1) === true, "the window was not asked to shrink");
-    check(!(await page.locator('button[title="Settings"]').isVisible()), "the top bar still shows");
-    check(await page.locator('[aria-label="assistant status"]').isVisible(), "the orb is gone");
+    await until("presence", () => presence.at(-1) === true, 5000);
+    check(await orb.locator("canvas").count(), "presence shows no orb");
+    check(!(await presencePage.locator("textarea, header, nav, input").count()), "presence shows more than the orb");
+    check(!(await orb.getAttribute("title")), "the orb shows a warning nothing calls for");
+    // The orb says what Iris does, as the conversation window has it
+    const state = (await rpc("app.info")).state;
+    await until(`the orb to show ${state}`, async () => (await orb.getAttribute("data-state")) === state, 5000);
+    // On the orb the expand mark shows; a click beside it pauses, and again resumes
+    await presencePage.mouse.move(110, 110);
+    await until("the expand mark", () => mark.evaluate((m) => m.classList.contains("shown")), 5000);
+    let since = Date.now();
+    await at(110, 110);
+    await eventAfter("state", since, (data) => data.state === "paused", 5000);
+    await until("the orb to rest", async () => (await orb.getAttribute("data-state")) === "paused", 5000);
+    since = Date.now();
+    await at(110, 110);
+    await eventAfter("state", since, (data) => data.state !== "paused", 5000);
+    check(presence.at(-1) === true, "a click on the orb left presence");
+    // The mark leads back to the conversation
+    await presencePage.mouse.move(146, 74);
+    await at(146, 74);
+    await until("the conversation", () => presence.at(-1) === false, 5000);
     // A microphone that delivers exact zeros (the core's own is off; its
     // levels are given to it as the microphone would)
-    const since = Date.now();
+    await page.locator('button[title="Presence"]').click();
+    await until("presence", () => presence.at(-1) === true, 5000);
+    since = Date.now();
     while (Date.now() - since < 8000) {
       await rpc("debug.emit", { type: "audio.level", data: { rms: 0 } });
       await quiet(100);
@@ -1443,20 +1989,23 @@ try {
     const warnings = events.filter((e) => e.at >= since && e.type === "error");
     check(warnings.length === 1, `${warnings.length} warnings for one silence`);
     const message = warnings[0].data.message;
-    // It needs the user: it shows under the orb, and opens the conversation
-    const notice = page.locator("button.presence-error", { hasText: message.slice(0, 20) });
-    await notice.waitFor({ timeout: 5000 });
-    await notice.click();
-    await page.locator("textarea").waitFor({ timeout: 5000 });
-    check(presence.at(-1) === false, "the window was not asked to grow");
+    // It needs the user: the orb takes the danger tint, says it as its
+    // title, and a click on it opens the conversation, where it is
+    await until("the warning on the orb", async () => (await orb.getAttribute("title")) === message, 5000);
+    await presencePage.mouse.move(110, 110);
+    await quiet(300);
+    check(!(await mark.evaluate((m) => m.classList.contains("shown"))), "the expand mark shows over the warning");
+    await at(110, 110);
+    await until("the conversation", () => presence.at(-1) === false, 5000);
     check((await page.locator(".bubble.error", { hasText: message.slice(0, 40) }).count()) === 1,
       "the warning is not in the conversation once");
     // Presence again, and Escape brings the conversation back
     await page.locator('button[title="Presence"]').click();
-    await until("only the orb", async () => !(await page.locator("textarea").count()));
-    await page.keyboard.press("Escape");
-    await page.locator("textarea").waitFor({ timeout: 5000 });
-    check(presence.join() === "true,false,true,false", `presence went ${presence.join()}`);
+    await until("presence", () => presence.at(-1) === true, 5000);
+    await presencePage.keyboard.press("Escape");
+    await until("the conversation", () => presence.at(-1) === false, 5000);
+    const went = presence.slice(shown).join();
+    check(went === "true,false,true,false,true,false", `presence went ${went}`);
   });
 
   await step("the core stops: the app says so, starts it again, and goes on", async () => {
@@ -1475,7 +2024,7 @@ try {
     // The conversation stays shown, once
     check((await messages.count()) === shown + 1, `${shown} messages before, ${await messages.count()} after`);
     const typed = await ask("Reply with exactly: back again.");
-    const done = await eventAfter("chat.done", typed, () => true, 180_000);
+    const done = await replyEvent("chat.done", typed);
     check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
   });
 
@@ -1493,8 +2042,12 @@ try {
     await sleepWord.fill("Goodnight");
     await sleepWord.press("Enter");
     await until("the sleep word", () => config().sleep_word === "Goodnight");
+    check((await rpc("persona.get", { id: "iris" })).sleep_word === "Goodnight", "the sleep word is not Iris's own");
     await inspector.locator("#stay-awake").selectOption("60");
     await until("a minute awake", () => config().wake_window === 60);
+    await setSwitch("Sleep when idle", false, () => config().wake_window === 0);
+    check(await inspector.locator("#stay-awake").isDisabled(), "the time can be chosen while Iris does not sleep when idle");
+    await setSwitch("Sleep when idle", true, () => config().wake_window === 60);
     await openStage("Turn end");
     await option("Silence").click();
     await until("silence", () => config().turn_detection === "silence");
@@ -1507,6 +2060,9 @@ try {
     await openStage("Persona");
     await option("HAL").click();
     await until("HAL", () => config().persona === "HAL", 60_000);
+    // HAL's words: his name, and no sleep word
+    check(config().wake_word === "HAL", `HAL is woken by ${config().wake_word}`);
+    check(config().sleep_word === "", `HAL sleeps by ${config().sleep_word}`);
     // Remembered before amnesia: what was typed
     await openStage("Memory");
     await setSwitch("Remember conversations", false, () => config().amnesia === true);
@@ -1515,8 +2071,14 @@ try {
 
     const restarted = Date.now();
     await restartCore();
-    // Launched once more without the microphone
+    // Launched once more without the microphone, and with the wake word kept
+    // as it was before each persona had its own: it goes to the persona in use
     await page.evaluate(() => sessionStorage.setItem("e2e.mic", "denied"));
+    await page.evaluate(() => {
+      const kept = JSON.parse(localStorage.getItem("iris.settings") ?? "{}");
+      delete kept.wake_on;
+      localStorage.setItem("iris.settings", JSON.stringify({ ...kept, wake_word: "HAL" }));
+    });
     await page.reload();
     const started = await until("the app to start Iris", () =>
       calls.find((c) => c.at >= restarted && c.method === "assistant.start"), 30_000);
@@ -1528,15 +2090,18 @@ try {
       speak_replies: false,
       ...(bargeIn ? { barge_in: false } : {}),
       amnesia: true,
-      wake_word: WAKE_WORD,
+      wake_on: true,
       wake_window: 60,
-      sleep_word: "Goodnight",
+      wake_word: undefined,
+      sleep_word: undefined,
       turn_detection: "silence",
     };
     for (const [key, value] of Object.entries(expected)) {
       check(options[key] === value, `Iris was started with ${key} ${JSON.stringify(options[key])}, not ${JSON.stringify(value)}`);
     }
     check(options.tools?.web === false, `Iris was started with the tools ${JSON.stringify(options.tools)}`);
+    const migrated = await settings();
+    check(migrated.wake_on === true && !("wake_word" in migrated), `the wake word was kept as ${JSON.stringify(migrated)}`);
     await eventAfter("config", restarted, () => true, 180_000);
     await rpc("mic.set", { on: false });
     const now = config();
@@ -1574,6 +2139,8 @@ try {
     await openStage("Persona");
     await option("Iris").click();
     await until("Iris", () => config().persona === "Iris", 60_000);
+    check(config().wake_word === WAKE_WORD, `Iris is woken by ${config().wake_word}`);
+    check(config().sleep_word === "Goodnight", `Iris sleeps by ${config().sleep_word}`);
     await openStage("Output");
     await setSwitch("Speak replies", true, () => config().speak_replies === true);
     if (bargeIn) await setSwitch("Interrupt by voice", true, () => config().barge_in === true);
@@ -1583,6 +2150,332 @@ try {
     await option("Smart Turn").click();
     await until("Smart Turn", () => config().turn_detection === "smart_turn");
     await toConversation();
+  });
+
+  await step("voice cloning: Iris keeps her cloned voice after a restart, and gets her own back", async () => {
+    check((await rpc("persona.get", { id: "iris" })).voice === "clone:iris", "the cloned voice was lost");
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Iris" }).first().click();
+    await until("Iris's cloned voice", () => page.locator(".voice.active", { hasText: "Iris" }).count());
+    const since = Date.now();
+    await page.locator(".voice.active .play").click();
+    await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
+    await voiceDone();
+    await checkHeard(since, "the cloned voice's tile after a restart");
+    // Back to a voice of the catalogue: the clone stays, to switch back to
+    // By its name alone: the tile shows the languages it speaks beside it
+    const shippedName = exactly(shippedVoice.replace(/^./, (c) => c.toUpperCase()));
+    await page.locator(".voice button.pick", { has: page.locator(".name", { hasText: shippedName }) }).click();
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("her own voice", () => config().tts_voice === shippedVoice, 10_000);
+    const voices = await rpc("persona.voices");
+    check(voices.engines.kyutai.some((v) => v.id === "clone:iris" && v.name === "Iris"), "the cloned voice is gone");
+    await toConversation();
+  });
+
+  await step("the walkthrough runs again from Settings, skips and keeps, and Iris says hello", async () => {
+    const before = config();
+    await openSettings();
+    await page.locator('nav[aria-label="Settings"] button', { hasText: "Walkthrough" }).click();
+    await page.getByText("Welcome to Iris").waitFor({ timeout: 5000 });
+    await footerButton("Get started").click();
+    const moves = [["server", "Skip"], ["models", "Continue"], ["microphone", "Skip"], ["voice", "Continue"], ["extras", "Continue"]];
+    for (const [name, move] of moves) {
+      await walkthroughStep(name).waitFor({ timeout: 10_000 });
+      await quiet(500);
+      await footerButton(move).click();
+    }
+    await walkthroughStep("ready").waitFor({ timeout: 5000 });
+    const since = Date.now();
+    await footerButton("Done").click();
+    await until("the conversation", () => page.locator("textarea").count(), 10_000);
+    const greeting = await replyEvent("chat.done", since);
+    check(greeting.data.text.trim().length > 0, "the greeting is empty");
+    const after = config();
+    for (const key of ["llm_model", "ollama_host", "wake_word", "sleep_word", "wake_window", "persona"]) {
+      check(after[key] === before[key], `${key} changed from ${before[key]} to ${after[key]}`);
+    }
+    check(after.mic_on === before.mic_on, "the microphone is not as it was");
+    await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
+  });
+
+  // ------------------------------------------------------------- the Voices page
+
+  const voicesPage = async () => {
+    await openSettings("Voices");
+    await page.locator('section[aria-label="Kyutai"]').waitFor({ timeout: 15_000 });
+  };
+  const tile = (voice) => page.locator(`.tile[data-voice="${voice}"]`);
+  const card = (voice) => page.locator(`article.cloned[data-voice="${voice}"]`);
+  const library = async () => (await rpc("voice.list")).engines;
+  const cloneOf = async (name) => (await library()).kyutai.find((v) => v.cloned && v.name === name);
+  const voiceFilter = page.locator('[role="group"][aria-label="Voices that speak"]');
+  /** A voice was heard: the core reported its level, and the virtual
+   *  speaker played it where the core tells (e2e.speaker) */
+  const heard = async (since, timeout = 90_000) => {
+    await eventAfter("audio.output", since, (data) => data.rms > 0, timeout);
+    await voiceDone();
+    const played = await rpc("e2e.speaker", { since }).catch(() => null);
+    if (played) check(played.seconds > 0, "the speaker played nothing");
+  };
+  let sample = null;
+
+  await step("voices: every voice is listed by engine, with its languages and the personas that speak with it", async () => {
+    await voicesPage();
+    const engines = await library();
+    for (const [engine, label] of [["kyutai", "Kyutai"], ["kokoro", "Kokoro"]]) {
+      const catalogue = (engines[engine] ?? []).filter((v) => !v.cloned);
+      if (!catalogue.length) continue;
+      const shown = await page.locator(`section[aria-label="${label}"] .tile`).count();
+      check(shown === catalogue.length, `${label}: ${shown} tiles for ${catalogue.length} voices`);
+    }
+    // Each with the personas that speak with it, and the languages it speaks
+    const iris = await rpc("persona.get", { id: "iris" });
+    check(iris.engine === "kyutai", `Iris speaks with ${iris.engine}`);
+    const irisVoice = page.locator(`[data-voice="${iris.voice}"]`);
+    check((await irisVoice.locator(".user").allInnerTexts()).includes("Iris"), "Iris is not shown with her voice");
+    const alba = engines.kyutai.find((v) => v.id === "alba");
+    const codes = (await tile("alba").locator(".codes").innerText()).toLowerCase().split(/\s+/);
+    check(codes.join() === alba.languages.join(), `Alba shows ${codes} for ${alba.languages}`);
+    // A persona opens in the persona editor, which leads back here
+    await irisVoice.locator(".user", { hasText: "Iris" }).click();
+    await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
+    await page.locator("button.manage", { hasText: "Manage voices" }).click();
+    await page.locator('section[aria-label="Kyutai"]').waitFor({ timeout: 5000 });
+  });
+
+  await step("voices: the language filter shows the voices that speak every language picked", async () => {
+    await voicesPage();
+    const all = Object.values(await library()).flat();
+    const speaking = (...codes) => all.filter((v) => codes.every((c) => v.languages.includes(c)));
+    const visible = () => page.locator(".tile, article.cloned").count();
+    await voiceFilter.locator("button", { hasText: "French" }).click();
+    await until("the French voices", async () => (await visible()) === speaking("fr").length);
+    check(!(await tile("alba").count()), "Alba, who does not speak French, is shown");
+    check(await tile("anna").count(), "Anna, who speaks French, is hidden");
+    // A language no voice that speaks French speaks cannot be added
+    check(await voiceFilter.locator("button", { hasText: "Japanese" }).isDisabled(), "Japanese can be added");
+    await voiceFilter.locator("button", { hasText: "Hindi" }).click();
+    await until("the voices that speak French and Hindi", async () => (await visible()) === speaking("fr", "hi").length);
+    check(!(await page.locator('section[aria-label="Kyutai"]').count()), "Kyutai is shown without a voice");
+    await voiceFilter.locator("button", { hasText: "Hindi" }).click();
+    await voiceFilter.locator("button", { hasText: "French" }).click();
+    await until("every voice", async () => (await visible()) === all.length);
+  });
+
+  await step("voices: a voice plays from its tile, through the editor's preview, and reaches the speaker", async () => {
+    await voicesPage();
+    const voice = (await library()).kyutai.find((v) => !v.cloned && v.id !== "anna" && v.ready.includes(v.languages[0]));
+    check(voice, "no voice of Kyutai is ready");
+    const since = Date.now();
+    await tile(voice.id).locator(".s-play").click();
+    await tile(voice.id).locator(".s-play.playing").waitFor({ timeout: 2000 });
+    await heard(since);
+    const asked = calls.find((c) => c.at >= since && c.method === "persona.preview");
+    check(asked?.params.voice === voice.id && asked.params.name === voice.name, `the preview asked for ${JSON.stringify(asked?.params)}`);
+    await tile(voice.id).locator(".s-play.playing").waitFor({ state: "detached", timeout: 5000 });
+  });
+
+  await step("voices: a voice is cloned here for the languages picked, plays, and is renamed", async () => {
+    await voicesPage();
+    huggingFace({ token: CLONE_TOKEN, terms: true });
+    sample = sample ?? speechSample();
+    await page.getByRole("button", { name: "Clone a voice" }).click();
+    await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    // English, and French picked besides
+    const languagesFor = page.locator('[aria-label="Languages to make the voice for"]');
+    check((await languagesFor.locator("button", { hasText: "English" }).getAttribute("aria-pressed")) === "true", "English is not picked");
+    await languagesFor.locator("button", { hasText: "French" }).click();
+    const since = Date.now();
+    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+    // Cloned once it is made for every language picked
+    await page.getByRole("button", { name: "Clone a voice" }).waitFor({ timeout: 180_000 });
+    const made = await until("the voice", () => cloneOf("Cloned voice"), 10_000);
+    check(made.cloned.made.includes("en") && made.cloned.made.includes("fr"), `the voice is made for ${made.cloned.made}`);
+    check(events.some((e) => e.at >= since && e.type === "voice.job" && e.data.voice === made.id && e.data.language === "fr"), "making it for French was not shown");
+    // It says the preview, then its name is to be given
+    await heard(since);
+    const name = card(made.id).locator('input[aria-label="Name of the voice"]');
+    await until("the name to be asked for", () => name.evaluate((input) => document.activeElement === input));
+    await name.fill("Testa");
+    await name.press("Enter");
+    await until("the new name", async () => (await cloneOf("Testa"))?.id === made.id);
+    const again = Date.now();
+    await card(made.id).locator(".s-play").click();
+    await heard(again);
+  });
+
+  await step("voices: a cloned voice is cloned again from a new sample, and keeps its name", async () => {
+    await voicesPage();
+    const before = await cloneOf("Testa");
+    check(before, "no voice named Testa");
+    const folder = path.join(coreHome, ".iris", "voices", before.id.split(":")[1]);
+    const old = fs.statSync(path.join(folder, "sample.wav")).mtimeMs;
+    await card(before.id).getByRole("button", { name: "Clone again" }).click();
+    await card(before.id).locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    const since = Date.now();
+    await card(before.id).locator('input[aria-label="Audio file"]').setInputFiles({ name: "again.wav", mimeType: "audio/wav", buffer: sample });
+    await card(before.id).locator(".clone").waitFor({ state: "detached", timeout: 180_000 });
+    await heard(since);
+    const after = await cloneOf("Testa");
+    check(after?.id === before.id, `cloned again, the voice is ${after?.id}`);
+    check(fs.statSync(path.join(folder, "sample.wav")).mtimeMs > old, "the sample was not replaced");
+    check(after.cloned.made.includes("en"), `made for ${after.cloned.made}`);
+  });
+
+  await step("voices: a cloned voice no persona speaks with is deleted", async () => {
+    await voicesPage();
+    const voice = await cloneOf("Testa");
+    const folder = path.join(coreHome, ".iris", "voices", voice.id.split(":")[1]);
+    await card(voice.id).getByRole("button", { name: "Delete" }).click();
+    await card(voice.id).getByRole("button", { name: "Confirm delete" }).click();
+    await card(voice.id).waitFor({ state: "detached", timeout: 10_000 });
+    check(!(await cloneOf("Testa")) && !fs.existsSync(folder), "the voice is still there");
+  });
+
+  await step("voices: a voice a persona speaks with asks before it is deleted, and the persona speaks with Anna", async () => {
+    // A voice made of the sample as the cloning steps make one, and Iris
+    // speaking with it
+    const data = sample.toString("base64");
+    check((await rpc("voice.sample", { data, name: "sample.wav" })).ok, "the sample was refused");
+    const made = await rpc("voice.clone", { name: "Guarded" });
+    check(made.ok, made.error);
+    const voice = made.voice.id;
+    const iris = await rpc("persona.get", { id: "iris" });
+    await rpc("persona.save", { ...iris, voice });
+    await until("Iris on the voice", () => config().tts_voice === voice, 15_000);
+    await openSettings("Pipeline");
+    await voicesPage();
+    await card(voice).locator(".user", { hasText: "Iris" }).waitFor({ timeout: 5000 });
+    await card(voice).getByRole("button", { name: "Delete" }).click();
+    const guard = card(voice).locator(".guard");
+    await guard.getByText("Iris speaks with this voice, and will speak with Anna.").waitFor({ timeout: 5000 });
+    await guard.getByRole("button", { name: "Cancel" }).click();
+    check(await card(voice).count(), "the voice went without being deleted");
+    await card(voice).getByRole("button", { name: "Delete" }).click();
+    await card(voice).locator(".guard").getByRole("button", { name: "Delete" }).click();
+    await card(voice).waitFor({ state: "detached", timeout: 10_000 });
+    await until("Iris on Anna", () => config().tts_voice === "anna", 15_000);
+    check((await rpc("persona.get", { id: "iris" })).voice === "anna", "Iris was not saved with Anna");
+  });
+
+  await step("voices: a voice cloned in the persona editor stays, saved or not, until it is deleted here", async () => {
+    // Iris removed a voice cloned and not saved once the editor closed, and
+    // the one cloned before when it cloned again: every voice now stays
+    huggingFace({ token: CLONE_TOKEN, terms: true });
+    sample = sample ?? speechSample();
+    const clones = async () => (await library()).kyutai.filter((v) => v.cloned);
+    const folderOf = (voice) => path.join(coreHome, ".iris", "voices", voice.split(":")[1]);
+    const offered = () => page.locator(".voice .pick .name").allInnerTexts();
+    const pickVoice = (name) => page.locator(".voice button.pick", { has: page.locator(".name", { hasText: exactly(name) }) });
+    const editIris = async () => {
+      await openSettings("Personas");
+      await page.locator("button.card", { hasText: "Iris" }).first().click();
+      await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
+    };
+    /** Clone a voice in the editor: the new one, chosen, says the preview */
+    const cloneHere = async (button) => {
+      const before = new Set((await clones()).map((v) => v.id));
+      await page.getByRole("button", { name: button }).click();
+      await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+      const since = Date.now();
+      await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+      await page.locator(".clone").waitFor({ state: "detached", timeout: 180_000 });
+      const made = (await clones()).find((v) => !before.has(v.id));
+      check(made, "no voice was cloned");
+      await until(`${made.name} to be chosen`, async () => (await page.locator(".voice.active .pick .name").allInnerTexts()).includes(made.name));
+      await heard(since);
+      return made;
+    };
+    const kept = async (voice, when) => {
+      check((await clones()).some((v) => v.id === voice.id), `${voice.name} is not listed ${when}`);
+      check(fs.existsSync(folderOf(voice.id)), `the folder of ${voice.name} is gone ${when}`);
+    };
+    check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
+
+    // Cloned, and the editor left without saving
+    await editIris();
+    const first = await cloneHere("Clone a voice");
+    await openSettings();
+    await quiet(1000);
+    check((await rpc("persona.get", { id: "iris" })).voice === "anna", "Iris was saved with the voice");
+    await kept(first, "once the editor is left");
+    // Opened again, the editor offers it, and so does the Voices page
+    await editIris();
+    await until(`${first.name} to be offered`, async () => (await offered()).includes(first.name));
+    await voicesPage();
+    await card(first.id).waitFor({ timeout: 5000 });
+
+    // Chosen, and cloned again before saving: both stay
+    await editIris();
+    await pickVoice(first.name).click();
+    const second = await cloneHere("Clone again");
+    await kept(first, "once another is cloned in its place");
+    await kept(second, "once it is cloned");
+    const both = await offered();
+    check(both.includes(first.name) && both.includes(second.name), `the editor offers ${JSON.stringify(both)}`);
+
+    // Saved with the newer one: the older one stays
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until(`Iris on ${second.name}`, () => config().tts_voice === second.id, 15_000);
+    check((await rpc("persona.get", { id: "iris" })).voice === second.id, "Iris was not saved with the newer voice");
+    await quiet(1000);
+    await kept(first, "once Iris is saved with another");
+
+    // Deleted on the Voices page, it is gone from both lists
+    await voicesPage();
+    await card(first.id).getByRole("button", { name: "Delete" }).click();
+    await card(first.id).getByRole("button", { name: "Confirm delete" }).click();
+    await card(first.id).waitFor({ state: "detached", timeout: 10_000 });
+    check(!(await clones()).some((v) => v.id === first.id), `${first.name} is still listed`);
+    check(!fs.existsSync(folderOf(first.id)), `the folder of ${first.name} is still there`);
+    await kept(second, "once the other is deleted");
+    await editIris();
+    await until(`${second.name} to be offered`, async () => (await offered()).includes(second.name));
+    check(!(await offered()).includes(first.name), `the editor still offers ${first.name}`);
+
+    // Iris speaks with Anna again, as the next step has her
+    await pickVoice("Anna").click();
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("Iris on Anna", () => config().tts_voice === "anna", 15_000);
+    await toConversation();
+  });
+
+  await step("voices: a reply its voice is not ready for is shown with its download, and spoken once the voice is ready", async () => {
+    // Answering without reasoning first (irisdev/e2e_core.py), late in the
+    // run the model answered in English, as its greeting before; thinking
+    // first, it answers in Italian, which the step needs
+    await rpc("e2e.reasoning", { on: true });
+    try {
+      // Italian's model is not here: the stand-in downloads it slowly
+      huggingFace({ hidden: ["italian"] });
+      check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
+      const question = "Reply only in Italian, in one short sentence: what is the capital of Italy?";
+      const since = await ask(question);
+      const done = await replyEvent("chat.done", since);
+      const job = await eventAfter("voice.job", since, (data) => data.voice === "anna" && data.language === "it", 30_000);
+      check(job.data.origin === "conversation", `the download was started by ${job.data.origin}`);
+      // The reply is shown at once, and the download in the conversation and
+      // under the orb, with its progress, while it goes on
+      await page.locator(".bubble.assistant").last().waitFor();
+      const line = page.locator(`.job[data-job="${job.data.id}"]`);
+      await line.waitFor({ timeout: 5000 });
+      await until("its progress", async () => / MB, \d+ %/.test(await line.innerText()), 10_000);
+      check((await line.innerText()).includes("Iris will speak Italian once it's done"), `the line says: ${await line.innerText()}`);
+      check(await page.locator(`[data-job="${job.data.id}"]`).count() >= 2, "the download is not shown under the orb");
+      const ready = await eventAfter("voice.job", since, (data) => data.id === job.data.id && data.state === "ready", 60_000);
+      // Nothing was spoken of the reply meanwhile
+      const sounded = events.filter((e) => e.type === "audio.output" && e.data.rms > 0 && e.at >= done.at && e.at <= ready.at);
+      check(!sounded.length, `${sounded.length} audible moments while the voice was not ready`);
+      await page.getByText("Anna's voice is ready for Italian").waitFor({ timeout: 5000 });
+      // The next reply in Italian is spoken, and reaches the speaker
+      const next = await ask(question);
+      const timing = await replyEvent("turn.timing", next);
+      check(timing.data.components.voice === "kyutai:anna", `spoken by ${timing.data.components.voice}`);
+      await heard(next);
+    } finally {
+      await rpc("e2e.reasoning", { on: false });
+    }
   });
 
   await step("nothing went wrong in the page", async () => {

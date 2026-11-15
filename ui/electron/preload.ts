@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld("iris", {
 
   micStatus: () => ipcRenderer.invoke("mic-status"),
 
+  /** Ask for the microphone; resolves to the status afterwards */
+  askMicrophone: () => ipcRenderer.invoke("ask-microphone"),
+
   isPackaged: () => ipcRenderer.invoke("is-packaged"),
 
   /** The system's folder picker; resolves to the chosen path, or null */

@@ -26,10 +26,16 @@ Event types:
     tool.use     {"tool": str, "detail": str}
     wake         {"word": str}                       the wake word was heard
     wake.window  {"remaining": float}                seconds until it falls asleep;
-                                                     0 once it is asleep
+                                                     0 once it is asleep; not sent
+                                                     while it sleeps only when told
     sleep        {}                                  it fell asleep (window over,
                                                      or the sleep word)
     error        {"message": str, "kind": str}         kind is optional
+    notice       {"message": str, "kind": str,       something to know, not a fault:
+                  "language": str}                   kind "unspoken", replies in
+                                                     the language are shown, not
+                                                     spoken (the voice does not
+                                                     speak it); once per voice
     turn.timing  {"source": "voice"|"text", "total": int,
                   "stages": {"turn_end", "recognition", "reply", "voice": int|None},
                   "components": {stage: str}}
@@ -37,8 +43,16 @@ Event types:
                                                      from the end of speech to the
                                                      first word heard (see iris.timing)
     setup.progress {"model": str, "label": str,      model download at first start
-                    "done": int, "total": int}       (model: stt, wake, turn or tts);
-                                                     an empty label when done
+                    "done": int, "total": int}       (model: kyutai, kokoro, turn,
+                                                     stt or wake); an empty label
+                                                     when done
+    setup.models {"models": [{"id", "label",         every speech model the
+                  "detail", "size_mb", "state",      walkthrough fetches, in order;
+                  "done", "total", "error"}],        state: waiting, downloading,
+                  "busy": bool}                      done or failed (with error)
+    mic.check    {"level": float, "heard": bool,     the walkthrough's sound check:
+                  "silent": bool}                    level 0.0-1.0, a voice came
+                                                     through, only exact zeros
     memory.updated {}                                topics were filed or forgotten
     memory.forgotten {}                              everything was forgotten: the
                                                      conversation shown goes too,

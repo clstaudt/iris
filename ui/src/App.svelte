@@ -5,9 +5,9 @@
   import Icon from "./components/Icon.svelte";
   import Memory from "./components/Memory.svelte";
   import SettingsWindow from "./components/settings/SettingsWindow.svelte";
-  import Setup from "./components/Setup.svelte";
   import StatusZone from "./components/StatusZone.svelte";
   import Transcript from "./components/Transcript.svelte";
+  import Walkthrough from "./components/walkthrough/Walkthrough.svelte";
   import { connectConversation } from "./lib/orb.svelte";
   import { store } from "./lib/state.svelte";
 
@@ -52,11 +52,11 @@
     </div>
   </header>
 
-  <!-- One cell: the setup screen fades out, then the conversation fades in -->
+  <!-- One cell: the walkthrough fades out, then the conversation fades in -->
   <div class="stack min-h-0 flex-1">
     {#if store.needsSetup}
       <div class="flex min-h-0" out:fade={{ duration: 400 }}>
-        <Setup />
+        <Walkthrough />
       </div>
     {:else}
       <div class="flex min-h-0 gap-2 px-2 pb-2" in:fade={{ duration: 600, delay: 400 }}>

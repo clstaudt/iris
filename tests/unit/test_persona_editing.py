@@ -119,4 +119,6 @@ def test_to_dict_is_what_the_editor_shows(dirs):
         "speed": 1.25,
         "audio_filter": "",
         "description": "Warm.\n",
+        "wake_word": "Iris",
+        "sleep_word": "",
     }

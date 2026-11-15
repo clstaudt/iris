@@ -6,6 +6,7 @@ attributes the code under test touches are filled in.
 
 import queue
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,12 +38,17 @@ def _bare_assistant():
     assistant.hold_event = threading.Event()
     assistant.speak_replies = True
     assistant.wake_word = None
+    assistant.sleep_word = None
     assistant.conversation_language = "en"
     assistant._reply_language = "en"
     assistant._turn_active = threading.Event()
     assistant.event_bus = EventBus()
     assistant.tts_generator = SpeechGenerator.__new__(SpeechGenerator)
     assistant.tts_generator.engine = "kyutai"
+    assistant.tts_generator.voice = "anna"
+    assistant.persona = SimpleNamespace(name="Iris")
+    assistant._reply_voiced = assistant._reply_unspoken = False
+    assistant._unspoken_told = set()
     return assistant
 
 
@@ -116,6 +122,7 @@ def _answer_heard(engine, text, language):
     assistant.interrupt_event = threading.Event()
     assistant.transcriber = Transcript(text, language)
     assistant.tts_generator.engine = engine
+    assistant.tts_generator.voice = {"kyutai": "anna", "kokoro": "bm_lewis"}[engine]
     answered = []
     assistant.chat = lambda text, response_language, source=None: answered.append(
         response_language
@@ -128,7 +135,8 @@ def test_a_kyutai_persona_answers_german_in_german():
     assert _answer_heard("kyutai", "Beschreibe dich kurz.", "de") == "de"
 
 
-def test_a_kokoro_persona_answers_german_through_kyutai():
+def test_a_kokoro_persona_answers_german_in_german_though_its_voice_does_not_speak_it():
+    """The reply is shown; no other voice says it."""
     assert _answer_heard("kokoro", "Beschreibe dich kurz.", "de") == "de"
     assert _answer_heard("kokoro", "Bonjour.", "fr") == "fr"
 
@@ -138,7 +146,7 @@ def test_a_language_no_voice_speaks_keeps_to_english():
     assert _answer_heard("kyutai", "Опиши себя коротко.", "ru") == "en"
 
 
-def test_a_kyutai_persona_answers_japanese_through_kokoro():
+def test_a_kyutai_persona_answers_japanese_in_japanese():
     assert _answer_heard("kyutai", "こんにちは", "ja") == "ja"
 
 
@@ -165,11 +173,38 @@ def test_each_piece_of_the_reply_is_spoken_in_the_language_it_is_in():
     assert assistant.speech_pipeline.languages == ["it", "it", "it", "en"]
 
 
-def test_a_kokoro_persona_speaks_a_german_reply_in_german():
+def test_a_german_reply_of_a_persona_whose_voice_speaks_no_german_is_only_shown():
+    """It was spoken by Pocket TTS's German voice, a man's: HAL changed his
+    voice in the middle of the conversation. Now no other voice says it,
+    and the user is told once why the voice is silent."""
     assistant = _bare_assistant()
-    assistant.tts_generator.engine = "kokoro"
+    assistant.tts_generator.engine, assistant.tts_generator.voice = "kokoro", "bm_lewis"
+    assistant.persona = SimpleNamespace(name="HAL")
+    notices = []
+    assistant.event_bus.subscribe(lambda kind, data: kind == "notice" and notices.append(data))
+    assistant._speak("Ja, natürlich, das mache ich gern.")
+    assistant._speak("Worüber möchtest du heute sprechen?")
+    assistant._speak("Sorry, back to English: what would you like to talk about?")
+
+    assert assistant.speech_pipeline.spoken == [
+        "Sorry, back to English: what would you like to talk about?"
+    ]
+    assert notices == [
+        {
+            "message": "HAL's voice does not speak German: "
+            "replies in German are shown, not spoken.",
+            "kind": "unspoken",
+            "language": "de",
+        }
+    ]
+    assert assistant._reply_unspoken
+
+
+def test_a_kyutai_voice_speaks_german_itself():
+    assistant = _bare_assistant()
     assistant._speak("Ja, natürlich, das mache ich gern.")
     assert assistant.speech_pipeline.languages == ["de"]
+    assert not assistant._reply_unspoken
 
 
 def test_a_reply_in_a_language_no_voice_speaks_keeps_the_conversations():

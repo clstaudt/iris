@@ -5,6 +5,7 @@
   import { store, type AttachmentInfo } from "../lib/state.svelte";
   import Attachments from "./Attachments.svelte";
   import Icon from "./Icon.svelte";
+  import JobLine from "./JobLine.svelte";
 
   const TOOLS: Record<string, { icon: string; label: string }> = {
     search: { icon: "search", label: "Searched the web" },
@@ -121,6 +122,9 @@
             {/if}
           </div>
         </div>
+      {:else if message.kind === "voice.job" && message.job && store.jobs[message.job]}
+        <!-- A voice the conversation waits on, made ready as it goes -->
+        <div class="flex justify-center"><JobLine job={store.jobs[message.job]} /></div>
       {:else if message.role === "system"}
         <div class="text-center text-[12px] text-ink-3">{message.text}</div>
       {:else}

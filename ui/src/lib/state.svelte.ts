@@ -1,6 +1,7 @@
 /** Central reactive store, fed by Python events over the RPC bridge. */
 
 import { onEvent, rpc, type AppInfo, type TurnTiming } from "./bridge";
+import type { WalkthroughChoices } from "./walkthrough.svelte";
 
 export type { TurnTiming };
 
@@ -49,6 +50,8 @@ export interface ChatMessage {
   attachments?: AttachmentInfo[];
   /** Error category, so a resolved warning can be retracted */
   kind?: string;
+  /** A voice being made ready that the conversation waits on, by job id */
+  job?: string;
 }
 
 /** A topic in long-term memory, as listed in the memory panel. */
@@ -152,9 +155,14 @@ export interface AssistantConfig {
   speak_replies?: boolean;
   barge_in?: boolean;
   barge_in_available?: boolean;
+  /** The word listened for; "" while the wake word is off */
   wake_word?: string;
+  /** Seconds Iris stays awake after a turn; 0 when it sleeps only when told */
   wake_window?: number;
+  /** The persona's sleep word; "" for none */
   sleep_word?: string;
+  /** The persona's wake word, also while the wake word is off */
+  persona_wake_word?: string;
   stt_model_path?: string;
   tts_models_dir?: string;
   /** Whether Smart Turn or a silence ends a turn */
@@ -212,7 +220,7 @@ const SETUP_KEYS = [
 ] as const;
 
 /** The pages of the settings window. */
-export type SettingsPage = "pipeline" | "personas";
+export type SettingsPage = "pipeline" | "personas" | "voices";
 
 /** What ends a turn: Smart Turn hearing the user has finished, or a silence. */
 export type TurnDetection = "smart_turn" | "silence";
@@ -257,6 +265,10 @@ export interface PersonaSettings {
   /** "" for none */
   audio_filter: string;
   description: string;
+  /** Its name unless it is given another */
+  wake_word?: string;
+  /** "" for none */
+  sleep_word?: string;
   /** Shipped with Iris: it can be reset once edited, but not deleted */
   shipped?: boolean;
   edited?: boolean;
@@ -265,18 +277,72 @@ export interface PersonaSettings {
 export interface VoiceInfo {
   id: string;
   name: string;
+  /** The language it was made for, as shown */
   language: string;
+  /** Whisper codes of the languages it speaks properly */
+  languages?: string[];
+  /** Of those, the ones it is ready to speak now: nothing to download or
+   *  make first */
+  ready?: string[];
+  /** The personas that speak with it */
+  personas?: { id: string; name: string }[];
+  /** A voice cloned here: where its files are, and the languages made of
+   *  its sample so far */
+  cloned?: { folder: string; made: string[] };
+}
+
+/** Making a voice ready to speak a language: a download, then for a cloned
+ *  voice its making, shown wherever it is waited on. */
+export interface VoiceJob {
+  /** engine|voice|language */
+  id: string;
+  engine: SpeechEngine;
+  voice: string;
+  /** "" for a download that serves every language (Kokoro's) */
+  language: string;
+  name: string;
+  personas: string[];
+  /** What started it: "conversation", "languages", "voices", "preview", "clone" */
+  origin: string;
+  state: "queued" | "downloading" | "making" | "ready" | "failed";
+  stage: "download" | "make";
+  /** What downloads: "model", "voice" or "cloning" */
+  what: string;
+  done: number;
+  total: number;
+  /** Nothing has come for a while */
+  stalled: boolean;
+  error: string;
+  /** What goes on, e.g. "Downloading the German voice model" */
+  title: string;
+  /** What it is for, e.g. "Iris will speak German once it's done" */
+  purpose: string;
+}
+
+/** A language Iris talks in. */
+export interface LanguageInfo {
+  /** Whisper code */
+  code: string;
+  name: string;
 }
 
 export interface VoiceOptions {
   engines: Record<SpeechEngine, VoiceInfo[]>;
   /** The engines in the core's order, with their names */
   engine_info?: EngineInfo[];
+  /** The languages Iris talks in, in order */
+  languages?: LanguageInfo[];
   filters: string[];
+  /** Iris's languages, chosen in the app: the voices are made ready for them */
+  chosen?: string[];
+  /** The jobs making voices ready */
+  jobs?: VoiceJob[];
+  /** The voice a persona speaks with once its cloned voice is deleted */
+  fallback?: string;
 }
 
 /** User choices remembered across launches. */
-interface SavedSettings {
+export interface SavedSettings {
   llm_model?: string;
   persona?: string;
   input_device?: string;
@@ -286,9 +352,16 @@ interface SavedSettings {
   tools?: Record<string, boolean>;
   ollama_host?: string;
   amnesia?: boolean;
-  /** "" means the wake word is off */
-  wake_word?: string;
+  /** The wake word switch; the words are each persona's own */
+  wake_on?: boolean;
+  /** Seconds Iris stays awake after a turn, kept while sleeping when idle
+   *  is off */
   wake_window?: number;
+  /** Whether Iris falls asleep after wake_window without a turn */
+  idle_sleep?: boolean;
+  /** Before the words were each persona's: one wake word ("" for off) and
+   *  one sleep word for all, which go to the persona in use */
+  wake_word?: string;
   sleep_word?: string;
   /** Whisper size chosen in the pipeline; none for the best this computer runs */
   whisper_model?: string;
@@ -304,18 +377,16 @@ interface SavedSettings {
   /** Model folders chosen by the user; empty means download as usual */
   stt_model_path?: string;
   tts_models_dir?: string;
-  /** The first-launch setup has been completed */
+  /** The first-launch walkthrough has been completed */
   setup_done?: boolean;
-}
-
-/** What the first-launch setup offers to download. */
-export interface SetupInfo {
-  stt: { engine: string; model: string; cached: boolean; size_mb: number | null };
-  tts: { found: string; size_mb: number };
-  ollama_url: string;
+  /** Iris's languages: every persona's voice is made ready for them ahead.
+   *  Conversations are not held to them */
+  languages?: string[];
 }
 
 const SETTINGS_KEY = "iris.settings";
+/** Seconds Iris stays awake after a turn unless another time is chosen */
+export const DEFAULT_WAKE_WINDOW = 30;
 /** How long a voice preview may take to start (an engine's first load), in ms */
 const PREVIEW_TIMEOUT = 60_000;
 /** Turn timings kept, as many as the core keeps */
@@ -338,7 +409,7 @@ export function releasePreviews(attachments: AttachmentInfo[]) {
   }
 }
 
-function loadSettings(): SavedSettings {
+export function loadSettings(): SavedSettings {
   try {
     return JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") as SavedSettings;
   } catch {
@@ -346,7 +417,7 @@ function loadSettings(): SavedSettings {
   }
 }
 
-function saveSettings(patch: SavedSettings) {
+export function saveSettings(patch: SavedSettings) {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...loadSettings(), ...patch }));
   } catch {
@@ -393,20 +464,24 @@ class IrisStore {
   presence = $state(window.iris?.presence ?? false);
   /** The persona open in the persona editor; "" for a new one */
   editingPersona = $state(loadSettings().persona ?? "iris");
-  /** Each speech engine's voices, for the persona editor */
+  /** Each speech engine's voices, for the persona editor and the Voices page */
   voices = $state<VoiceOptions | null>(null);
+  /** Iris's languages, as chosen; English always */
+  languages = $state<string[]>(loadSettings().languages ?? ["en"]);
+  /** The jobs making voices ready, by id */
+  jobs = $state<Record<string, VoiceJob>>({});
+  private voicesStale: ReturnType<typeof setTimeout> | null = null;
   memoryTopics = $state<MemoryTopic[]>([]);
   /** Turns the core keeps, filed under a topic or not yet */
   memoryTurns = $state(0);
-  /** First launch: the setup screen is shown and nothing starts until done.
-   *  Shown from the first frame, while the core is still booting. */
+  /** The walkthrough is shown instead of the conversation: on the first
+   *  launch, from the first frame while the core is still booting (nothing
+   *  starts until it is done), or run again from Settings */
   needsSetup = $state(!loadSettings().setup_done);
-  setupInfo = $state<SetupInfo | null>(null);
-  /** Setup is done and Iris is fetching its models; the setup screen stays
-   *  until they are in */
-  installing = $state(false);
-  /** How far the setup flower had opened, so the orb's bloom carries on */
+  /** How far the walkthrough's flower had opened, so the orb's bloom carries on */
   bloomFrom = 0;
+  /** Iris has been started in this window (not yet on a first launch) */
+  private started = false;
   /** A model download at first start, shown under the orb */
   setup = $state<{ model: string; label: string; done: number; total: number } | null>(null);
   /** When Iris falls asleep (performance.now() ms), or null when it isn't awake */
@@ -476,7 +551,6 @@ class IrisStore {
               total: data.total as number,
             }
           : null;
-        if (!data.label) this.leaveSetup();
         break;
 
       case "config": {
@@ -500,8 +574,6 @@ class IrisStore {
       case "state":
         this.state = (data.state as AssistantState) ?? "idle";
         this.running = this.state !== "idle";
-        // Started, or failed before its models were fetched
-        if (this.state !== "starting") this.leaveSetup();
         if (this.previewHeard && this.state !== "speaking") this.previewing = null;
         break;
 
@@ -516,6 +588,10 @@ class IrisStore {
       case "audio.output":
         this.outputLevel = (data.rms as number) ?? 0;
         if (this.previewing && this.outputLevel > 0) this.previewHeard = true;
+        break;
+
+      case "voice.job":
+        this.takeJob(data as unknown as VoiceJob);
         break;
 
       case "chat.user": {
@@ -629,6 +705,26 @@ class IrisStore {
           streaming: false,
         });
         break;
+
+      // Something to know that is not a fault, such as replies shown and
+      // not spoken, or the speaker or microphone Iris switched to. It goes
+      // above the reply streaming in, where it stays when the transcript is
+      // rebuilt (the reply comes whole after it)
+      case "notice": {
+        const notice: ChatMessage = {
+          role: "system",
+          text: (data.message as string) ?? "",
+          kind: data.kind as string | undefined,
+          streaming: false,
+        };
+        if (this.streamingIndex !== null) {
+          this.messages.splice(this.streamingIndex, 0, notice);
+          this.streamingIndex++;
+        } else {
+          this.messages.push(notice);
+        }
+        break;
+      }
     }
   }
 
@@ -752,7 +848,91 @@ class IrisStore {
   }
 
   async loadVoices() {
-    this.voices = await rpc<VoiceOptions>("persona.voices");
+    const voices = await rpc<VoiceOptions>("voice.list");
+    this.voices = voices;
+    for (const job of voices.jobs ?? []) this.takeJob(job, false);
+  }
+
+  /** A job making a voice ready, as it changes. The conversation shows the
+   *  ones it waits on; once a voice is ready the voices are listed again. */
+  private takeJob(job: VoiceJob, live = true) {
+    this.jobs = { ...this.jobs, [job.id]: job };
+    if (live && job.origin === "conversation") this.showJob(job);
+    if (live && (job.state === "ready" || job.state === "failed") && this.voices) {
+      if (this.voicesStale) clearTimeout(this.voicesStale);
+      this.voicesStale = setTimeout(() => this.loadVoices().catch(() => {}), 300);
+    }
+  }
+
+  /** A job the conversation waits on, as a line of its own that follows it
+   *  in place: its progress, then that it is done (kept as it was said), or
+   *  that it failed, to retry there. Asked for again once done, a new line. */
+  private showJob(job: VoiceJob) {
+    let line: ChatMessage | undefined;
+    for (let i = this.messages.length - 1; i >= 0 && !line; i--) {
+      const message = this.messages[i];
+      if (message.job === job.id && message.kind === "voice.job") line = message;
+    }
+    if (!line) {
+      line = { role: "system", text: job.title, kind: "voice.job", job: job.id, streaming: false };
+      this.messages.push(line);
+      line = this.messages[this.messages.length - 1];
+    }
+    if (job.state === "ready") {
+      line.kind = "voice.job.done";
+      line.text = job.title;
+    }
+  }
+
+  /** The job making a voice ready for a language, if there is one. */
+  jobFor(engine: SpeechEngine, voice: string, language: string): VoiceJob | undefined {
+    return this.jobs[`${engine}|${voice}|${language}`] ?? this.jobs[`${engine}|${voice}|`];
+  }
+
+  /** The jobs running, the ones the conversation waits on first. */
+  get runningJobs(): VoiceJob[] {
+    const running = Object.values(this.jobs).filter((j) => j.state !== "ready" && j.state !== "failed");
+    return running.sort((a, b) => Number(b.origin === "conversation") - Number(a.origin === "conversation"));
+  }
+
+  /** Choose Iris's languages: every persona's voice is made ready for them. */
+  async setLanguages(codes: string[]) {
+    const chosen = [...new Set(["en", ...codes])];
+    this.languages = chosen;
+    this.remember({ languages: chosen });
+    const result = await rpc<{ languages: string[]; jobs: VoiceJob[] }>("languages.set", {
+      languages: chosen,
+    });
+    for (const job of result.jobs ?? []) this.takeJob(job, false);
+    if (this.voices) this.voices.chosen = result.languages;
+  }
+
+  /** Make a voice ready for languages (Iris's own without any). */
+  async makeReady(engine: SpeechEngine, voice: string, languages?: string[]) {
+    const result = await rpc<{ jobs: VoiceJob[] }>("voice.ready", { engine, voice, languages });
+    for (const job of result.jobs ?? []) this.takeJob(job, false);
+  }
+
+  async retryJob(id: string) {
+    const result = await rpc<{ job: VoiceJob | null }>("voice.retry", { id });
+    if (result.job) this.takeJob(result.job, false);
+  }
+
+  /** Rename a cloned voice. Returns an error message, or null once renamed. */
+  async renameVoice(voice: string, name: string): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string }>("voice.rename", { voice, name });
+    if (!result.ok) return result.error ?? "The voice could not be renamed";
+    await this.loadVoices();
+    return null;
+  }
+
+  /** Delete a cloned voice; reassign gives the personas that speak with it
+   *  Kyutai's default voice. Returns an error message, or null once deleted. */
+  async deleteVoice(voice: string, reassign = false): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string }>("voice.delete", { voice, reassign });
+    await this.loadVoices();
+    if (!result.ok) return result.error ?? "The voice could not be deleted";
+    return null;
   }
 
   /** Save a persona; a new one becomes the current persona. Returns an error
@@ -769,6 +949,8 @@ class IrisStore {
     this.personas = result.personas;
     this.personaNames = result.names;
     if (!settings.id) await this.setPersona(result.id);
+    // The voices as they are now, with the personas that speak with each
+    if (this.voices) await this.loadVoices();
     return null;
   }
 
@@ -793,19 +975,43 @@ class IrisStore {
     const voice = `${settings.engine}:${settings.voice}`;
     this.previewing = voice;
     this.previewHeard = false;
-    // A voice that never comes does not stay marked
+    // A voice that never comes does not stay marked, unless it downloads first
     setTimeout(() => {
-      if (this.previewing === voice && !this.previewHeard) this.previewing = null;
+      const downloading = this.runningJobs.some((j) => `${j.engine}:${j.voice}` === voice);
+      if (this.previewing === voice && !this.previewHeard && !downloading) this.previewing = null;
     }, PREVIEW_TIMEOUT);
     let error: string | null = null;
     try {
-      const result = await rpc<{ ok: boolean; error?: string }>("persona.preview", { ...settings });
+      const result = await rpc<{ ok: boolean; error?: string; job?: VoiceJob }>(
+        "persona.preview",
+        { ...settings }
+      );
       if (!result.ok) error = result.error ?? "The voice could not be played";
+      // The voice downloads first, shown on its tile, and plays once it is here
+      if (result.job) this.waitForPreview(result.job, voice);
     } catch (err) {
       error = `The voice could not be played: ${err}`;
     }
     if (error) this.previewing = null;
     return error;
+  }
+
+  /** A preview whose voice downloads first stays marked until it is heard,
+   *  or its download fails. */
+  private waitForPreview(job: VoiceJob, voice: string) {
+    this.takeJob(job, false);
+    const check = () => {
+      if (this.previewing !== voice) return;
+      const now = this.jobs[job.id];
+      if (now?.state === "failed") this.previewing = null;
+      else if (now?.state === "ready") {
+        setTimeout(() => {
+          if (this.previewing === voice && !this.previewHeard) this.previewing = null;
+        }, PREVIEW_TIMEOUT);
+      } else setTimeout(check, 500);
+    };
+    this.previewHeard = false;
+    setTimeout(check, 500);
   }
 
   /** Show Iris as the orb alone, or bring the conversation back. Presence is
@@ -1002,34 +1208,44 @@ class IrisStore {
     }
   }
 
-  /** Listen only for this word until addressed; "" listens to everything. */
-  async setWakeWord(word: string) {
-    saveSettings({ wake_word: word });
+  /** Listen only for the persona's wake word until addressed, or (off) to
+   *  everything. */
+  async setWake(on: boolean) {
+    saveSettings({ wake_on: on });
     this.awakeUntil = null;
-    await rpc("wake.set", { word });
+    await rpc("wake.set", { on });
   }
 
-  /** How long Iris stays awake after a turn, and its sleep word. */
-  async setWakeOptions(options: { window?: number; sleep_word?: string }) {
-    saveSettings({
-      ...(options.window !== undefined ? { wake_window: options.window } : {}),
-      ...(options.sleep_word !== undefined ? { sleep_word: options.sleep_word } : {}),
-    });
-    await rpc("wake.options", options);
+  /** A persona's wake word or sleep word (the current persona's without an
+   *  id). An empty wake word is its name again, an empty sleep word none. */
+  async setPersonaWords(words: { wake_word?: string; sleep_word?: string }, id?: string) {
+    const result = await rpc<{ ok: boolean; personas?: string[]; names?: Record<string, string> }>(
+      "persona.words",
+      { ...(id ? { id } : {}), ...words }
+    );
+    if (result.ok && result.personas) {
+      this.personas = result.personas;
+      this.personaNames = result.names ?? {};
+    }
+  }
+
+  /** Whether Iris falls asleep when nothing was said for a while, and after
+   *  how long; the time is kept while it is off. */
+  async setIdleSleep(on: boolean, window = loadSettings().wake_window ?? DEFAULT_WAKE_WINDOW) {
+    saveSettings({ idle_sleep: on, wake_window: window });
+    if (!on) this.awakeUntil = null;
+    await rpc("wake.options", { window: on ? window : 0 });
   }
 
   /** Point Iris at model folders it should use as they are ("" = download).
    *  Returns an error message, or null when the folder was accepted. */
   async setModelPaths(paths: { stt_path?: string; tts_dir?: string }): Promise<string | null> {
-    const method = this.needsSetup ? "models.check" : "models.set";
-    const result = await rpc<{ ok: boolean; error?: string }>(method, paths);
+    const result = await rpc<{ ok: boolean; error?: string }>("models.set", paths);
     if (!result.ok) return result.error ?? "Not a model folder";
-    if (!this.needsSetup) {
-      this.remember({
-        ...(paths.stt_path !== undefined ? { stt_model_path: paths.stt_path } : {}),
-        ...(paths.tts_dir !== undefined ? { tts_models_dir: paths.tts_dir } : {}),
-      });
-    }
+    this.remember({
+      ...(paths.stt_path !== undefined ? { stt_model_path: paths.stt_path } : {}),
+      ...(paths.tts_dir !== undefined ? { tts_models_dir: paths.tts_dir } : {}),
+    });
     return null;
   }
 
@@ -1157,9 +1373,14 @@ class IrisStore {
   async init() {
     onEvent((type, data) => this.handleEvent(type, data));
 
-    const micStatus = await window.iris.micStatus();
+    let micStatus = await window.iris.micStatus();
+    // The walkthrough asks for the microphone at its step; a launch after
+    // it asks now, should it never have been asked
+    if (micStatus === "not-determined" && !this.needsSetup) {
+      micStatus = await window.iris.askMicrophone();
+    }
     let micNotice: ChatMessage | null = null;
-    if (micStatus !== "granted") {
+    if (micStatus !== "granted" && !this.needsSetup) {
       const packaged = await window.iris.isPackaged();
       micNotice = {
         role: "error",
@@ -1200,12 +1421,14 @@ class IrisStore {
       }
       sayMicNotice();
 
-      // First launch: nothing starts (or downloads) until the user has said
-      // which server, model and speech models to use
-      if (info.running) this.needsSetup = false;
-      if (this.needsSetup) this.setPresence(false);
+      // First launch: nothing starts until the walkthrough is done; it
+      // fetches the speech models while the user makes the other choices
+      if (info.running) {
+        this.needsSetup = false;
+        this.started = true;
+      }
       if (this.needsSetup) {
-        this.setupInfo = await rpc<SetupInfo>("setup.info");
+        this.setPresence(false);
         return;
       }
 
@@ -1233,38 +1456,105 @@ class IrisStore {
     // The microphone chosen is chosen again in the new core
     this.micRestored = false;
     try {
-      if (this.needsSetup && !this.installing) {
-        this.setupInfo = await rpc<SetupInfo>("setup.info");
-        return;
-      }
+      // The walkthrough of a first launch goes on with the new core
+      if (this.needsSetup && !this.started) return;
       const info = await rpc<AppInfo>("app.info");
-      if (!info.running) await this.startAssistant(false);
+      if (!info.running) await this.startAssistant({ restore: false });
     } catch (err) {
       this.messages.push({ role: "error", text: `Iris could not be started again: ${err}`, streaming: false });
     }
   }
 
-  /** Save the first-launch choices and start Iris with them. The setup
-   *  screen stays while the speech models download. */
-  async finishSetup(choices: SavedSettings) {
-    saveSettings({ ...choices, setup_done: true });
-    this.installing = true;
-    await this.startAssistant();
+  /** The walkthrough's end on the first launch: keep its choices and start
+   *  Iris with them. The conversation shows at once; the orb blooms while
+   *  the models load, with the progress of any still downloading, and Iris
+   *  greets the user once it listens. */
+  async finishFirstRun(choices: WalkthroughChoices, greet: boolean) {
+    const host = choices.ollama_host;
+    const saved = loadSettings();
+    saveSettings({
+      persona: choices.persona,
+      input_device: choices.input_device,
+      wake_on: choices.wake_on,
+      idle_sleep: choices.idle_sleep,
+      tools: choices.tools,
+      stt_model_path: choices.stt_model_path,
+      tts_models_dir: choices.tts_models_dir,
+      ...(host !== undefined ? { ollama_host: host } : {}),
+      ...(choices.llm_model ? { llm_model: choices.llm_model } : {}),
+      ...(host !== undefined && choices.llm_model
+        ? { server_models: { ...saved.server_models, [host]: choices.llm_model } }
+        : {}),
+      setup_done: true,
+    });
+    if (host) this.keepServer(host);
+    this.persona = choices.persona;
+    this.needsSetup = false;
+    // The words are the persona's, which Iris starts with
+    if (choices.wake_word !== undefined) {
+      await this.setPersonaWords(
+        { wake_word: choices.wake_word, sleep_word: choices.sleep_word },
+        choices.persona
+      ).catch((err) => console.error("[store] persona.words failed:", err));
+    }
+    await this.startAssistant({ greet });
     this.loadLists();
   }
 
-  private leaveSetup() {
-    if (!this.installing) return;
-    this.installing = false;
+  /** The walkthrough's end when run again: what changed is applied to Iris
+   *  as it runs, the microphone opens as it was, and Iris says hello. */
+  async finishWalkthrough(
+    choices: WalkthroughChoices,
+    { greet, micOn }: { greet: boolean; micOn: boolean }
+  ) {
     this.needsSetup = false;
+    const config = this.config;
+    const host = choices.ollama_host;
+    try {
+      if (host !== undefined && host !== (config?.ollama_host ?? "")) {
+        await this.setOllamaHost(host);
+      }
+      if (choices.llm_model && choices.llm_model !== this.config?.llm_model) {
+        await this.setModel(choices.llm_model);
+      }
+      if (choices.persona !== this.persona) await this.setPersona(choices.persona);
+      const device = this.inputDevices.find((d) => d.name === choices.input_device);
+      if (device && device.name !== config?.input_device) await this.setMic(device.index);
+      if (choices.wake_word !== undefined) {
+        await this.setPersonaWords(
+          { wake_word: choices.wake_word, sleep_word: choices.sleep_word },
+          choices.persona
+        );
+      }
+      if (choices.wake_on !== !!this.config?.wake_word) await this.setWake(choices.wake_on);
+      if (choices.idle_sleep !== (this.config?.wake_window ?? DEFAULT_WAKE_WINDOW) > 0) {
+        await this.setIdleSleep(choices.idle_sleep);
+      }
+      for (const [id, on] of Object.entries(choices.tools)) {
+        const tool = this.config?.tools?.[id];
+        if (tool?.available && !!tool.enabled !== on) await this.setTool(id, on);
+      }
+      if (choices.stt_model_path !== (config?.stt_model_path ?? "")) {
+        await this.setModelPaths({ stt_path: choices.stt_model_path });
+      }
+      if (choices.tts_models_dir !== (config?.tts_models_dir ?? "")) {
+        await this.setModelPaths({ tts_dir: choices.tts_models_dir });
+      }
+    } finally {
+      await rpc("mic.set", { on: micOn });
+    }
+    if (greet) await rpc("assistant.greet");
   }
 
   /** Start the assistant with the saved settings; restore shows the recent
    *  part of the conversation the core remembers (not when it is shown
-   *  already). */
-  private async startAssistant(restore = true) {
+   *  already), and greet has Iris say hello once it listens (the end of the
+   *  walkthrough). */
+  private async startAssistant({ restore = true, greet = false } = {}) {
+    this.started = true;
+    await this.adoptWakeWords();
     const saved = loadSettings();
-    const options: Record<string, unknown> = {};
+    const options: Record<string, unknown> = greet ? { greet: true } : {};
     if (!restore) options.restore_thread = false;
     if (saved.llm_model) options.llm_model = saved.llm_model;
     if (saved.persona) options.persona = saved.persona;
@@ -1273,15 +1563,37 @@ class IrisStore {
     if (saved.tools) options.tools = saved.tools;
     if (saved.ollama_host) options.ollama_host = saved.ollama_host;
     if (saved.amnesia) options.amnesia = true;
-    if (saved.wake_word) options.wake_word = saved.wake_word;
-    if (saved.wake_window) options.wake_window = saved.wake_window;
-    if (saved.sleep_word !== undefined) options.sleep_word = saved.sleep_word;
+    if (saved.wake_on) options.wake_on = true;
+    if (saved.idle_sleep === false) options.wake_window = 0;
+    else if (saved.wake_window) options.wake_window = saved.wake_window;
     if (saved.stt_model_path) options.stt_model_path = saved.stt_model_path;
     else if (saved.whisper_model) options.whisper_model = saved.whisper_model;
     if (saved.turn_detection) options.turn_detection = saved.turn_detection;
     if (saved.tts_models_dir) options.tts_models_dir = saved.tts_models_dir;
+    if (saved.languages) options.languages = saved.languages;
     this.speakReplies = saved.speak_replies ?? true;
     await rpc("assistant.start", options);
+  }
+
+  /** The wake word and sleep word kept for all personas before each had
+   *  its own become those of the persona in use, once, so they go on
+   *  working; the switch is whether there was a wake word. */
+  private async adoptWakeWords() {
+    const saved = loadSettings();
+    if (saved.wake_word === undefined && saved.sleep_word === undefined) return;
+    // The switch holds whatever becomes of the words
+    saveSettings({ wake_on: saved.wake_on ?? !!saved.wake_word?.trim() });
+    try {
+      const result = await rpc<{ ok: boolean }>("wake.adopt", {
+        persona: saved.persona ?? "iris",
+        wake_word: saved.wake_word ?? "",
+        sleep_word: saved.sleep_word ?? "",
+      });
+      // Tried again at the next start, should it fail
+      if (result.ok) saveSettings({ wake_word: undefined, sleep_word: undefined });
+    } catch (err) {
+      console.error("[store] wake.adopt failed:", err);
+    }
   }
 
   private loadLists() {

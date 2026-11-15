@@ -1,14 +1,17 @@
 <script lang="ts">
   import { store, type SettingsPage } from "../../lib/state.svelte";
+  import { walkthrough } from "../../lib/walkthrough.svelte";
   import Icon from "../Icon.svelte";
   import Personas from "./Personas.svelte";
   import Pipeline from "./Pipeline.svelte";
   import SetupSwitcher from "./SetupSwitcher.svelte";
   import StageInspector from "./StageInspector.svelte";
+  import Voices from "./Voices.svelte";
 
   const PAGES: { id: SettingsPage; label: string; icon: string }[] = [
     { id: "pipeline", label: "Pipeline", icon: "flow" },
     { id: "personas", label: "Personas", icon: "users" },
+    { id: "voices", label: "Voices", icon: "wave" },
   ];
 
   const page = $derived(PAGES.find((p) => p.id === store.settingsPage) ?? PAGES[0]);
@@ -33,7 +36,11 @@
         {/if}
       </button>
     {/each}
-    <button onclick={() => store.openSettings(null)} class="nav back mt-auto">
+    <button onclick={() => walkthrough.open(false)} class="nav back mt-auto">
+      <Icon name="play" size={13} />
+      Walkthrough
+    </button>
+    <button onclick={() => store.openSettings(null)} class="nav back">
       <Icon name="back" size={14} />
       Conversation
     </button>
@@ -48,6 +55,8 @@
     <div class="min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4">
       {#if page.id === "pipeline"}
         <Pipeline />
+      {:else if page.id === "voices"}
+        <Voices />
       {:else}
         <Personas />
       {/if}

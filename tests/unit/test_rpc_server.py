@@ -96,6 +96,16 @@ def test_app_info_roundtrip(client):
     assert "version" in result
 
 
+def test_the_walkthrough_is_answered_before_iris_runs(client):
+    assert client.call("mic.check", {"on": False})["result"] == {"ok": True}
+    assert client.call("assistant.greet")["result"] == {"ok": True}
+    assert isinstance(client.call("llm.find_servers")["result"]["servers"], list)
+    probe = client.call("llm.probe", {"url": "http://127.0.0.1:9"})["result"]
+    assert probe["ok"] is False and "Cannot reach" in probe["error"]
+    plugins = client.call("plugins.list")["result"]["plugins"]
+    assert all("enabled_by_default" in plugin for plugin in plugins)
+
+
 def test_unknown_method_returns_error(client):
     response = client.call("no.such.method")
     assert "error" in response

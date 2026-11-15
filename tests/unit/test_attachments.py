@@ -159,6 +159,7 @@ def test_a_spoken_reply_keeps_only_the_names_too(mock_ollama):
     assistant.speech_pipeline = MagicMock()
     assistant.tts_generator = SpeechGenerator.__new__(SpeechGenerator)
     assistant.tts_generator.engine = "kyutai"
+    assistant.tts_generator.voice = "anna"
     assistant.event_bus = None
     assistant.memory = None
     assistant.speak_replies = True

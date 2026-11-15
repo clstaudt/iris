@@ -54,7 +54,12 @@ export type PresenceCommand = "leave" | "pause";
 export interface IrisApi {
   rpc: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
   onEvent: (callback: (type: string, data: IrisEventPayload["data"]) => void) => () => void;
+  /** Whether the app may use the microphone: "granted", "denied",
+   *  "restricted" or "not-determined" (never asked) */
   micStatus: () => Promise<string>;
+  /** Ask for the microphone (macOS asks the user once); resolves to the
+   *  status afterwards */
+  askMicrophone: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
   chooseFolder: (title: string) => Promise<string | null>;
   /** Whether Iris opened as presence (only the orb) */

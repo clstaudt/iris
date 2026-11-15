@@ -73,8 +73,26 @@ IMMEDIATE = frozenset(
 # Slow requests that depend on nothing else and nothing depends on: each is
 # answered on a thread of its own, so it holds up neither the requests in
 # order nor the controls. Checking the servers takes seconds when one is away,
-# and the app checks them again and again while their list is shown
-CONCURRENT = frozenset({"llm.check_hosts"})
+# and the app checks them again and again while their list is shown; the
+# walkthrough also looks for servers and asks one for its models. So are
+# voice cloning's: asking Hugging Face, downloading its model, reading a
+# sample, making a voice, and the recording (stopped while the rest waits).
+# Renaming or deleting a cloned voice is not: it comes in order, after a
+# persona saved with it. Making voices ready for a language only starts
+# its jobs, which run on a thread of their own (iris.readiness)
+CONCURRENT = frozenset(
+    {
+        "llm.check_hosts",
+        "llm.find_servers",
+        "llm.probe",
+        "voice.clone_access",
+        "voice.clone_connect",
+        "voice.clone_fetch",
+        "voice.record",
+        "voice.sample",
+        "voice.clone",
+    }
+)
 
 
 def serve(read_line, methods: dict, write_frame, immediate=IMMEDIATE, concurrent=CONCURRENT):
@@ -222,6 +240,8 @@ def main(extra: dict | None = None):
         "llm.set": lambda params: controller.set_model(params.get("name", "")),
         "llm.set_host": lambda params: controller.set_ollama_host(params.get("url", "")),
         "llm.check_hosts": lambda params: controller.check_servers(params.get("urls", [])),
+        "llm.find_servers": lambda params: controller.find_servers(),
+        "llm.probe": lambda params: controller.probe_server(params.get("url", "")),
         "chat.send_text": lambda params: controller.send_text(
             params.get("text", ""), params.get("attachments")
         ),
@@ -233,8 +253,25 @@ def main(extra: dict | None = None):
         "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
-        "wake.set": lambda params: controller.set_wake_word(params.get("word", "")),
+        # {"on": bool} switches the persona's wake word on or off; {"word"}
+        # listens for a word of its own (a test's)
+        "wake.set": lambda params: (
+            controller.set_wake(bool(params["on"]))
+            if "on" in params
+            else controller.set_wake_word(params.get("word", ""))
+        ),
+        "wake.adopt": lambda params: controller.adopt_wake_words(
+            params.get("persona"), params.get("wake_word"), params.get("sleep_word")
+        ),
+        "persona.words": lambda params: controller.set_persona_words(
+            params.get("id"), params.get("wake_word"), params.get("sleep_word")
+        ),
         "setup.info": lambda params: controller.setup_info(),
+        "setup.download": lambda params: controller.setup_download(params),
+        "mic.check": lambda params: controller.sound_check(
+            bool(params.get("on", True)), params.get("index")
+        ),
+        "assistant.greet": lambda params: controller.greet(),
         "models.check": lambda params: controller.check_model_paths(
             params.get("stt_path"), params.get("tts_dir")
         ),
@@ -265,6 +302,32 @@ def main(extra: dict | None = None):
         "persona.save": lambda params: controller.persona_save(params),
         "persona.delete": lambda params: controller.persona_delete(params.get("id", "")),
         "persona.preview": lambda params: controller.persona_preview(params),
+        # Cloning a voice for a persona (iris.cloning)
+        "voice.clone_access": lambda params: controller.cloning.access(),
+        "voice.clone_connect": lambda params: controller.cloning.connect(params.get("token", "")),
+        "voice.clone_fetch": lambda params: controller.cloning.fetch(),
+        "voice.record": lambda params: controller.cloning.record(
+            bool(params.get("on")), params.get("device"), bool(params.get("keep", True))
+        ),
+        "voice.sample": lambda params: controller.cloning.use_file(
+            params.get("data", ""), params.get("name", "")
+        ),
+        "voice.clone": lambda params: controller.voice_clone(params),
+        # The Voices page: every voice, the cloned ones managed, and each
+        # made ready for Iris's languages
+        "voice.list": lambda params: controller.voice_list(),
+        "voice.rename": lambda params: controller.cloning.rename(
+            params.get("voice", ""), params.get("name", "")
+        ),
+        "voice.delete": lambda params: controller.voice_delete(
+            params.get("voice", ""), bool(params.get("reassign"))
+        ),
+        "voice.ready": lambda params: controller.voice_make_ready(
+            params.get("engine", ""), params.get("voice", ""), params.get("languages")
+        ),
+        "voice.retry": lambda params: controller.voice_retry(params.get("id", "")),
+        "voice.jobs": lambda params: {"jobs": controller.readier.jobs()},
+        "languages.set": lambda params: controller.set_languages(params.get("languages")),
         "debug.emit": debug_emit,
         "debug.inject_audio": lambda params: controller.inject_audio(params.get("path", "")),
     }

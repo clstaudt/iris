@@ -1,12 +1,14 @@
 """Voice assistant coordinator that orchestrates all components."""
 
 import logging
+import math
 import os
 import queue
 import re
 import threading
 import time
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
@@ -14,12 +16,13 @@ import numpy as np
 import soundfile as sf
 from faster_whisper.audio import decode_audio
 
-from iris import engines, language
+from iris import cloning, engines, language
 from iris.attachments import Attachment, recorded_text
 from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus, brief
 from iris.llm import (
+    OPENING,
     ConversationManager,
     effective_host,
     failure_message,
@@ -34,7 +37,7 @@ from iris.status import StatusManager
 from iris.timing import TurnTiming
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
-from iris.tts import SpeechGenerator, SpeechPipeline
+from iris.tts import LANGUAGE_NAMES, SpeechGenerator, SpeechPipeline
 from iris.turns import PRE_SPEECH, SmartTurn
 from iris.wakeword import WakeWordDetector, match_sleep_word
 
@@ -43,10 +46,12 @@ warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
 
 # With a wake word set: how long the assistant keeps listening after a turn
-# (or after the user last spoke) before it goes back to sleep
+# (or after the user last spoke) before it goes back to sleep. A window of
+# 0 is none: it then sleeps only when told, by the sleep word or the
+# Going to sleep tool.
 DEFAULT_WAKE_WINDOW = 30.0
-# Said while awake, this puts the assistant straight back to sleep
-DEFAULT_SLEEP_WORD = "That's all"
+# The shortest window, which still leaves time to say a follow-up
+SHORTEST_WAKE_WINDOW = 5.0
 # While dormant an utterance ends after this much silence, so the wake word
 # is recognized promptly instead of after the conversational pause
 DORMANT_SILENCE = 0.8
@@ -60,6 +65,17 @@ GOODBYE_SETTLE = 1.0
 # Seconds the microphone stays closed after a voice preview, for the room
 # to fall quiet
 PREVIEW_SETTLE = 0.4
+
+# What Iris is asked at the end of the walkthrough: to open the conversation
+# with a greeting of its own, in the persona's manner
+GREETING = (
+    "(The user has just finished setting you up and is with you now. Greet them "
+    "the way you would greet someone in person, in your own manner, and let them "
+    "know they can simply talk to you.)"
+)
+
+# Seconds the loop waits after a round of it failed, before the next
+LOOP_RETRY = 0.2
 
 # Seconds forgetting everything waits for the turn underway to end once it
 # is stopped; it takes a moment, unless the user is still speaking
@@ -87,6 +103,13 @@ def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
 def _wake_chime() -> np.ndarray:
     """Two soft rising tones that say "I'm listening" across the room."""
     return _chime_tones((660.0, 990.0))
+
+
+def _window(seconds) -> float:
+    """An awake window as Iris keeps it: 0 (or none) for none, otherwise
+    at least the shortest one."""
+    seconds = float(seconds or 0)
+    return max(SHORTEST_WAKE_WINDOW, seconds) if seconds > 0 else 0.0
 
 
 def _sleep_chime() -> np.ndarray:
@@ -163,11 +186,18 @@ class VoiceAssistant:
 
     # Where the current turn's time goes, reported once the reply is heard
     _timing: Optional[TurnTiming] = None
+    # Asleep by the sleep word while the wake word is off: until called by
+    # the persona's wake word, then listening to everything again
+    _asleep_until_called = False
     # The reply being given ends the conversation: the model called the
     # sleep tool, and Iris goes to sleep once the reply has been heard
     _ending = False
     # Until then the microphone stays closed after parting words
     _quiet_until = 0.0
+    # Told (engine, voice, language) when a reply comes to a language the
+    # persona's voice speaks but is not ready for: the app makes it ready,
+    # where the user sees it (iris.readiness)
+    on_voice_not_ready: Optional[Callable[[str, str, str], None]] = None
 
     def __init__(
         self,
@@ -190,7 +220,7 @@ class VoiceAssistant:
         memory: bool = True,
         wake_word: Optional[str] = None,
         wake_window: float = DEFAULT_WAKE_WINDOW,
-        sleep_word: Optional[str] = DEFAULT_SLEEP_WORD,
+        sleep_word: Optional[str] = None,
         tts_models_dir: Optional[str] = None,
         barge_in: bool = True,
         turn_detection: str = "smart_turn",
@@ -227,8 +257,11 @@ class VoiceAssistant:
                 (~/.iris/memory.db, or IRIS_MEMORY_DB), remembered by topic
             wake_word: If set, listen only for this word until addressed, and
                 fall dormant again after wake_window seconds without a turn
-            wake_window: Seconds the assistant stays awake after a turn
-            sleep_word: Said while awake, puts the assistant back to sleep
+                (the persona's, which the controller passes when it is on)
+            wake_window: Seconds the assistant stays awake after a turn; 0
+                to fall asleep only when told to
+            sleep_word: Said while awake, puts the assistant back to sleep;
+                None for none (the persona's, which is optional)
             tts_models_dir: Folder holding the Kokoro voice model; None looks
                 in the usual places
             barge_in: Let the user interrupt the voice by speaking (needs
@@ -269,7 +302,7 @@ class VoiceAssistant:
         self.wake_word: Optional[str] = None
         self.wake_detector: Optional[WakeWordDetector] = None
         self.awake_until = 0.0
-        self.wake_window = float(wake_window)
+        self.wake_window = _window(wake_window)
         self.sleep_word = (sleep_word or "").strip() or None
         self._was_dormant = True  # to notice the moment it falls asleep
         self._last_window_emit = 0.0
@@ -278,6 +311,12 @@ class VoiceAssistant:
         self.conversation_language = "en"
         # The language the reply being spoken is in, piece by piece
         self._reply_language = "en"
+        # Of the reply: whether a piece of it was queued for the voice, and
+        # whether one was only shown, in a language the voice does not speak
+        self._reply_voiced = False
+        self._reply_unspoken = False
+        # (engine, voice, language) the user was told are shown, not spoken
+        self._unspoken_told: set[tuple[str, str, str]] = set()
 
         # The persona speaks with its own engine and voice
         self.persona = persona if persona else get_persona("iris")
@@ -334,6 +373,10 @@ class VoiceAssistant:
         self.tts_generator.on_failure = self._error
         self.speech_pipeline = SpeechPipeline(self.tts_generator, self.player)
         self.speech_pipeline.on_reply_audio = self._reply_heard
+        # A reply the speaker cannot play is shown, and the user told why
+        self.speech_pipeline.on_speaker_error = lambda error: self._error(
+            f"The speaker could not be opened: {brief(error)}"
+        )
         # Told what language each piece of a reply is in, before the first
         language.prepare()
 
@@ -437,8 +480,9 @@ class VoiceAssistant:
 
     def _plugin_context(self) -> PluginContext:
         """What the plugins get to make their tools: long-term memory, and
-        going to sleep, which is offered only while a wake word is set to
-        wake Iris again (as the sleep word only works with one)."""
+        going to sleep, which is offered only while the wake word is on: the
+        model ends a conversation only where waiting for the wake word is
+        what the user chose."""
         return PluginContext(
             memory=self.memory.store if self.memory else None,
             sleep=self._end_conversation,
@@ -472,6 +516,8 @@ class VoiceAssistant:
             "wake_word": self.wake_word or "",
             "wake_window": self.wake_window,
             "sleep_word": self.sleep_word or "",
+            # The persona's wake word, shown while the wake word is off
+            "persona_wake_word": self.persona.wake_word,
             "mic_on": not self.pause_event.is_set(),
             "paused": self.suspend_event.is_set(),
             "tools": self.tools.states(),
@@ -555,26 +601,57 @@ class VoiceAssistant:
         The tiny detector model is loaded the first time it is needed.
         """
         word = (word or "").strip() or None
-        if word and self.wake_detector is None:
-            # The wake word is heard by a tiny Whisper, on the backend
-            # recognition runs on when that is Whisper too
-            if engine == "auto" and isinstance(self.transcriber, WhisperTranscriber):
-                engine = self.transcriber.engine
-            self.wake_detector = WakeWordDetector(engine)
+        if word:
+            self._load_wake_detector(engine)
         self.wake_word = word
         self.awake_until = 0.0  # a new word starts dormant, without a chime
         self._was_dormant = True
+        self._asleep_until_called = False
+
+    def _load_wake_detector(self, engine: str = "auto"):
+        """Load the tiny Whisper that hears the wake word, unless it is."""
+        if self.wake_detector is not None:
+            return
+        # On the backend recognition runs on, when that is Whisper too
+        if engine == "auto" and isinstance(self.transcriber, WhisperTranscriber):
+            engine = self.transcriber.engine
+        self.wake_detector = WakeWordDetector(engine)
+
+    @property
+    def word_to_wake(self) -> str:
+        """The word that wakes Iris: the one listened for, or with the wake
+        word off, the persona's (its name unless it has another)."""
+        return self.wake_word or self.persona.wake_word
+
+    def set_persona_words(self, wake_word: str, sleep_word: str):
+        """Take on a persona's words, as it is switched to or edited. While
+        a wake word is listened for, the new one is, and Iris stays awake
+        or asleep as it was; with the wake word off it stays off."""
+        if self.wake_word:
+            self.wake_word = (wake_word or "").strip() or self.wake_word
+        self.sleep_word = (sleep_word or "").strip() or None
 
     def set_wake_options(self, window: Optional[float] = None, sleep_word: Optional[str] = None):
-        """Change how long it stays awake, and its sleep word ("" for none)."""
+        """Change how long it stays awake (0: until told to sleep), and its
+        sleep word ("" for none). Awake now, it stays awake for the new
+        window from now: one switched off must not still run out."""
         if window is not None:
-            self.wake_window = max(5.0, float(window))
+            self.wake_window = _window(window)
+            if self.wake_word and self.awake_until > time.monotonic():
+                self._stay_awake()
         if sleep_word is not None:
             self.sleep_word = sleep_word.strip() or None
 
     @property
+    def replying(self) -> bool:
+        """A turn is being answered, or its reply is still heard."""
+        return self._turn_active.is_set() or self.speech_pipeline.is_active
+
+    @property
     def dormant(self) -> bool:
         """Waiting to be addressed by the wake word."""
+        if self._asleep_until_called:
+            return True
         return bool(self.wake_word) and time.monotonic() >= self.awake_until
 
     def _go_to_sleep(self):
@@ -583,6 +660,39 @@ class VoiceAssistant:
         only for the wake word. The turn that did it does not wake Iris
         again (awake_until is zero)."""
         self.awake_until = 0.0
+
+    def _is_sleep_word(self, text: str) -> bool:
+        """Whether this is the sleep word, said on its own or with the wake
+        word or the persona's name ("Goodbye, HAL" for a "Hey HAL")."""
+        if not self.sleep_word:
+            return False
+        return any(
+            match_sleep_word(text, self.sleep_word, word)
+            for word in dict.fromkeys([self.word_to_wake, self.persona.name])
+        )
+
+    def _sleep_word_said(self):
+        """The sleep word always puts Iris to sleep, whatever the model would
+        make of it. With the wake word off there is no window to wake into:
+        Iris sleeps until called by the persona's wake word, then listens to
+        everything again. Without the model that hears the wake word it
+        could not be called back, so it stays awake and says so."""
+        if not self.wake_word:
+            try:
+                self._load_wake_detector()
+            except Exception as e:
+                logger.exception("The wake word could not be set up")
+                self._error(f"Iris cannot sleep, as nothing could wake it again. {brief(e)}")
+                return
+            self._asleep_until_called = True
+        self._go_to_sleep()
+
+    def _wake(self):
+        """Woken by name, or by a typed message: awake for the window with
+        the wake word on, and listening to everything again with it off."""
+        self._asleep_until_called = False
+        if self.wake_word:
+            self._stay_awake()
 
     def _end_conversation(self):
         """The sleep tool: Iris goes to sleep once the reply being given has
@@ -600,7 +710,12 @@ class VoiceAssistant:
         self._go_to_sleep()
 
     def _stay_awake(self):
-        """Start the awake window over and tell the UI how long it lasts."""
+        """Start the awake window over and tell the UI how long it lasts.
+        Without a window it stays awake until told to sleep, and there is
+        nothing to count down."""
+        if not self.wake_window:
+            self.awake_until = math.inf
+            return
         self.awake_until = time.monotonic() + self.wake_window
         self._last_window_emit = time.monotonic()
         if self.event_bus:
@@ -609,6 +724,8 @@ class VoiceAssistant:
     def _keep_awake_while_speaking(self):
         """The user is talking: the window must not run out mid-sentence.
         The UI is told at most once a second."""
+        if not self.wake_window:
+            return
         now = time.monotonic()
         self.awake_until = max(self.awake_until, now + self.wake_window)
         if now - self._last_window_emit >= 1.0:
@@ -626,13 +743,21 @@ class VoiceAssistant:
             # Only audible when it was actually listening for follow-ups
             listening = not (self.pause_event.is_set() or self.suspend_event.is_set())
             if self.speak_replies and listening:
-                self.player.audio.play(_sleep_chime(), 24000)
+                self._play_chime(_sleep_chime())
         self._was_dormant = dormant
 
     def _chime(self):
         """Acknowledge the wake word when no request came with it."""
         if self.speak_replies:
-            self.player.audio.play(_wake_chime(), 24000)
+            self._play_chime(_wake_chime())
+
+    def _play_chime(self, sound: np.ndarray):
+        """Play a chime. A speaker that cannot be opened leaves it unheard:
+        the next reply tries it again, and says so if it fails too."""
+        try:
+            self.player.audio.play(sound, 24000)
+        except Exception:
+            logger.warning("The chime could not be played", exc_info=True)
 
     def _handle_heard(self, audio_path: str, dormant: bool):
         """Answer an utterance, or while dormant, check it for the wake word.
@@ -642,12 +767,13 @@ class VoiceAssistant:
         """
         if dormant:
             audio = decode_audio(audio_path, sampling_rate=16000)
-            woken, remainder = self.wake_detector.heard(audio, self.wake_word)
+            word = self.word_to_wake
+            woken, remainder = self.wake_detector.heard(audio, word)
             if not woken:
                 return
-            self._stay_awake()
+            self._wake()
             if self.event_bus:
-                self.event_bus.emit("wake", {"word": self.wake_word})
+                self.event_bus.emit("wake", {"word": word})
             if len(remainder.split()) < 2:
                 self._chime()
                 return
@@ -756,13 +882,106 @@ class VoiceAssistant:
                 dormant = False
 
     def _speak(self, text: str):
-        """Queue reply text for speech, unless voice output is switched off."""
+        """Queue reply text for speech, unless voice output is switched off.
+        A piece in a language the persona's voice does not speak properly is
+        only shown: no other voice says it in its place. So is one in a
+        language the voice is not ready for yet: what it needs is never
+        fetched or made here, unseen, but by the app, with its progress in
+        the conversation, and the voice speaks the language once it is. A
+        cloned voice that is not here is ready for none."""
         if not self.speak_replies:
             return
         clean_text = self.conversation.clean_markdown(text)
-        if clean_text.strip():
-            self.speech_pipeline.queue_speech(
-                clean_text, language=self._speech_language(clean_text)
+        if not clean_text.strip():
+            return
+        spoken_in = self._speech_language(clean_text)
+        if not self.tts_generator.speaks(spoken_in):
+            self._shown_only(spoken_in)
+            return
+        if not self.tts_generator.ready(spoken_in):
+            self._not_ready(spoken_in)
+            return
+        self._reply_voiced = True
+        self.speech_pipeline.queue_speech(clean_text, language=spoken_in)
+
+    def _not_ready(self, language_code: str):
+        """A piece of the reply is shown, not spoken: the persona's voice
+        speaks its language, but is not ready for it yet. The app is told,
+        to make it ready with its progress shown; without one to tell, the
+        user is told once for the voice and language. A cloned voice that is
+        not here cannot be made ready: the user is told to choose another."""
+        self._reply_unspoken = True
+        if not self._reply_voiced:
+            self._report_timing()
+        generator = self.tts_generator
+        if cloning.voice_missing(generator.voice):
+            self._voice_missing()
+            return
+        if self.on_voice_not_ready is not None:
+            self.on_voice_not_ready(generator.engine, generator.voice, language_code)
+            return
+        told = (generator.engine, generator.voice, language_code)
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        name = LANGUAGE_NAMES.get(language_code, language_code)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{self.persona.name}'s voice is not ready for {name} yet: "
+                    f"replies in {name} are shown until it is.",
+                    "kind": "not_ready",
+                    "language": language_code,
+                },
+            )
+
+    def _voice_missing(self):
+        """The persona's voice is a cloned one that is not here, which
+        nothing can make ready: the user is told once for the voice which
+        persona speaks with it, and where to give it another."""
+        generator = self.tts_generator
+        told = (generator.engine, generator.voice, "")
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        persona = self.persona.name
+        name = cloning.voice_name(cloning.voice_folder(generator.voice))
+        logger.info("%s's voice %s cannot be found: shown, not spoken", persona, generator.voice)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{persona}'s voice, {name}, cannot be found. "
+                    f"Choose another voice for {persona} in the persona editor.",
+                    "kind": "voice_missing",
+                },
+            )
+
+    def _shown_only(self, language_code: str):
+        """A piece of the reply is shown and not spoken, its language one the
+        persona's voice does not speak. The user is told once for the voice
+        and language. A reply nothing of which is spoken is complete once it
+        is written, as with the voice off."""
+        self._reply_unspoken = True
+        if not self._reply_voiced:
+            self._report_timing()
+        generator = self.tts_generator
+        told = (generator.engine, generator.voice, language_code)
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        name = LANGUAGE_NAMES.get(language_code, language_code)
+        logger.info("%s's voice does not speak %s: shown, not spoken", self.persona.name, name)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{self.persona.name}'s voice does not speak {name}: "
+                    f"replies in {name} are shown, not spoken.",
+                    "kind": "unspoken",
+                    "language": language_code,
+                },
             )
 
     def _prepare_voice(self, language: str):
@@ -847,8 +1066,7 @@ class VoiceAssistant:
         text = turn["text"]
         attachments = turn.get("attachments") or []
         # A typed message wakes Iris, as its name does
-        if self.wake_word:
-            self._stay_awake()
+        self._wake()
         # The conversation goes on in the language typed, as if spoken
         self.conversation_language = language.language_of(
             text, self.conversation_language, self.tts_generator.languages()
@@ -875,6 +1093,20 @@ class VoiceAssistant:
         # Unless the reply ended the conversation (awake_until is zero)
         if self.wake_word and self.awake_until > 0:
             self._stay_awake()
+
+    def _greet(self):
+        """Say hello at the end of the walkthrough: the model words it in the
+        persona's manner, and it opens the conversation with no turn of the
+        user's before it. Iris stays awake for the answer, as after a turn."""
+        self._turn_active.set()
+        try:
+            self._wake()
+            self._timing = None
+            self.chat(GREETING, response_language=self.conversation_language, source=OPENING)
+            if self.wake_word and self.awake_until > 0:
+                self._stay_awake()
+        finally:
+            self._turn_active.clear()
 
     def _run_voice_turn(self, audio_path: str):
         """Transcribe recorded speech and answer it."""
@@ -917,22 +1149,20 @@ class VoiceAssistant:
             logger.info("Took no turn of the voice's own words: %r", text)
             return
 
-        # "That's all, Iris": back to sleep, nothing to answer
-        if (
-            self.wake_word
-            and self.sleep_word
-            and match_sleep_word(text, self.sleep_word, self.wake_word)
-        ):
-            self._go_to_sleep()
+        # "That's all, Iris": back to sleep, nothing to answer, also with the
+        # wake word off (the persona's then wakes it)
+        if self._is_sleep_word(text):
+            self._sleep_word_said()
             return
 
-        # Determine response language: the one the user spoke, if the
-        # persona's voice can speak it, otherwise keep the current
-        # conversation language. Whisper guesses it from the sound, and a
-        # few words in an accent can fool it ("Parliamo italiano." heard as
-        # Portuguese); the words heard tell it better when they are clear.
+        # Determine response language: the one the user spoke, if Iris
+        # talks in it (whether the persona's voice speaks it or not),
+        # otherwise keep the current conversation language. Whisper guesses
+        # it from the sound, and a few words in an accent can fool it
+        # ("Parliamo italiano." heard as Portuguese); the words heard tell it
+        # better when they are clear.
         spoken = language.language_of(text, detected_language, self.tts_generator.languages())
-        if self.tts_generator.speaks(spoken):
+        if spoken in self.tts_generator.languages():
             self.conversation_language = spoken
         response_language = self.conversation_language
 
@@ -981,12 +1211,13 @@ class VoiceAssistant:
 
     def _keep_exchange(self, prompt: str, answer: str, source: Optional[str], cut: bool):
         """Keep the exchange in the conversation as the user took it in: a
-        reply cut short only as far as it was said, or shown with the voice
-        off. Of a reply stopped before anything was said, nothing is kept."""
+        reply cut short only as far as it was said, or shown, with the voice
+        off or in a language it does not speak. Of a reply stopped before
+        anything was said, nothing is kept."""
         if not cut:
             self.conversation.keep(prompt, self.conversation.reply or "", source)
             return
-        if self.speak_replies:
+        if self.speak_replies and not self._reply_unspoken:
             kept = self.speech_pipeline.said()
         else:
             kept = self.conversation.clean_markdown(answer)
@@ -1023,6 +1254,7 @@ class VoiceAssistant:
             # the reply is spoken in the language it is written in
             self.speech_pipeline.current_language = response_language
             self._reply_language = response_language
+            self._reply_voiced = self._reply_unspoken = False
             # What speaking that language needs loads while the model thinks
             if self.speak_replies:
                 threading.Thread(
@@ -1177,8 +1409,45 @@ class VoiceAssistant:
             self.event_bus.emit("error", {"message": message})
         logger.error(message)
 
+    def _notice(self, message: str):
+        """Tell the app something it shows in passing, not a problem."""
+        if self.event_bus:
+            self.event_bus.emit("notice", {"message": message})
+        logger.info(message)
+
+    def _devices_in_use(self) -> dict:
+        """The speaker and the microphone Iris plays and listens through."""
+        try:
+            output = self.player.audio.query_devices(kind="output")["name"]
+        except Exception:
+            output = None
+        return {"output": output, "input": self.recorder.current_device_name()}
+
+    def _devices_changed(self):
+        """The devices were read anew (one came or went, or the system's
+        defaults changed): tell the user what Iris speaks or listens through
+        now, if that is another device. The microphone is told of only while
+        it is on."""
+        now = self._devices_in_use()
+        before, self._in_use = self._in_use, now
+        changes = []
+        if now["output"] and now["output"] != before.get("output"):
+            changes.append(f"speaking through {now['output']}")
+        if now["input"] != before.get("input") and not self.pause_event.is_set():
+            changes.append(f"listening through {now['input']}")
+        if changes:
+            self._notice("Now " + " and ".join(changes) + ".")
+        if self.event_bus:
+            self.event_bus.emit("config", self.config_info())
+
     def run_loop(self):
-        """Listen and answer until stop_event is set."""
+        """Listen and answer until stop_event is set.
+
+        Nothing that goes wrong in one round ends the loop: the error is
+        logged and the loop goes on, listening and answering. Should it end
+        all the same (the controller starts it again), Iris is shut down only
+        once stop_event is set.
+        """
         devices_ok, device_msg = self.recorder.check_audio_devices()
         if not devices_ok:
             # Typed messages are still answered; the microphone is off until
@@ -1186,149 +1455,174 @@ class VoiceAssistant:
             self._error(f"No microphone: {device_msg}")
             self._mic_lost()
 
+        # Told when the devices are read anew, to say where Iris speaks and
+        # listens now (a device of a test's own is never read anew)
+        audio = getattr(self.player, "audio", None)
+        watch = getattr(audio, "watch", None)
+        if watch is not None:
+            self._in_use = self._devices_in_use()
+            watch(self._devices_changed)
         try:
-            while True:
-                # External UI requested shutdown
-                if self.stop_event.is_set():
-                    break
-
-                # After parting words Iris falls asleep once the voice has
-                # died away (see _sleep_after_goodbye): until then the
-                # microphone stays closed, and the orb is already asleep
-                if time.monotonic() < self._quiet_until:
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                        self.status_manager.status_dormant = self.dormant
-                    time.sleep(0.05)
-                    continue
-
-                # Notice falling asleep whatever the loop is doing, so the UI
-                # learns it even with the mic off
-                self._note_dormancy(self.dormant)
-
-                # Stale barge-in from a turn that already ended
-                if self.interrupt_event.is_set():
-                    self.interrupt_event.clear()
-                    self.speech_pipeline.stop()
-
-                # Paused conversation: nothing starts until it is resumed
-                if self.suspend_event.is_set():
-                    self.recorder.close_microphone()
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                    time.sleep(0.05)
-                    continue
-
-                # Turns from an external UI come first, whether or not the mic
-                # is live, so a typed message never waits for the user to speak
-                with self._turn_lock:
-                    turn = self._take_turn()
-                    if turn is not None:
-                        try:
-                            if "audio" in turn:
-                                self._handle_heard(turn["audio"], self.dormant)
-                            else:
-                                self._run_text_turn(turn)
-                        except Exception:
-                            logger.exception("Turn failed")
-                if turn is not None:
-                    continue
-
-                # A voice is being previewed: the microphone would hear it as
-                # the user, and answer it. It stays closed until the room is
-                # quiet again.
-                if self.speech_pipeline.is_active:
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                    while self.speech_pipeline.is_active and not self.stop_event.is_set():
-                        time.sleep(0.05)
-                    time.sleep(PREVIEW_SETTLE)
-                    continue
-
-                # Paused, the user is typing, or nothing to recognize speech
-                # with: keep the microphone closed (models stay loaded) and
-                # keep watching for typed turns
-                closed = self.pause_event.is_set() or self.hold_event.is_set()
-                if closed or self.transcriber is None:
-                    self.recorder.close_microphone()
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                    time.sleep(0.05)
-                    continue
-
+            while not self.stop_event.is_set():
                 try:
-                    # 1. Listen for voice input with level visualization;
-                    # with a wake word set and no recent turn, only for that
-                    dormant = self.dormant
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = not dormant
-                        self.status_manager.status_dormant = dormant
-
-                    last_level_emit = [0.0]
-                    heard_speech = [False]
-
-                    def on_audio_level(level: float):
-                        """Update audio level display."""
-                        if level * 0.15 > self.recorder.silence_threshold:
-                            heard_speech[0] = True
-                            # Talk Iris is not part of (while dormant) is not
-                            # conversation: memory filing may use the time
-                            if not dormant:
-                                self._last_voice = time.monotonic()
-                                if self.wake_word:
-                                    self._keep_awake_while_speaking()
-                        # Throttle level events to ~15 Hz for external UIs
-                        if self.event_bus:
-                            now = time.monotonic()
-                            if now - last_level_emit[0] >= 1 / 15:
-                                last_level_emit[0] = now
-                                self.event_bus.emit("audio.level", {"rms": level})
-
-                    audio_path = self.recorder.listen(
-                        on_level=on_audio_level,
-                        should_stop=lambda: self.pause_event.is_set()
-                        or self.suspend_event.is_set()
-                        or self.hold_event.is_set()
-                        or self.stop_event.is_set()
-                        or not self.turn_queue.empty()
-                        # A voice preview started
-                        or self.speech_pipeline.is_active
-                        # The awake window ran out with nobody speaking
-                        or (not dormant and not heard_speech[0] and self.dormant)
-                        # The wake word was switched off: listen to everything
-                        or (dormant and not self.dormant),
-                        silence_duration=DORMANT_SILENCE if dormant else None,
-                    )
-
-                    with self.status_manager.status_lock:
-                        self.status_manager.status_listening = False
-                        self.status_manager.status_dormant = False
-
-                    # The microphone went away: typed messages are still
-                    # answered, and the microphone is off until switched on
-                    if self.recorder._device_error:
-                        self.speech_pipeline.stop()
-                        self._error(
-                            "The microphone was disconnected. Connect one and switch "
-                            "the microphone on again."
-                        )
-                        self._mic_lost()
-                        continue
-
-                    if not audio_path:
-                        continue
-
-                    # 2. Transcribe, then 3. answer (streams and speaks the
-                    # reply), listening on in case the user was not finished
-                    with self._turn_lock:
-                        self._answer_listening(audio_path, dormant)
-
+                    self._loop_round()
                 except Exception:
-                    logger.exception("Listening failed")
+                    logger.exception("A round of the assistant's loop failed")
+                    time.sleep(LOOP_RETRY)
         finally:
+            if watch is not None:
+                audio.unwatch(self._devices_changed)
+            for close in (self.speech_pipeline.stop, self.recorder.close_microphone):
+                try:
+                    close()
+                except Exception:
+                    logger.exception("Could not close the audio")
+            if self.stop_event.is_set():
+                self.shut_down()
+
+    def shut_down(self):
+        """Release what Iris holds besides the audio: the tools' resources,
+        and memory's filing in the background."""
+        if self.tools:
+            self.tools.cleanup()
+        if self.memory:
+            self.memory.stop()
+
+    def _loop_round(self):
+        """One round of the loop: a turn taken, a listen, or a moment's wait
+        while there is nothing to listen for."""
+        # After parting words Iris falls asleep once the voice has
+        # died away (see _sleep_after_goodbye): until then the
+        # microphone stays closed, and the orb is already asleep
+        if time.monotonic() < self._quiet_until:
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+                self.status_manager.status_dormant = self.dormant
+            time.sleep(0.05)
+            return
+
+        # Notice falling asleep whatever the loop is doing, so the UI
+        # learns it even with the mic off
+        self._note_dormancy(self.dormant)
+
+        # Stale barge-in from a turn that already ended
+        if self.interrupt_event.is_set():
+            self.interrupt_event.clear()
             self.speech_pipeline.stop()
+
+        # Paused conversation: nothing starts until it is resumed
+        if self.suspend_event.is_set():
             self.recorder.close_microphone()
-            if self.tools:
-                self.tools.cleanup()
-            if self.memory:
-                self.memory.stop()
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+            time.sleep(0.05)
+            return
+
+        # Turns from an external UI come first, whether or not the mic
+        # is live, so a typed message never waits for the user to speak
+        with self._turn_lock:
+            turn = self._take_turn()
+            if turn is not None:
+                try:
+                    if "audio" in turn:
+                        self._handle_heard(turn["audio"], self.dormant)
+                    elif turn.get("greet"):
+                        self._greet()
+                    else:
+                        self._run_text_turn(turn)
+                except Exception:
+                    logger.exception("Turn failed")
+        if turn is not None:
+            return
+
+        # A voice is being previewed: the microphone would hear it as
+        # the user, and answer it. It stays closed until the room is
+        # quiet again.
+        if self.speech_pipeline.is_active:
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+            while self.speech_pipeline.is_active and not self.stop_event.is_set():
+                time.sleep(0.05)
+            time.sleep(PREVIEW_SETTLE)
+            return
+
+        # Paused, the user is typing, or nothing to recognize speech
+        # with: keep the microphone closed (models stay loaded) and
+        # keep watching for typed turns
+        closed = self.pause_event.is_set() or self.hold_event.is_set()
+        if closed or self.transcriber is None:
+            self.recorder.close_microphone()
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+            time.sleep(0.05)
+            return
+
+        try:
+            # 1. Listen for voice input with level visualization;
+            # with a wake word set and no recent turn, only for that
+            dormant = self.dormant
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = not dormant
+                self.status_manager.status_dormant = dormant
+
+            last_level_emit = [0.0]
+            heard_speech = [False]
+
+            def on_audio_level(level: float):
+                """Update audio level display."""
+                if level * 0.15 > self.recorder.silence_threshold:
+                    heard_speech[0] = True
+                    # Talk Iris is not part of (while dormant) is not
+                    # conversation: memory filing may use the time
+                    if not dormant:
+                        self._last_voice = time.monotonic()
+                        if self.wake_word:
+                            self._keep_awake_while_speaking()
+                # Throttle level events to ~15 Hz for external UIs
+                if self.event_bus:
+                    now = time.monotonic()
+                    if now - last_level_emit[0] >= 1 / 15:
+                        last_level_emit[0] = now
+                        self.event_bus.emit("audio.level", {"rms": level})
+
+            audio_path = self.recorder.listen(
+                on_level=on_audio_level,
+                should_stop=lambda: self.pause_event.is_set()
+                or self.suspend_event.is_set()
+                or self.hold_event.is_set()
+                or self.stop_event.is_set()
+                or not self.turn_queue.empty()
+                # A voice preview started
+                or self.speech_pipeline.is_active
+                # The awake window ran out with nobody speaking
+                or (not dormant and not heard_speech[0] and self.dormant)
+                # The wake word was switched off: listen to everything
+                or (dormant and not self.dormant),
+                silence_duration=DORMANT_SILENCE if dormant else None,
+            )
+
+            with self.status_manager.status_lock:
+                self.status_manager.status_listening = False
+                self.status_manager.status_dormant = False
+
+            # The microphone went away: typed messages are still
+            # answered, and the microphone is off until switched on
+            if self.recorder._device_error:
+                self.speech_pipeline.stop()
+                self._error(
+                    "The microphone was disconnected. Connect one and switch "
+                    "the microphone on again."
+                )
+                self._mic_lost()
+                return
+
+            if not audio_path:
+                return
+
+            # 2. Transcribe, then 3. answer (streams and speaks the
+            # reply), listening on in case the user was not finished
+            with self._turn_lock:
+                self._answer_listening(audio_path, dormant)
+
+        except Exception:
+            logger.exception("Listening failed")
