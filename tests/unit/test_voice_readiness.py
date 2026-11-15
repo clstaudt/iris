@@ -53,8 +53,8 @@ class Downloads(StandInKyutai):
 
 
 def english_here():
-    """The English model and Anna's voice for it, as the first run leaves them."""
-    return [*pocket.model_files("english"), pocket.voice_file("english", "anna")]
+    """The English model and Eve's voice for it, as the first run leaves them."""
+    return [*pocket.model_files("english"), pocket.voice_file("english", "eve")]
 
 
 @pytest.fixture
@@ -106,16 +106,16 @@ def test_pocket_tts_takes_its_files_from_the_cache_only():
 
 
 def test_a_voice_is_ready_for_a_language_once_its_model_and_voice_are_here(hub):
-    assert voice_ready("kyutai", "anna", "en")
-    assert not voice_ready("kyutai", "anna", "de")
+    assert voice_ready("kyutai", "eve", "en")
+    assert not voice_ready("kyutai", "eve", "de")
     assert not voice_ready("kyutai", "paul", "en")
     # The language's model in either form, and the voice for it
     hub.files.update(
-        [*pocket.model_files("german", clones=True), pocket.voice_file("german", "anna")]
+        [*pocket.model_files("german", clones=True), pocket.voice_file("german", "eve")]
     )
-    assert voice_ready("kyutai", "anna", "de")
+    assert voice_ready("kyutai", "eve", "de")
     # A language the voice does not speak properly is never ready
-    assert not voice_ready("kyutai", "anna", "ja")
+    assert not voice_ready("kyutai", "eve", "ja")
 
 
 def test_a_cloned_voice_is_ready_for_a_language_once_it_is_made_for_it(hub):
@@ -145,7 +145,7 @@ def _speaker(ready: bool):
     assistant.conversation = SimpleNamespace(clean_markdown=lambda text: text)
     assistant.speech_pipeline = MagicMock()
     assistant.tts_generator = SimpleNamespace(
-        engine="kyutai", voice="anna", speaks=lambda language: True, ready=lambda language: ready
+        engine="kyutai", voice="eve", speaks=lambda language: True, ready=lambda language: ready
     )
     assistant._speech_language = lambda text: "de"
     assistant._reply_voiced = assistant._reply_unspoken = False
@@ -164,7 +164,7 @@ def test_a_reply_its_voice_is_not_ready_for_is_shown_and_its_voice_made_ready():
     assistant._speak("Guten Tag.")
 
     assistant.speech_pipeline.queue_speech.assert_not_called()
-    assert asked == [("kyutai", "anna", "de")]
+    assert asked == [("kyutai", "eve", "de")]
     assert assistant._reply_unspoken
 
 
@@ -219,26 +219,26 @@ def test_a_voice_is_made_ready_with_its_progress_told(hub):
     events = Events()
     jobs = _readier(events)
 
-    job = jobs.request("kyutai", "anna", "de", "Anna", ["Iris"], readiness.LANGUAGES)
+    job = jobs.request("kyutai", "eve", "de", "Eve", ["Iris"], readiness.LANGUAGES)
 
     assert job["title"] == "Downloading the German voice model"
     assert job["purpose"] == "Iris will speak German once it's done"
     assert jobs.wait(job["id"], 5)
-    assert voice_ready("kyutai", "anna", "de")
+    assert voice_ready("kyutai", "eve", "de")
     states = [d["state"] for d in events.jobs(id=job["id"])]
     assert states[0] == "queued" and "downloading" in states and states[-1] == "ready"
     assert {"done": 50, "total": 200} in [
         {"done": d["done"], "total": d["total"]} for d in events.jobs()
     ]
     # Ready, it needs no other
-    assert jobs.request("kyutai", "anna", "de", "Anna") is None
+    assert jobs.request("kyutai", "eve", "de", "Eve") is None
 
 
 def test_a_voice_asked_for_again_is_the_same_job_and_the_conversations(hub):
     hub.hold = threading.Event()
     jobs = _readier(Events())
-    first = jobs.request("kyutai", "anna", "de", "Anna", ["Iris"], readiness.LANGUAGES)
-    again = jobs.request("kyutai", "anna", "de", "Anna", ["Iris"], readiness.CONVERSATION)
+    first = jobs.request("kyutai", "eve", "de", "Eve", ["Iris"], readiness.LANGUAGES)
+    again = jobs.request("kyutai", "eve", "de", "Eve", ["Iris"], readiness.CONVERSATION)
     hub.hold.set()
     assert first["id"] == again["id"] and again["origin"] == "conversation"
     assert jobs.wait(first["id"], 5)
@@ -249,7 +249,7 @@ def test_a_stalled_download_is_said_and_a_failed_one_is_tried_again(hub):
     hub.hold, hub.failures = threading.Event(), 1
     events = Events()
     jobs = _readier(events, stall_after=0.2)
-    job = jobs.request("kyutai", "anna", "de", "Anna", ["Iris"])
+    job = jobs.request("kyutai", "eve", "de", "Eve", ["Iris"])
 
     # Nothing came for a while: said, while it still runs
     assert until(lambda: events.jobs(id=job["id"], stalled=True), 5)
@@ -257,11 +257,11 @@ def test_a_stalled_download_is_said_and_a_failed_one_is_tried_again(hub):
     assert not jobs.wait(job["id"], 5)
     [failed] = [j for j in jobs.jobs() if j["id"] == job["id"]]
     assert failed["state"] == "failed" and failed["error"] == "No connection"
-    assert failed["title"] == "Anna's voice for German could not be downloaded"
+    assert failed["title"] == "Eve's voice for German could not be downloaded"
 
     retried = jobs.retry(job["id"])
     assert jobs.wait(retried["id"], 5)
-    assert voice_ready("kyutai", "anna", "de")
+    assert voice_ready("kyutai", "eve", "de")
 
 
 def test_a_cloned_voice_is_downloaded_for_then_made(hub):
@@ -313,7 +313,7 @@ def test_choosing_a_language_makes_every_personas_voice_ready_for_it(hub, monkey
 
     assert result["languages"] == ["en", "de"]
     [job] = result["jobs"]
-    assert (job["voice"], job["language"], job["personas"]) == ("anna", "de", ["Iris"])
+    assert (job["voice"], job["language"], job["personas"]) == ("eve", "de", ["Iris"])
     assert controller.readier.wait(job["id"], 5)
 
 
@@ -324,14 +324,14 @@ def test_a_conversation_makes_the_voice_ready_but_leaves_a_failure_to_the_user(h
         persona=SimpleNamespace(name="Iris"), tts_generator=SimpleNamespace(models_dir=None)
     )
 
-    controller._voice_not_ready("kyutai", "anna", "de")
-    job = controller.readier.find("kyutai", "anna", "de")
+    controller._voice_not_ready("kyutai", "eve", "de")
+    job = controller.readier.find("kyutai", "eve", "de")
     assert job.origin == "conversation" and job.personas == ["Iris"]
     assert not controller.readier.wait(job.id, 5)
 
     # The next reply in German does not try again unasked
-    controller._voice_not_ready("kyutai", "anna", "de")
-    assert controller.readier.find("kyutai", "anna", "de").state == "failed"
+    controller._voice_not_ready("kyutai", "eve", "de")
+    assert controller.readier.find("kyutai", "eve", "de").state == "failed"
     assert len(hub.calls) == 1
 
 
@@ -348,7 +348,7 @@ def test_a_voice_played_that_is_not_here_yet_plays_once_it_is(hub):
 
 
 def test_a_generator_never_prepares_a_language_it_is_not_ready_for(hub):
-    generator = SpeechGenerator("kyutai", "anna", prepare=False)
+    generator = SpeechGenerator("kyutai", "eve", prepare=False)
     with patch.object(PocketGenerator, "generate") as speak:
         generator.prepare_language("de")
     speak.assert_not_called()

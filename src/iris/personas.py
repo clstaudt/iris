@@ -187,7 +187,7 @@ def load_all_personas() -> dict[str, Persona]:
         personas["iris"] = Persona(
             name="Iris",
             description="You are Iris, a helpful and friendly assistant. Be conversational, warm, and natural.",
-            voice="anna",
+            voice="eve",
             persona_id="iris",
         )
 

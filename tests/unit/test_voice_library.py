@@ -69,14 +69,14 @@ def test_every_voice_is_listed_with_the_personas_that_speak_with_it():
     listing = controller.voice_list()
 
     kyutai = by_id(listing)
-    assert kyutai["anna"]["personas"] == [{"id": "iris", "name": "Iris"}]
+    assert kyutai["eve"]["personas"] == [{"id": "iris", "name": "Iris"}]
     assert kyutai["alba"]["personas"] == []
     assert kyutai["clone:ada"]["personas"] == [{"id": "ada", "name": "Ada"}]
     # The languages each speaks, and those it is ready for
-    assert kyutai["anna"]["languages"] == ["en", "fr", "it", "de", "es", "pt", "nl"]
-    assert kyutai["anna"]["ready"] == kyutai["anna"]["languages"]
-    assert listing["chosen"] == ["en"] and listing["fallback"] == "anna"
-    assert "cloned" not in kyutai["anna"]
+    assert kyutai["eve"]["languages"] == ["en", "fr", "it", "de", "es", "pt", "nl"]
+    assert kyutai["eve"]["ready"] == kyutai["eve"]["languages"]
+    assert listing["chosen"] == ["en"] and listing["fallback"] == "eve"
+    assert "cloned" not in kyutai["eve"]
 
 
 def test_a_cloned_voice_shows_its_folder_and_the_languages_made_of_it():
@@ -255,7 +255,7 @@ def test_a_voice_in_use_is_deleted_only_once_its_personas_have_another():
     assert controller.voice_delete("clone:ada", reassign=True)["ok"]
     assert not folder.exists()
     ada = personas.load_all_personas()["ada"]
-    assert (ada.engine, ada.voice) == ("kyutai", "anna")
+    assert (ada.engine, ada.voice) == ("kyutai", "eve")
 
 
 def test_only_a_cloned_voice_is_deleted():

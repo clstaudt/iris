@@ -430,7 +430,7 @@ class PocketWithoutCloning:
         return torch.zeros(2400)
 
 
-@pytest.mark.parametrize("name, own", [("de", "eve"), ("nl", "michael")])
+@pytest.mark.parametrize("name, own", [("de", "anna"), ("nl", "michael")])
 def test_without_voice_cloning_the_user_speaks_with_one_of_pocket_tts_voices(name, own, monkeypatch, tmp_path):
     """The German and Dutch users are cloned voices: where cloning cannot be
     had, no German or Dutch turn could be held at all. Their stand-ins are
