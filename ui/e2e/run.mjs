@@ -1115,26 +1115,38 @@ try {
 
   await step("servers: switching to another one and back", async () => {
     await openStage("Language model");
-    const local = servers.filter({ hasText: "This computer" });
-    // Needs two servers that answer: the one given and this computer's
-    if (!process.env.E2E_HOST || !(await local.locator(".dot.ok").count())) return;
+    // The other server is the test's stand-in, which always answers; never
+    // this computer's own, whose models the test must not run
     const host = config().ollama_host;
-    await local.locator("button.pick").click();
-    await until("this computer's server to be in use", () => config().ollama_host === "", 30_000);
-    await local.locator('button.pick[aria-checked="true"]').waitFor({ timeout: 5000 });
-    // The model in use is one this server has, not the other server's
-    await until("a model of this server", async () => {
-      const names = await inspector.locator(".s-option .name").allInnerTexts();
-      return config().llm_model !== model && names.some((name) => name.trim() === config().llm_model);
-    }, 30_000);
-    // The server switched away from is still listed, and switching back
-    // brings back the model it had
-    const other = servers.filter({ hasText: new URL(host).host });
-    check(await other.count(), "the server switched away from is no longer listed");
-    await other.locator("button.pick").click();
-    await until("the other server to be in use again", () => config().ollama_host === host, 30_000);
-    await until(`${model} to be in use again`, () => config().llm_model === model, 30_000);
-    await inspector.locator(".s-option.active", { hasText: model }).waitFor({ timeout: 5000 });
+    const back = servers.filter({ hasText: host ? new URL(host).host : "This computer" });
+    const before = await servers.count();
+    await inspector.locator("button.s-btn", { hasText: "Add server" }).click();
+    await inspector.locator('input[aria-label="Server address"]').fill(stubUrl);
+    await inspector.locator('input[aria-label="Server address"]').press("Enter");
+    const stand = servers.filter({ hasText: new URL(stubUrl).host });
+    await stand.waitFor({ timeout: 5000 });
+    try {
+      await stand.locator("button.pick").click();
+      await until("the stand-in server to be in use", () => config().ollama_host === stubUrl, 30_000);
+      await stand.locator('button.pick[aria-checked="true"]').waitFor({ timeout: 5000 });
+      // The model in use is one this server has
+      await until("a model of this server", () => STUB_MODELS.some((m) => m.id === config().llm_model), 30_000);
+      // The server switched away from is still listed, and switching back
+      // brings back the model it had
+      check(await back.count(), "the server switched away from is no longer listed");
+      await back.locator("button.pick").click();
+      await until("the other server to be in use again", () => config().ollama_host === host, 30_000);
+      await until(`${model} to be in use again`, () => config().llm_model === model, 30_000);
+      await inspector.locator(".s-option.active", { hasText: model }).waitFor({ timeout: 5000 });
+    } finally {
+      // Whatever failed, the steps after this one talk to the test's server
+      if (config().ollama_host !== host) {
+        await back.locator("button.pick").click().catch(() => {});
+        await until("the test's server again", () => config().ollama_host === host, 30_000).catch(() => {});
+      }
+      await stand.locator('button[title="Remove"]').click().catch(() => {});
+      await until("the stand-in to be gone", async () => (await servers.count()) === before).catch(() => {});
+    }
   });
 
   await step("turn end: silence, and back to Smart Turn", async () => {
