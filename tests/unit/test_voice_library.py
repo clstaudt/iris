@@ -4,6 +4,7 @@ and deleted, a voice in use only once its personas have another. Hugging
 Face and the models are stand-ins: nothing is downloaded."""
 
 import base64
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -133,7 +134,7 @@ def _sampled(service):
 
 
 def test_cloned_again_a_voice_keeps_its_name_and_personas_and_drops_the_old(
-    kyutai, heard_by_energy
+    kyutai, heard_by_energy, caplog
 ):
     folder = made("Ada")
     (folder / "german.safetensors").write_bytes(b"made of the old sample")
@@ -142,7 +143,8 @@ def test_cloned_again_a_voice_keeps_its_name_and_personas_and_drops_the_old(
     service = Cloning(lambda t, d: None, changed=changed.append)
     _sampled(service)
 
-    result = service.clone("Someone else", replace="clone:ada")
+    with caplog.at_level(logging.INFO, logger="iris.cloning"):
+        result = service.clone("Someone else", replace="clone:ada")
 
     assert result == {"ok": True, "voice": {"id": "clone:ada", "name": "Ada", "language": "Cloned"}}
     assert (folder / cloning.SAMPLE_FILE).read_bytes() != old_sample
@@ -151,6 +153,9 @@ def test_cloned_again_a_voice_keeps_its_name_and_personas_and_drops_the_old(
     assert (folder / "english.safetensors").read_bytes() != b"made when cloned"
     assert changed == ["clone:ada"]
     assert [v["id"] for v in cloned_voices()] == ["clone:ada"]
+    # What it replaces is logged, with the folder
+    [said] = [r.getMessage() for r in caplog.records if "replaced" in r.getMessage()]
+    assert "clone:ada" in said and str(folder) in said
 
 
 def test_a_voice_that_cannot_be_made_again_stays_as_it_was(kyutai, heard_by_energy):
@@ -226,6 +231,21 @@ def test_a_voice_in_use_is_deleted_only_once_its_personas_have_another():
 
 def test_only_a_cloned_voice_is_deleted():
     assert AssistantController(EventBus()).voice_delete("anna")["ok"] is False
+
+
+def test_a_voice_deleted_is_logged_with_its_folder(caplog):
+    folder = made("Ada")
+    with caplog.at_level(logging.INFO, logger="iris.cloning"):
+        assert AssistantController(EventBus()).voice_delete("clone:ada")["ok"]
+    [said] = [r.getMessage() for r in caplog.records if "removing" in r.getMessage()]
+    assert "clone:ada" in said and str(folder) in said
+
+
+def test_a_cloned_voice_that_is_not_here_does_not_play():
+    result = AssistantController(EventBus()).persona_preview(
+        {"name": "Noam", "engine": "kyutai", "voice": "clone:noam-2"}
+    )
+    assert result == {"ok": False, "error": "The voice Noam 2 cannot be found"}
 
 
 # ---------------------------------------------------------------------------
