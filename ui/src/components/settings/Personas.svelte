@@ -26,7 +26,7 @@
 </script>
 
 <div class="grid max-w-[980px] grid-cols-[200px_minmax(0,1fr)] items-start gap-6">
-  <div class="flex flex-col gap-1.5">
+  <div class="flex flex-col gap-1.5" data-tour="personas">
     {#each store.personas as id}
       <button
         onclick={() => (store.editingPersona = id)}
@@ -43,6 +43,7 @@
     <button
       onclick={() => (store.editingPersona = "")}
       class="s-btn mt-1 {store.editingPersona === '' ? 'text-ink' : ''}"
+      data-tour="new-persona"
     >
       <Icon name="plus" size={13} />
       New persona

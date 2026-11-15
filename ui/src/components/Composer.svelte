@@ -134,6 +134,7 @@
 
 <div class="relative z-10 shrink-0 px-6 pb-1">
   <div
+    data-tour="composer"
     class="composer mx-auto max-w-[720px] rounded-2xl border bg-raised transition-colors {dragging
       ? 'border-accent'
       : focused
@@ -177,6 +178,7 @@
           disabled={store.state === "starting"}
           class="toggle {store.paused ? 'resume' : ''}"
           title={store.paused ? "Resume the conversation" : "Pause the conversation"}
+          data-tour="pause"
         >
           <Icon name={store.paused ? "play" : "pause"} size={14} />
           <span>{store.paused ? "Resume" : "Pause"}</span>
@@ -187,6 +189,7 @@
           disabled={store.state === "starting"}
           class="toggle {store.micOn ? '' : 'off'}"
           title={store.micOn ? "Turn microphone off" : "Turn microphone on"}
+          data-tour="mic"
         >
           <Icon name={store.micOn ? "mic" : "mic-off"} />
           <span>{store.micOn ? "Mic" : "Mic off"}</span>
@@ -248,6 +251,7 @@
           disabled={!hasDraft}
           class="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-frame transition-opacity hover:opacity-90 disabled:bg-hover disabled:text-ink-3"
           title="Send (Enter)"
+          data-tour="send"
         >
           <Icon name="send" size={16} stroke={2.25} />
         </button>

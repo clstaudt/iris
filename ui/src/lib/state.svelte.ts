@@ -426,6 +426,9 @@ export interface SavedSettings {
   tts_models_dir?: string;
   /** The first-launch walkthrough has been completed */
   setup_done?: boolean;
+  /** The feature tour: taken at the end of the walkthrough, which a launch
+   *  goes on with, or done (finished or skipped) */
+  tour?: "taking" | "done";
   /** Iris's languages: every persona's voice is made ready for them ahead.
    *  Conversations are not held to them */
   languages?: string[];

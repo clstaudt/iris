@@ -1,10 +1,10 @@
 {
   "name": "iris-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0-rc.1",
   "description": "Electron UI shell for the Iris voice assistant",
   "author": "Christian Staudt",
-  "license": "GPL-3.0-or-later",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -19,6 +19,7 @@
     "test:wake-hint": "node --test e2e/wakehint.test.mjs",
     "test:shutter": "node --test e2e/shutter.test.mjs",
     "test:keep": "node --test e2e/keep.test.mjs",
+    "test:tour": "node --test e2e/tour.test.mjs",
     "icon": "esbuild scripts/icon/render.ts --bundle --format=iife --outfile=dist-electron/icon-render.js && ELECTRON_RUN_AS_NODE= electron scripts/icon/make-icon.cjs",
     "dist:mac": "bash scripts/package-mac.sh"
   },
@@ -48,6 +49,7 @@
   "build": {
     "appId": "dev.iris.assistant",
     "productName": "Iris",
+    "copyright": "Copyright © 2025–2026 Christian Staudt",
     "directories": {
       "output": "release",
       "buildResources": "build"

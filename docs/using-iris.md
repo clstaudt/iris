@@ -40,9 +40,9 @@ The first time it opens, Iris walks you through getting ready, a step at a time;
 3. **Microphone.** The walkthrough asks for the microphone (on macOS, the system's prompt), then shows its level and says when it hears your voice.
 4. **Voice.** The persona you talk to, Iris unless you made others; its voice can be played as soon as its engine is downloaded.
 5. **Wake word and tools**, both optional: whether Iris waits for its name, and whether it may use the camera, the screen and web search.
-6. **Ready.** A summary of the choices, each a click away. Iris starts, the iris bud at the top, which opened as the walkthrough came along, blooms into the orb, and Iris greets you in its persona's words. Downloads still running go on under the orb.
+6. **Ready.** A summary of the choices, each a click away. Iris starts, the iris bud at the top, which opened as the walkthrough came along, blooms into the orb, and Iris greets you in its persona's words. Downloads still running go on under the orb. **Take the tour** starts Iris the same way, then goes through talking, compact mode, personas, voices, roles, threads, memory and the pipeline, a few sentences each at the controls they are about, which can be tried as it goes.
 
-Each step can be skipped or gone back to, and everything can be changed later in Settings, where **Walkthrough** runs it again.
+Each step can be skipped or gone back to, and everything can be changed later in Settings, where **Set up** runs it again, and **Tour** the tour.
 
 ## Using Iris
 
@@ -82,7 +82,7 @@ Iris keeps one continuous conversation that survives restarts and is remembered 
 
 ### Personas
 
-A persona is who Iris is: a name, a personality, a voice, and the words that wake it and send it to sleep. Iris ships one, **Iris**, friendly and helpful. Under Settings > Personas you edit it or create others: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited Iris can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`); a change to the file of the persona in use is taken on while Iris runs, from its next reply:
+A persona shapes your assistant's character and style: a name, a personality, a voice, and the words that wake it and send it to sleep. Iris ships one, **Iris**, friendly and helpful. Under Settings > Personas you edit it or create others: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited Iris can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`); a change to the file of the persona in use is taken on while Iris runs, from its next reply:
 
 ```yaml
 name: "Juno"
