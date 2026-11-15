@@ -26,6 +26,7 @@ class Pipeline:
         self.stops = 0
         self._said = said
         self.resumes = 0
+        self.rewound = []
 
     def stop(self):
         self.stops += 1
@@ -33,8 +34,9 @@ class Pipeline:
     def pause(self):
         pass
 
-    def resume(self):
+    def resume(self, rewind=True):
         self.resumes += 1
+        self.rewound.append(rewind)
 
     @property
     def is_active(self):
@@ -173,9 +175,12 @@ def test_a_hold_ended_by_the_users_pause_keeps_the_voice_paused(tmp_path):
     before = pipeline.resumes
     release()
     assert pipeline.resumes == before + 1
+    # A hold that heard nothing of the user goes on exactly where it was cut
+    release(False)
+    assert pipeline.resumes == before + 2 and pipeline.rewound[-2:] == [True, False]
     assistant.suspend_event.set()
     release()
-    assert pipeline.resumes == before + 1
+    assert pipeline.resumes == before + 2
 
 
 def test_barge_in_switched_off(tmp_path):

@@ -9,6 +9,7 @@ from scipy.signal import fftconvolve
 from iris import audio as audio_module
 from iris.audio import AudioPlayer
 from iris.echo import HAS_ECHO_CANCELLATION, RATE, STEP, EchoCanceller
+from iris.turns import HOLD_STANDS_OUT
 
 pytestmark = pytest.mark.skipif(not HAS_ECHO_CANCELLATION, reason="no echo canceller here")
 
@@ -212,3 +213,58 @@ def test_the_users_speech_before_the_voice_is_not_taken_for_the_rooms_noise():
     _clean_all(canceller, mic)
     assert canceller.settled
     assert canceller.cancelling is False
+
+
+def _replies_with_a_new_delay(user_at=None, user_gain=3.0):
+    """Two replies of the voice, the second's sound coming out 0.1 s later
+    than the first's (its stream woke with a delay of its own), cleaned from
+    a cold canceller on: for each 128 ms of each reply, how what was heard
+    stood against the voice's echo, and whether the user spoke in it.
+    user_at: (reply, seconds into it) the user speaks for 1.5 s, louder."""
+    rng = np.random.default_rng(3)
+    replies = [(0.5, 0.03), (10.0, 0.13)]
+    voices = [_voice(6.0, seed=1), _voice(6.0, seed=2)]
+    mic = (rng.standard_normal(17 * RATE) * 0.001).astype(np.float32)
+    for (start, delay), voice in zip(replies, voices):
+        echo = 0.5 * _echo_of(voice, delay)
+        mic[int(start * RATE) : int(start * RATE) + len(echo)] += echo
+    user = None
+    if user_at is not None:
+        reply, into = user_at
+        begins = replies[reply][0] + into
+        speech = user_gain * _voice(1.5, seed=7)
+        mic[int(begins * RATE) : int(begins * RATE) + len(speech)] += speech
+        user = (begins + 0.05, begins + 1.5)
+    canceller = EchoCanceller()
+    for (start, _), voice in zip(replies, voices):
+        canceller.played(start, voice, RATE)
+    block, span = 3 * STEP, 0.128
+    weighed = []
+    for i in range(0, len(mic) - block + 1, block):
+        canceller.clean(mic[i : i + block], i / RATE)
+        end = (i + block) / RATE
+        if any(start <= end - span and end <= start + 6.0 for start, _ in replies):
+            speaking = user is not None and user[0] <= end - span and end <= user[1]
+            weighed.append((end, canceller.against_echo(end - span, end), speaking, canceller.settled))
+    return weighed
+
+
+def test_from_a_replys_first_word_its_echo_does_not_stand_out():
+    """From the start of each reply, on a cold canceller too (its first 3 s,
+    before it has learned the room) and once its sound comes out later than
+    before (the canceller lets it through while it finds it again): the
+    voice's echo is never heard standing out above what it could be, so it
+    cannot hold the voice."""
+    weighed = _replies_with_a_new_delay()
+    known = [levels for _, levels, _, _ in weighed if levels is not None]
+    # Known from the first quarter second of voice on, cold or not
+    assert len(known) > 0.9 * len(weighed)
+    assert any(levels is not None for _, levels, _, settled in weighed if not settled)
+    assert max(levels.heard for levels in known) < HOLD_STANDS_OUT
+
+
+def test_a_user_louder_than_the_voice_stands_out_at_once():
+    for reply, into in ((0, 1.0), (1, 0.3)):
+        weighed = _replies_with_a_new_delay(user_at=(reply, into))
+        over = [levels.heard for _, levels, speaking, _ in weighed if speaking and levels is not None]
+        assert over and max(over[:4]) >= HOLD_STANDS_OUT

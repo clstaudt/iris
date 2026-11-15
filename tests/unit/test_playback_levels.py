@@ -4,6 +4,7 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 from iris import audio as audio_module
 from iris.audio import AudioPlayer
@@ -130,12 +131,12 @@ def test_playback_waits_until_the_stream_has_really_finished(monkeypatch):
     assert time_module.monotonic() - started[0] >= 1.0
 
 
-def test_a_clip_held_early_does_not_start_over(monkeypatch):
-    """A hold soon after a clip began goes back at most half of what was
-    heard: resuming from its start repeated the first words at every hold."""
+def _hold(monkeypatch, after: float, rewind: bool):
+    """Play a 2 s ramp, hold it after so many seconds and let it go on;
+    where it went on, and how much had been heard (seconds)."""
     sample_rate = 16000
     audio = np.linspace(0, 1, sample_rate * 2, dtype=np.float32)
-    played = []
+    played, started, cut = [], [], []
 
     class FakeStream:
         latency = 0.0
@@ -145,9 +146,12 @@ def test_a_clip_held_early_does_not_start_over(monkeypatch):
 
     def fake_play(segment, rate, **kwargs):
         played.append(segment.copy())
+        started.append(time.monotonic())
         stream.active = True
 
     def fake_stop():
+        if stream.active and not cut:
+            cut.append(time.monotonic())
         stream.active = False
 
     monkeypatch.setattr(audio_module.sd, "play", fake_play)
@@ -157,13 +161,28 @@ def test_a_clip_held_early_does_not_start_over(monkeypatch):
     player = AudioPlayer()
     worker = threading.Thread(target=player._play_resumable, args=(audio, sample_rate, None))
     worker.start()
-    time.sleep(0.3)  # held 0.3 s in, less than the rewind
+    time.sleep(after)
     player.pause()
     time.sleep(0.2)
-    player.resume()
+    player.resume(rewind=rewind)
     time.sleep(0.2)
     stream.active = False
     worker.join(timeout=2)
+    assert len(played) == 2
+    return (len(audio) - len(played[1])) / sample_rate, cut[0] - started[0]
 
-    resumed_at = (len(audio) - len(played[1])) / sample_rate
-    assert 0.1 < resumed_at < 0.3
+
+@pytest.mark.parametrize("after", [0.3, 0.8])
+def test_a_hold_for_the_voices_own_echo_goes_on_where_it_was_cut(monkeypatch, after):
+    """Held for nothing (its own echo), early in a clip or later, the voice
+    goes on exactly where it was heard to: nothing is said twice."""
+    resumed_at, heard = _hold(monkeypatch, after, rewind=False)
+    assert resumed_at == pytest.approx(heard, abs=0.01)
+
+
+def test_a_clip_held_early_does_not_start_over(monkeypatch):
+    """A user who interrupted it hears the cut word again, but a hold soon
+    after a clip began goes back at most half of what was heard: resuming
+    from its start repeated the first words at every hold."""
+    resumed_at, heard = _hold(monkeypatch, 0.3, rewind=True)
+    assert heard / 2 - 0.01 <= resumed_at < heard
