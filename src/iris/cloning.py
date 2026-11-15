@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from math import gcd
 from pathlib import Path
@@ -104,6 +105,13 @@ MAX_FILE_BYTES = 50_000_000
 
 # What cloning can do here, as access() tells it
 LOGIN, TERMS, READY = "login", "terms", "ready"
+
+# Hugging Face's own timeouts do not always end a request to a server that
+# stalls: asking it about the account is given up after ASK_WITHIN seconds,
+# and a download once it has received nothing for STALL_AFTER (its first
+# requests, for the files' sizes, are tried again on a timeout)
+ASK_WITHIN = 20.0
+STALL_AFTER = 60.0
 
 
 class CloneAccessError(RuntimeError):
@@ -321,8 +329,12 @@ class Kyutai:
 
     def fetch(self, files: list[HubFile], on_progress: Progress):
         """Download these files into the cache, with the bytes over all of
-        them; an interrupted file resumes where it stopped (iris.downloads)."""
-        downloads.download_hub_files(files, on_progress)
+        them; an interrupted file resumes where it stopped (iris.downloads).
+
+        Raises:
+            TimeoutError: Nothing came for STALL_AFTER seconds
+        """
+        _watched(lambda progress: downloads.download_hub_files(files, progress), on_progress)
 
     def load_model(self, pocket_lang: str):
         """The language's model, from the cache (iris.tts sees to it that
@@ -332,6 +344,56 @@ class Kyutai:
 
 
 KYUTAI = Kyutai()
+
+
+def _within(seconds: float, ask: Callable[[], object]):
+    """What ask() returns, or raises, on a thread of its own: given up with
+    TimeoutError after this many seconds. A request still under way then is
+    left to end by itself; nothing waits for it."""
+    answer: dict = {}
+
+    def run():
+        try:
+            answer["value"] = ask()
+        except BaseException as error:
+            answer["error"] = error
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise TimeoutError(f"Hugging Face did not answer within {seconds:.0f} s")
+    if "error" in answer:
+        raise answer["error"]
+    return answer.get("value")
+
+
+def _watched(fetch: Callable[[Progress], None], on_progress: Progress, stall: float | None = None):
+    """Run a download, fetch(on_progress), on a thread of its own, passing
+    its progress on; given up with TimeoutError once nothing has come for
+    `stall` seconds (STALL_AFTER), so nobody waits for it for good."""
+    stall = STALL_AFTER if stall is None else stall
+    moved = [time.monotonic()]
+    ended: dict = {}
+
+    def progress(done: int, total: int):
+        moved[0] = time.monotonic()
+        on_progress(done, total)
+
+    def run():
+        try:
+            fetch(progress)
+        except BaseException as error:
+            ended["error"] = error
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    while worker.is_alive():
+        worker.join(min(1.0, stall / 4))
+        if worker.is_alive() and time.monotonic() - moved[0] >= stall:
+            raise TimeoutError(f"The download stalled: nothing came for {stall:.0f} s")
+    if "error" in ended:
+        raise ended["error"]
 
 
 def cloning_weights(pocket_lang: str) -> HubFile:
@@ -371,6 +433,8 @@ def _offline(error: Exception) -> str:
     if isinstance(error, HfHubHTTPError):
         status = _status(error)
         return f"Hugging Face answered with an error ({status})" if status else brief(error, 120)
+    if isinstance(error, TimeoutError):
+        return str(error)
     if isinstance(error, (httpx.TransportError, OSError)) or "offline" in str(error).lower():
         return "No connection to Hugging Face"
     return brief(error, 120)
@@ -398,13 +462,13 @@ def access(pocket_lang: str = "english") -> dict:
     if not KYUTAI.token():
         return result
     try:
-        KYUTAI.whoami()
+        _within(ASK_WITHIN, KYUTAI.whoami)
     except Exception as e:
         if isinstance(e, HfHubHTTPError) and _status(e) == 401:
             return {**result, "error": "Hugging Face did not accept the token"}
         return unknown(e)
     try:
-        KYUTAI.check_access()
+        _within(ASK_WITHIN, KYUTAI.check_access)
     except Exception as e:
         return {**result, "state": TERMS} if _refused(e) else unknown(e)
     return {**result, "state": READY}
@@ -418,7 +482,7 @@ def connect(token: str) -> dict:
     if not token:
         return {**access(), "error": "Paste an access token"}
     try:
-        KYUTAI.login(token)
+        _within(ASK_WITHIN, lambda: KYUTAI.login(token))
     except Exception as e:
         logger.warning("Logging in to Hugging Face failed (%s)", type(e).__name__)
         refused = isinstance(e, ValueError) or _status(e) in (401, 403)
@@ -705,6 +769,7 @@ class Cloning:
         self._changed = changed
         self._lock = threading.Lock()
         self._fetching = threading.Lock()
+        self._making = threading.Lock()
         self._recording: Recording | None = None
         # The assistant held from listening while a sample is recorded, and
         # whether it was held already (the user typing)
@@ -810,23 +875,31 @@ class Cloning:
             {"ok", "voice": {id, name, language}}, or {"ok": False, "error",
             "access": True when it is the cloning model that cannot be had}
         """
-        with self._lock:
-            if self._sample is None:
-                return {"ok": False, "error": "Record a sample or choose one first"}
-            target = None
-            if replace:
-                target = voice_folder(replace)
-                if target is None or not (target / SAMPLE_FILE).is_file():
-                    return {"ok": False, "error": "The voice to clone again is gone"}
-                folder = target.with_name(f".{target.name}.new")
-                shutil.rmtree(folder, ignore_errors=True)
-                folder.mkdir(parents=True)
-                _write_sample(folder, self._sample)
-                _write_info(folder, name=voice_name(target))
-            else:
-                folder = make_voice(self._sample, name, self._in_use)
+        # One voice is made at a time; the sample is taken under the lock,
+        # which is not held while the voice is made: making it may download
+        # the cloning model first (clone.progress), and recording or choosing
+        # a sample meanwhile does not wait for that
+        if not self._making.acquire(blocking=False):
+            return {"ok": False, "error": "A voice is being made already"}
+        try:
+            with self._lock:
+                sample = self._sample
+                if sample is None:
+                    return {"ok": False, "error": "Record a sample or choose one first"}
+                target = None
+                if replace:
+                    target = voice_folder(replace)
+                    if target is None or not (target / SAMPLE_FILE).is_file():
+                        return {"ok": False, "error": "The voice to clone again is gone"}
+                    folder = target.with_name(f".{target.name}.new")
+                    shutil.rmtree(folder, ignore_errors=True)
+                    folder.mkdir(parents=True)
+                    _write_sample(folder, sample)
+                    _write_info(folder, name=voice_name(target))
+                else:
+                    folder = make_voice(sample, name, self._in_use)
             try:
-                make_language(folder, "english")
+                make_language(folder, "english", self._progress)
             except CloneAccessError as e:
                 _remove(folder, "The voice could not be made without the cloning model")
                 return {"ok": False, "error": str(e), "access": True}
@@ -838,7 +911,12 @@ class Cloning:
                 _take_over(folder, target)
                 folder = target
                 self._changed(PREFIX + target.name)
-            self._sample = None
+            with self._lock:
+                # A sample taken meanwhile is the next voice's
+                if self._sample is sample:
+                    self._sample = None
+        finally:
+            self._making.release()
         return {"ok": True, "voice": describe(folder)}
 
     def rename(self, voice: str, name: str) -> dict:

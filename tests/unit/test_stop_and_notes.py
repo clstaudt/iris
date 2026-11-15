@@ -152,6 +152,9 @@ class SilentModel:
     def keep(self, *args):
         raise AssertionError("nothing was said, so nothing is kept")
 
+    def forgo(self):
+        """Nothing was said: the turn is taken back."""
+
 
 def _assistant(conversation):
     assistant = object.__new__(VoiceAssistant)

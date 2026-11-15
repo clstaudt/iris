@@ -145,9 +145,8 @@
       if (failed) {
         error = failed;
       } else {
+        // A new persona is edited from here on (savePersona opens it)
         saved = editable(draft);
-        // A new persona is now the current one; edit it from here on
-        if (isNew) store.editingPersona = store.persona;
       }
     } catch (err) {
       error = String(err);
@@ -199,7 +198,7 @@
         <button
           class="s-btn"
           disabled={changed}
-          onclick={() => store.setPersona(draft!.id!)}
+          onclick={() => store.newThread(draft!.id!, { choose: false })}
         >
           Talk to {draft.name}
         </button>

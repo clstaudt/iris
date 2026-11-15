@@ -122,14 +122,20 @@ export interface AppInfo {
     tts_voice: string;
     input_device: string;
     speak_replies?: boolean;
+    thread?: number | null;
   };
 }
 
+/** Ask the core. The params go as the JSON they become on the way to it:
+ *  Electron copies what the window sends, and refuses a value Svelte keeps
+ *  reactive ($state, a proxy) with "An object could not be cloned", so the
+ *  request would fail before the core heard of it. Copied as plain data,
+ *  every value goes as the core receives it. */
 export async function rpc<T = unknown>(
   method: string,
   params: Record<string, unknown> = {}
 ): Promise<T> {
-  return (await window.iris.rpc(method, params)) as T;
+  return (await window.iris.rpc(method, JSON.parse(JSON.stringify(params)))) as T;
 }
 
 export function onEvent(

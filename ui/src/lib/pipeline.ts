@@ -3,6 +3,14 @@
  *  and how long each stage took; the walkthrough's last step shows it with
  *  the choices just made. */
 
+/** Where a value governed elsewhere is set: the persona, shown by its ring
+ *  and name, or the thread, by its title. Clicking it opens that. */
+export interface StageTag {
+  persona?: string;
+  thread?: string;
+  open: () => void;
+}
+
 /** One stage of the line, or something the language model draws on (a
  *  branch). */
 export interface PipelineStage {
@@ -21,6 +29,8 @@ export interface PipelineStage {
   ms?: number | null;
   /** Nothing to open for it here */
   fixed?: boolean;
+  /** Its value is the persona's or the thread's, not the pipeline's */
+  tag?: StageTag;
 }
 
 export interface PipelineSection<S extends PipelineStage = PipelineStage> {

@@ -20,6 +20,7 @@ from kokoro_onnx.config import SUPPORTED_LANGUAGES as KOKORO_ONNX_LANGUAGES
 from iris.events import EventBus
 from iris.llm import ConversationManager
 from iris.memory import MemoryStore
+from iris.personas import get_persona
 from iris.plugins import web
 from iris.status import StatusManager
 from iris.tools import Tools
@@ -1107,9 +1108,15 @@ def test_memory_starts_iris_again_with_a_memory_of_its_own(monkeypatch, tmp_path
                        (True, str(tmp_path / "memory-2.db"))]
 
     store = MemoryStore(":memory:")
-    iris.controller = SimpleNamespace(assistant=SimpleNamespace(memory=SimpleNamespace(store=store)))
+    conversation = ConversationManager.__new__(ConversationManager)
+    conversation.thread, conversation.persona = None, get_persona("iris")
+    iris.controller = SimpleNamespace(
+        assistant=SimpleNamespace(memory=SimpleNamespace(store=store), conversation=conversation)
+    )
     iris.seed_memory([{"title": "Nazaré", "gist": "a lighthouse", "summary": "A red lighthouse."}])
-    assert [t.title for t in store.topics()] == ["Nazaré"] and store.recent_turns() == []
+    thread = conversation.thread
+    assert [t.title for t in store.topics(thread)] == ["Nazaré"]
+    assert store.recent_turns(thread) == []
 
 
 # Holding conversations, with a stand-in assistant ---------------------------------------------

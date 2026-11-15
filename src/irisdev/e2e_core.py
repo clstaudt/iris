@@ -315,14 +315,16 @@ def _assistant():
 
 def file_memory(params: dict) -> dict:
     """File what was said into topics, on the conversation's model, as
-    Iris does after a quiet spell, and say which topics there are then. The
-    test asks while the conversation rests, so filing does not wait for it."""
-    memory = _assistant().memory
+    Iris does after a quiet spell, and say which topics the open thread has
+    then. The test asks while the conversation rests, so filing does not
+    wait for it."""
+    assistant = _assistant()
+    memory = assistant.memory
     with memory._filing:
         changed = memory.filer.file()
     if changed and memory.on_change:
         memory.on_change()
-    return {"topics": [topic.title for topic in memory.store.topics()]}
+    return {"topics": [t.title for t in memory.store.topics(assistant.conversation.thread)]}
 
 
 def _words_indexed() -> int:
@@ -348,7 +350,8 @@ def remembered(params: dict) -> dict:
     prompt = "\n\n".join(m["content"] for m in messages) + conversation._files_context([])
     return {
         "turns": store.turn_count(),
-        "topics": len(store.topics()),
+        # In every thread
+        "topics": sum(len(store.topics(thread["id"])) for thread in store.threads()),
         "words": _words_indexed(),
         "context": messages[1:],
         "prompt": prompt,

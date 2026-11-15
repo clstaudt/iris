@@ -5,6 +5,9 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
+from iris import personas
 from iris.assistant import VoiceAssistant
 from iris.audio import AudioPlayer
 from iris.controller import AssistantController, silent_microphone_message
@@ -232,22 +235,26 @@ def test_history_keeps_the_visible_conversation():
 
 
 def test_the_conversation_is_shown_again_after_a_restart(tmp_path):
-    """With memory, one conversation goes on across launches: a new core
-    shows its recent turns again, oldest first, as the app shows turns, and
-    keeps them for a window that reloads; notes to the model stay out."""
+    """With memory, a thread goes on across launches: a new core shows its
+    recent turns again, oldest first, as the app shows turns, and keeps them
+    for a window that reloads; notes to the model stay out."""
     earlier = MemoryStore(tmp_path / "memory.db")
-    earlier.add_turn("user", "My sister's cat is called Pepper.", "voice")
-    earlier.add_turn("assistant", "Pepper is a good name for a cat.")
-    earlier.add_turn("system", "You are now HAL.")
-    earlier.add_turn("user", "明日の東京の天気は？", "text")
-    earlier.add_turn("assistant", "晴れです。")
+    thread = earlier.create_thread("iris")
+    earlier.add_turn(thread, "user", "My sister's cat is called Pepper.", "voice")
+    earlier.add_turn(thread, "assistant", "Pepper is a good name for a cat.")
+    earlier.add_turn(thread, "system", "You are now HAL.")
+    earlier.add_turn(thread, "user", "明日の東京の天気は？", "text")
+    earlier.add_turn(thread, "assistant", "晴れです。")
 
     bus = EventBus()
     shown = []
     bus.subscribe(lambda kind, data: shown.append((kind, data)))
     controller = AssistantController(bus)
     # The new core reads what the last one wrote
-    controller.assistant = SimpleNamespace(memory=SimpleNamespace(store=MemoryStore(tmp_path / "memory.db")))
+    controller.assistant = SimpleNamespace(
+        memory=SimpleNamespace(store=MemoryStore(tmp_path / "memory.db")),
+        conversation=SimpleNamespace(thread=thread),
+    )
     controller._restore_thread()
 
     assert shown == [
@@ -274,9 +281,10 @@ def test_the_conversation_before_a_restart_comes_back_marked_as_such():
         {"role": "system", "text": "a note", "source": None},
         {"role": "assistant", "text": "Hello", "source": None},
     ]
-    store = type("Store", (), {"recent_turns": lambda self: turns})()
-    memory = type("Memory", (), {"store": store})()
-    controller.assistant = type("Assistant", (), {"memory": memory})()
+    store = SimpleNamespace(recent_turns=lambda thread: turns)
+    controller.assistant = SimpleNamespace(
+        memory=SimpleNamespace(store=store), conversation=SimpleNamespace(thread=1)
+    )
     controller._restore_thread()
 
     events = controller.history()["events"]
@@ -314,9 +322,13 @@ def test_forgetting_everything_is_answered_and_told_to_every_window(tmp_path):
 
     store = MemoryStore(tmp_path / "memory.db")
     controller.assistant = _remembering_assistant(bus, store, controller._turns)
-    store.create_topic("Bank card", "the PIN", "The user's PIN is 4711.")
-    store.add_turn("user", "My PIN is 4711.", "text")
-    store.add_turn("assistant", "Noted.")
+    conversation = controller.assistant.conversation
+    conversation.open_thread(store.create_thread("iris"))
+    other = store.create_thread("hal")
+    store.add_turn(other, "user", "Open the pod bay doors.", "voice")
+    store.create_topic(conversation.thread, "Bank card", "the PIN", "The user's PIN is 4711.")
+    store.add_turn(conversation.thread, "user", "My PIN is 4711.", "text")
+    store.add_turn(conversation.thread, "assistant", "Noted.")
     bus.emit("chat.user", {"text": "My PIN is 4711.", "source": "text", "id": "t1"})
     bus.emit("chat.done", {"text": "Noted.", "interrupted": False})
     controller.send_text("And my password is swordfish.")
@@ -327,6 +339,8 @@ def test_forgetting_everything_is_answered_and_told_to_every_window(tmp_path):
     assert controller.memory_topics() == {"topics": [], "turns": 0}
     assert controller._turns.empty()
     assert len(controller.assistant.conversation.manage_context()) == 1
+    # Every thread goes, and Iris goes on in a new one
+    assert store.threads() == [] and conversation.thread is None
 
 
 def test_a_silent_microphone_is_warned_about_once(monkeypatch):
@@ -432,6 +446,18 @@ def test_wake_word_is_set_on_the_assistant(monkeypatch):
         controller.stop()
 
 
+@pytest.fixture
+def kokoro_persona():
+    """A persona of the user's with a Kokoro voice: Iris, the one shipped,
+    speaks with Kyutai."""
+    personas.USER_DIR.mkdir(parents=True, exist_ok=True)
+    (personas.USER_DIR / "test-kokoro.yaml").write_text(
+        'name: "Test Kokoro"\nengine: "kokoro"\nvoice: "bm_lewis"\ndescription: |\n  Calm.\n'
+    )
+    personas.reload_personas()
+    return "test-kokoro"
+
+
 class PersonaAssistant(FakeAssistant):
     """A running assistant whose persona can be switched."""
 
@@ -444,34 +470,34 @@ class PersonaAssistant(FakeAssistant):
         self.player = AudioPlayer()
 
 
-def test_a_voice_that_cannot_speak_the_language_goes_back_to_english():
+def test_a_voice_that_cannot_speak_the_language_goes_back_to_english(kokoro_persona):
     controller = AssistantController(EventBus())
     controller.assistant = PersonaAssistant()
     # Spoken by a plugin's engine, say: neither Kokoro nor Kyutai speaks it
     controller.assistant.conversation_language = "ru"
 
-    controller.set_persona("hal")
+    controller.set_persona(kokoro_persona)
 
     assert controller.assistant.tts_generator.engine == "kokoro"
     assert controller.assistant.conversation_language == "en"
 
 
-def test_a_kokoro_persona_keeps_german_through_kyutai():
+def test_a_kokoro_persona_keeps_german_through_kyutai(kokoro_persona):
     controller = AssistantController(EventBus())
     controller.assistant = PersonaAssistant()
     controller.assistant.conversation_language = "de"
 
-    controller.set_persona("hal")
+    controller.set_persona(kokoro_persona)
 
     assert controller.assistant.conversation_language == "de"
 
 
-def test_switching_to_a_voice_that_speaks_the_language_keeps_it():
+def test_switching_to_a_voice_that_speaks_the_language_keeps_it(kokoro_persona):
     controller = AssistantController(EventBus())
     controller.assistant = PersonaAssistant()
     controller.assistant.conversation_language = "fr"
 
-    controller.set_persona("hal")
+    controller.set_persona(kokoro_persona)
 
     assert controller.assistant.conversation_language == "fr"
 

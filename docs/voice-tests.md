@@ -10,7 +10,7 @@ uv run python -m irisdev.voicetest conversations --group hearing --only babble -
 uv run python -m irisdev.voicetest conversations --list
 uv run python -m irisdev.voicetest --llm-host <server URL> --llm-model <model> conversations --only "follow-up"
 
-# Self-talk: two Irises (Iris and HAL) talk to each other, unscripted
+# Self-talk: two Irises (Iris and Test Kokoro) talk to each other, unscripted
 uv run python -m irisdev.voicetest --llm-host <server URL> --llm-model <model> selftalk --minutes 5
 
 # The same conversations as pytest tests

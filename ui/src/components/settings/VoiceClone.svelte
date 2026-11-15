@@ -59,6 +59,8 @@
   let token = $state("");
   let busy = $state(false);
   let progress = $state({ done: 0, total: 0 });
+  /** What making the voice is doing, while no job shows it */
+  let doing = $state("");
   let level = $state(0);
   let seconds = $state(0);
   let picker = $state<HTMLInputElement | null>(null);
@@ -104,13 +106,27 @@
     if (draft.engine !== "kyutai" && step !== "closed") close();
   });
 
+  /** A request of the clone's. One that fails (the window could not send
+   *  it, or the core answered with an error) says why here and gives null:
+   *  the panel never waits for an answer that will not come. */
+  async function ask<T>(method: string, params: Record<string, unknown> = {}): Promise<T | null> {
+    try {
+      return await rpc<T>(method, params);
+    } catch (err) {
+      error = `Iris could not do it: ${err instanceof Error ? err.message : String(err)}`;
+      return null;
+    }
+  }
+
   async function open() {
     error = "";
     making = [];
     const wanted = new Set(["en", ...store.languages]);
     picked = pocket.map((l) => l.code).filter((code) => wanted.has(code));
     step = "checking";
-    follow(await rpc<Access>("voice.clone_access"));
+    const result = await ask<Access>("voice.clone_access");
+    if (result) follow(result);
+    else step = "connect";
   }
 
   /** On from the access there is: connect, download, or the sample. */
@@ -126,10 +142,10 @@
     busy = true;
     try {
       const result = token.trim()
-        ? await rpc<Access>("voice.clone_connect", { token: token.trim() })
-        : await rpc<Access>("voice.clone_access");
+        ? await ask<Access>("voice.clone_connect", { token: token.trim() })
+        : await ask<Access>("voice.clone_access");
       token = "";
-      follow(result);
+      if (result) follow(result);
     } finally {
       busy = false;
     }
@@ -139,7 +155,8 @@
     step = "download";
     error = "";
     progress = { done: 0, total: 0 };
-    const result = await rpc<{ ok: boolean; error?: string; access?: boolean }>("voice.clone_fetch");
+    const result = await ask<{ ok: boolean; error?: string; access?: boolean }>("voice.clone_fetch");
+    if (!result) return;
     if (result.ok) step = "sample";
     else if (result.access) await open();
     else error = result.error ?? "The cloning model could not be downloaded";
@@ -149,22 +166,24 @@
     error = "";
     level = 0;
     seconds = 0;
-    const result = await rpc<{ ok: boolean; error?: string }>("voice.record", { on: true });
+    const result = await ask<{ ok: boolean; error?: string }>("voice.record", { on: true });
+    if (!result) return;
     if (result.ok) step = "recording";
     else error = result.error ?? "The microphone could not be opened";
   }
 
   async function redo() {
-    await rpc("voice.record", { on: false, keep: false });
+    if ((await ask("voice.record", { on: false, keep: false })) === null) return back(error);
     await record();
   }
 
   async function stop() {
     if (step !== "recording") return;
     step = "making";
-    const result = await rpc<{ ok: boolean; error?: string }>("voice.record", { on: false });
-    if (result.ok) await make();
-    else back(result.error);
+    doing = "Reading the sample";
+    const result = await ask<{ ok: boolean; error?: string }>("voice.record", { on: false });
+    if (result?.ok) await make();
+    else back(result ? result.error : error);
   }
 
   function choose() {
@@ -178,28 +197,32 @@
     input.value = "";
     if (!file) return;
     step = "making";
+    doing = "Reading the sample";
     const data = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(file);
     }).catch(() => "");
-    const result = await rpc<{ ok: boolean; error?: string }>("voice.sample", { data, name: file.name });
-    if (result.ok) await make();
-    else back(result.error);
+    const result = await ask<{ ok: boolean; error?: string }>("voice.sample", { data, name: file.name });
+    if (result?.ok) await make();
+    else back(result ? result.error : error);
   }
 
   /** Make the voice of the sample, for English and each language picked,
    *  then choose it, and say the preview in it. */
   async function make() {
     const replace = keep && cloned ? draft.voice : "";
-    const result = await rpc<{
+    doing = "Making the voice for English";
+    progress = { done: 0, total: 0 };
+    const result = await ask<{
       ok: boolean;
       error?: string;
       access?: boolean;
       voice?: VoiceInfo;
       jobs?: VoiceJob[];
-    }>("voice.clone", { name: draft.name.trim(), replace, languages: picked });
+    }>("voice.clone", { name: draft.name.trim(), replace, languages: $state.snapshot(picked) });
+    if (!result) return back(error);
     if (!result.ok || !result.voice) {
       if (result.access) {
         await open();
@@ -225,7 +248,8 @@
     if (!voice) return;
     madeVoice = "";
     making = [];
-    await store.loadVoices();
+    // The voice is made: a list that does not come back keeps it no less chosen
+    await store.loadVoices().catch(() => {});
     onchoose(voice);
     step = "closed";
     const named = store.voices?.engines.kyutai?.find((v) => v.id === voice)?.name ?? "";
@@ -273,8 +297,17 @@
             <button class="s-btn" onclick={finish}>Done</button>
           </div>
         {/if}
+      {:else if step === "making" && progress.total}
+        <!-- The cloning model for English, downloaded first -->
+        <Progress value={progress.done / progress.total} />
+        <span class="text-[11.5px] tabular-nums text-ink-3">
+          Downloading Kyutai's cloning model for English: {mb(progress.done)} of {mb(progress.total)} MB
+        </span>
       {:else if step === "checking" || step === "making"}
         <div class="waiting" aria-hidden="true"></div>
+        {#if step === "making" && doing}
+          <span class="text-[11.5px] text-ink-3">{doing}</span>
+        {/if}
       {:else if step === "connect"}
         <p class="line">
           {access === "login"
