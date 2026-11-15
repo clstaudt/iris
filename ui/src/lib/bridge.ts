@@ -15,6 +15,10 @@ export interface OrbMotion {
   /** The looks the orb has shown; null for one at rest, which has missed
    *  them */
   shots: number | null;
+  keep: number;
+  /** The memories written the orb has begun to show; null for one at
+   *  rest, as shots */
+  kept: number | null;
   spinner: number;
   spin: number;
   blooming: boolean;
@@ -34,6 +38,8 @@ export interface OrbInputs {
   error: string | null;
   /** The looks Iris has begun through the camera or at the screen */
   shots: number;
+  /** The memories Iris has written */
+  kept: number;
 }
 
 export interface OrbHandoff {

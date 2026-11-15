@@ -1,6 +1,7 @@
 /** Central reactive store, fed by Python events over the RPC bridge. */
 
 import { onEvent, rpc, type AppInfo, type TurnTiming } from "./bridge";
+import { written } from "./keep";
 import { Exposures } from "./shutter";
 import type { WalkthroughChoices } from "./walkthrough.svelte";
 
@@ -565,6 +566,9 @@ class IrisStore {
    *  conversation window, and sent to presence */
   shots = $state(0);
   private exposures = new Exposures();
+  /** The memories Iris has written: every orb plays its keep as the count
+   *  goes up. Counted in the conversation window, and sent to presence */
+  kept = $state(0);
 
   private streamingIndex: number | null = null;
   /** Turns from before this launch shown at the top so far */
@@ -767,6 +771,7 @@ class IrisStore {
         break;
 
       case "memory.updated":
+        if (written(data, this)) this.kept++;
         if (this.showsMemory) this.loadMemory();
         // A topic filed may give a thread its title
         this.loadThreads();
