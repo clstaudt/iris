@@ -1212,12 +1212,14 @@ try {
     await until("Stub small's server, model and web search", runs(stubUrl, "stub-small", false), 30_000);
     await quiet(1000);
     check(runs(stubUrl, "stub-small", false)(), `Stub small runs ${config().llm_model}`);
-    // Its replies come from that server
+    // Its replies come from that server, in Amnesia mode (see amnesia())
+    await amnesia(true);
     const since = await ask("Hello there.");
     const done = await eventAfter("chat.done", since, () => true, 60_000);
     check(done.data.text.includes("the stub's answer"), `the reply came from elsewhere: ${done.data.text}`);
     check(stubRequests.at(-1)?.model === "stub-small", `the server was asked for ${stubRequests.at(-1)?.model}`);
     await voiceDone();
+    await amnesia(false);
     await useSetup("Stub large");
     await until("Stub large's model", runs(stubUrl, "stub-large", false), 30_000);
   });
@@ -1555,6 +1557,15 @@ try {
       images: parts.filter((p) => p.type === "image_url").map((p) => p.image_url.url),
     };
   };
+  /** Amnesia on or off. The test's own server answers in Amnesia mode, so its
+   *  replies are forgotten once the conversation leaves it: kept, the real
+   *  model, which answers without reasoning first (irisdev/e2e_core.py),
+   *  imitated them instead of answering */
+  async function amnesia(on) {
+    await rpc("memory.set_amnesia", { on });
+    await until(`amnesia ${on ? "on" : "off"}`, () => config().amnesia === on);
+  }
+
   /** Switch the core to a server and model through the Language model stage. */
   async function runOn(server, llm) {
     await openStage("Language model");
@@ -1570,6 +1581,7 @@ try {
     await until(`${llm} on offer`, () => option(llm).count(), 30_000);
     if (config().llm_model !== llm) await option(llm).first().click();
     await until(`${llm} in use`, () => config().llm_model === llm, 30_000);
+    await amnesia(server === stubUrl);
   }
 
   const NOTES = "The lighthouse keeper's cat is called Saffron Quill.";
@@ -1823,17 +1835,25 @@ try {
   });
 
   await step("Stop during a tool ends the turn", async () => {
-    const since = await ask("Search the web for the population of Reykjavik and tell me.");
-    await afterThinking("a tool to run", since, () => events.find((e) => e.at >= since && e.type === "tool.use"));
-    const pressed = Date.now();
-    await stopButton.click();
-    await quiet(10_000);
-    const after = activity(pressed + 1500, Date.now());
-    check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
-    await checkSilent(pressed + 1500);
-    check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
-    const info = await rpc("app.info");
-    check(!["thinking", "speaking", "searching", "browsing"].includes(info.state), `Iris is ${info.state}`);
+    // Answering without reasoning first (irisdev/e2e_core.py), the model
+    // answered from what it knew after the conversation so far, or said it
+    // could not search; thinking first, it searches
+    await rpc("e2e.reasoning", { on: true });
+    try {
+      const since = await ask("Search the web for the population of Reykjavik and tell me.");
+      await afterThinking("a tool to run", since, () => events.find((e) => e.at >= since && e.type === "tool.use"));
+      const pressed = Date.now();
+      await stopButton.click();
+      await quiet(10_000);
+      const after = activity(pressed + 1500, Date.now());
+      check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
+      await checkSilent(pressed + 1500);
+      check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
+      const info = await rpc("app.info");
+      check(!["thinking", "speaking", "searching", "browsing"].includes(info.state), `Iris is ${info.state}`);
+    } finally {
+      await rpc("e2e.reasoning", { on: false });
+    }
   });
 
   await step("a speaker that cannot be opened is told once, and Iris goes on: Pause, Resume and a preview work after", async () => {
@@ -2773,32 +2793,40 @@ try {
   });
 
   await step("voices: a reply its voice is not ready for is shown with its download, and spoken once the voice is ready", async () => {
-    // Italian's model is not here: the stand-in downloads it slowly
-    huggingFace({ hidden: ["italian"] });
-    check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
-    const question = "Reply only in Italian, in one short sentence: what is the capital of Italy?";
-    const since = await ask(question);
-    const done = await replyEvent("chat.done", since);
-    const job = await eventAfter("voice.job", since, (data) => data.voice === "anna" && data.language === "it", 30_000);
-    check(job.data.origin === "conversation", `the download was started by ${job.data.origin}`);
-    // The reply is shown at once, and the download in the conversation and
-    // under the orb, with its progress, while it goes on
-    await page.locator(".bubble.assistant").last().waitFor();
-    const line = page.locator(`.job[data-job="${job.data.id}"]`);
-    await line.waitFor({ timeout: 5000 });
-    await until("its progress", async () => / MB, \d+ %/.test(await line.innerText()), 10_000);
-    check((await line.innerText()).includes("Iris will speak Italian once it's done"), `the line says: ${await line.innerText()}`);
-    check(await page.locator(`[data-job="${job.data.id}"]`).count() >= 2, "the download is not shown under the orb");
-    const ready = await eventAfter("voice.job", since, (data) => data.id === job.data.id && data.state === "ready", 60_000);
-    // Nothing was spoken of the reply meanwhile
-    const sounded = events.filter((e) => e.type === "audio.output" && e.data.rms > 0 && e.at >= done.at && e.at <= ready.at);
-    check(!sounded.length, `${sounded.length} audible moments while the voice was not ready`);
-    await page.getByText("Anna's voice is ready for Italian").waitFor({ timeout: 5000 });
-    // The next reply in Italian is spoken, and reaches the speaker
-    const next = await ask(question);
-    const timing = await replyEvent("turn.timing", next);
-    check(timing.data.components.voice === "kyutai:anna", `spoken by ${timing.data.components.voice}`);
-    await heard(next);
+    // Answering without reasoning first (irisdev/e2e_core.py), late in the
+    // run the model answered in English, as its greeting before; thinking
+    // first, it answers in Italian, which the step needs
+    await rpc("e2e.reasoning", { on: true });
+    try {
+      // Italian's model is not here: the stand-in downloads it slowly
+      huggingFace({ hidden: ["italian"] });
+      check(config().tts_voice === "anna", `Iris speaks with ${config().tts_voice}`);
+      const question = "Reply only in Italian, in one short sentence: what is the capital of Italy?";
+      const since = await ask(question);
+      const done = await replyEvent("chat.done", since);
+      const job = await eventAfter("voice.job", since, (data) => data.voice === "anna" && data.language === "it", 30_000);
+      check(job.data.origin === "conversation", `the download was started by ${job.data.origin}`);
+      // The reply is shown at once, and the download in the conversation and
+      // under the orb, with its progress, while it goes on
+      await page.locator(".bubble.assistant").last().waitFor();
+      const line = page.locator(`.job[data-job="${job.data.id}"]`);
+      await line.waitFor({ timeout: 5000 });
+      await until("its progress", async () => / MB, \d+ %/.test(await line.innerText()), 10_000);
+      check((await line.innerText()).includes("Iris will speak Italian once it's done"), `the line says: ${await line.innerText()}`);
+      check(await page.locator(`[data-job="${job.data.id}"]`).count() >= 2, "the download is not shown under the orb");
+      const ready = await eventAfter("voice.job", since, (data) => data.id === job.data.id && data.state === "ready", 60_000);
+      // Nothing was spoken of the reply meanwhile
+      const sounded = events.filter((e) => e.type === "audio.output" && e.data.rms > 0 && e.at >= done.at && e.at <= ready.at);
+      check(!sounded.length, `${sounded.length} audible moments while the voice was not ready`);
+      await page.getByText("Anna's voice is ready for Italian").waitFor({ timeout: 5000 });
+      // The next reply in Italian is spoken, and reaches the speaker
+      const next = await ask(question);
+      const timing = await replyEvent("turn.timing", next);
+      check(timing.data.components.voice === "kyutai:anna", `spoken by ${timing.data.components.voice}`);
+      await heard(next);
+    } finally {
+      await rpc("e2e.reasoning", { on: false });
+    }
   });
 
   await step("nothing went wrong in the page", async () => {
