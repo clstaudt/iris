@@ -36,7 +36,7 @@ from iris.status import StatusManager
 from iris.timing import TurnTiming
 from iris.tools import Tools
 from iris.transcription import WhisperTranscriber
-from iris.tts import SpeechGenerator, SpeechPipeline
+from iris.tts import LANGUAGE_NAMES, SpeechGenerator, SpeechPipeline
 from iris.turns import PRE_SPEECH, SmartTurn
 from iris.wakeword import WakeWordDetector, match_sleep_word
 
@@ -296,6 +296,12 @@ class VoiceAssistant:
         self.conversation_language = "en"
         # The language the reply being spoken is in, piece by piece
         self._reply_language = "en"
+        # Of the reply: whether a piece of it was queued for the voice, and
+        # whether one was only shown, in a language the voice does not speak
+        self._reply_voiced = False
+        self._reply_unspoken = False
+        # (engine, voice, language) the user was told are shown, not spoken
+        self._unspoken_told: set[tuple[str, str, str]] = set()
 
         # The persona speaks with its own engine and voice
         self.persona = persona if persona else get_persona("iris")
@@ -849,13 +855,45 @@ class VoiceAssistant:
                 dormant = False
 
     def _speak(self, text: str):
-        """Queue reply text for speech, unless voice output is switched off."""
+        """Queue reply text for speech, unless voice output is switched off.
+        A piece in a language the persona's voice does not speak properly is
+        only shown: no other voice says it in its place."""
         if not self.speak_replies:
             return
         clean_text = self.conversation.clean_markdown(text)
-        if clean_text.strip():
-            self.speech_pipeline.queue_speech(
-                clean_text, language=self._speech_language(clean_text)
+        if not clean_text.strip():
+            return
+        spoken_in = self._speech_language(clean_text)
+        if not self.tts_generator.speaks(spoken_in):
+            self._shown_only(spoken_in)
+            return
+        self._reply_voiced = True
+        self.speech_pipeline.queue_speech(clean_text, language=spoken_in)
+
+    def _shown_only(self, language_code: str):
+        """A piece of the reply is shown and not spoken, its language one the
+        persona's voice does not speak. The user is told once for the voice
+        and language. A reply nothing of which is spoken is complete once it
+        is written, as with the voice off."""
+        self._reply_unspoken = True
+        if not self._reply_voiced:
+            self._report_timing()
+        generator = self.tts_generator
+        told = (generator.engine, generator.voice, language_code)
+        if told in self._unspoken_told:
+            return
+        self._unspoken_told.add(told)
+        name = LANGUAGE_NAMES.get(language_code, language_code)
+        logger.info("%s's voice does not speak %s: shown, not spoken", self.persona.name, name)
+        if self.event_bus:
+            self.event_bus.emit(
+                "notice",
+                {
+                    "message": f"{self.persona.name}'s voice does not speak {name}: "
+                    f"replies in {name} are shown, not spoken.",
+                    "kind": "unspoken",
+                    "language": language_code,
+                },
             )
 
     def _prepare_voice(self, language: str):
@@ -997,13 +1035,14 @@ class VoiceAssistant:
             self._sleep_word_said()
             return
 
-        # Determine response language: the one the user spoke, if the
-        # persona's voice can speak it, otherwise keep the current
-        # conversation language. Whisper guesses it from the sound, and a
-        # few words in an accent can fool it ("Parliamo italiano." heard as
-        # Portuguese); the words heard tell it better when they are clear.
+        # Determine response language: the one the user spoke, if Iris
+        # talks in it (whether the persona's voice speaks it or not),
+        # otherwise keep the current conversation language. Whisper guesses
+        # it from the sound, and a few words in an accent can fool it
+        # ("Parliamo italiano." heard as Portuguese); the words heard tell it
+        # better when they are clear.
         spoken = language.language_of(text, detected_language, self.tts_generator.languages())
-        if self.tts_generator.speaks(spoken):
+        if spoken in self.tts_generator.languages():
             self.conversation_language = spoken
         response_language = self.conversation_language
 
@@ -1052,12 +1091,13 @@ class VoiceAssistant:
 
     def _keep_exchange(self, prompt: str, answer: str, source: Optional[str], cut: bool):
         """Keep the exchange in the conversation as the user took it in: a
-        reply cut short only as far as it was said, or shown with the voice
-        off. Of a reply stopped before anything was said, nothing is kept."""
+        reply cut short only as far as it was said, or shown, with the voice
+        off or in a language it does not speak. Of a reply stopped before
+        anything was said, nothing is kept."""
         if not cut:
             self.conversation.keep(prompt, self.conversation.reply or "", source)
             return
-        if self.speak_replies:
+        if self.speak_replies and not self._reply_unspoken:
             kept = self.speech_pipeline.said()
         else:
             kept = self.conversation.clean_markdown(answer)
@@ -1094,6 +1134,7 @@ class VoiceAssistant:
             # the reply is spoken in the language it is written in
             self.speech_pipeline.current_language = response_language
             self._reply_language = response_language
+            self._reply_voiced = self._reply_unspoken = False
             # What speaking that language needs loads while the model thinks
             if self.speak_replies:
                 threading.Thread(

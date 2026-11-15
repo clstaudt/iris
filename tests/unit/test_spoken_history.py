@@ -210,12 +210,13 @@ class FakePipeline:
         return self._said
 
 
-def _assistant(said="", speak=True):
+def _assistant(said="", speak=True, shown_only=False):
     assistant = object.__new__(VoiceAssistant)
     assistant.conversation = _conversation("")
     assistant.conversation.reply = "It's sunny and warm, a perfect day for the beach."
     assistant.speech_pipeline = FakePipeline(said)
     assistant.speak_replies = speak
+    assistant._reply_unspoken = shown_only
     return assistant
 
 
@@ -241,6 +242,12 @@ class TestKeepExchange:
 
     def test_with_the_voice_off_as_far_as_it_was_shown(self):
         assistant = _assistant(speak=False)
+        assistant._keep_exchange("Weather?", self.ANSWER, "text", cut=True)
+        assert _kept(assistant)[-1]["content"] == "It's sunny and warm, a perfect day."
+
+    def test_in_a_language_the_voice_does_not_speak_as_far_as_it_was_shown(self):
+        """Nothing of it was said, and all of it was read."""
+        assistant = _assistant(said="", shown_only=True)
         assistant._keep_exchange("Weather?", self.ANSWER, "text", cut=True)
         assert _kept(assistant)[-1]["content"] == "It's sunny and warm, a perfect day."
 

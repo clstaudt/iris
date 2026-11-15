@@ -23,7 +23,8 @@ from iris.memory import MemoryStore
 from iris.plugins import web
 from iris.status import StatusManager
 from iris.tools import Tools
-from iris.tts import POCKET_LANGUAGES, PocketGenerator, kokoro_speech
+from iris.personas import load_all_personas
+from iris.tts import kokoro_speech
 from iris.turns import SmartTurn
 from irisdev.voicetest import assistant as under_test
 from irisdev.voicetest import scripted, sounds, voices, wording
@@ -369,7 +370,8 @@ def test_without_voice_cloning_the_user_speaks_with_one_of_pocket_tts_voices(nam
     voice = UserVoice.named(tmp_path, name)
     assert len(voice.utterance(["Hallo."])) > 0
     assert model.prompts == [own]
-    assert own not in {PocketGenerator.default_voice(language) for language in POCKET_LANGUAGES}
+    # Iris answers in the persona's voice in every language
+    assert own not in {p.voice for p in load_all_personas().values() if p.engine == "kyutai"}
     # Kept apart from what a cloned voice said
     clone = UserVoice.named(tmp_path, name)
     clone._pocket = {}

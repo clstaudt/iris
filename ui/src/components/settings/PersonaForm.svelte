@@ -82,14 +82,43 @@
       draft?.engine === "kokoro"
   );
 
-  /** Voices by language, in the order the engine lists them. */
+  // The languages Iris talks in, and those a voice speaks properly: a reply
+  // in any other is shown, not spoken
+  const languages = $derived(store.voices?.languages ?? []);
+  const spokenBy = (voice: VoiceInfo) => voice.languages ?? [];
+  const nameOf = (code: string) => languages.find((l) => l.code === code)?.name ?? code;
+  /** The languages the voices shown must speak; none shows them all */
+  let wanted = $state<string[]>([]);
+  // Of those, the ones a voice of this engine speaks
+  const asked = $derived(wanted.filter((code) => voices.some((v) => spokenBy(v).includes(code))));
+  const shown = $derived(voices.filter((v) => asked.every((code) => spokenBy(v).includes(code))));
+  /** Languages one of the voices shown also speaks, which can be added */
+  const addable = $derived(new Set(shown.flatMap(spokenBy)));
+
+  function want(code: string) {
+    wanted = asked.includes(code) ? asked.filter((c) => c !== code) : [...asked, code];
+  }
+
+  /** Whether the engine's voices all speak the same languages: the
+   *  persona's languages above then tell them for every voice */
+  const alike = $derived(new Set(voices.map((v) => [...spokenBy(v)].sort().join())).size <= 1);
+
+  /** Voices by the language they were made for, in the order the engine
+   *  lists them, each with the languages it speaks; one group when they all
+   *  speak the same. */
   const groups = $derived.by(() => {
-    const byLanguage = new Map<string, VoiceInfo[]>();
-    for (const voice of voices) {
-      byLanguage.set(voice.language, [...(byLanguage.get(voice.language) ?? []), voice]);
+    if (alike) return [["", shown]] as [string, VoiceInfo[]][];
+    const byOrigin = new Map<string, VoiceInfo[]>();
+    for (const voice of shown) {
+      byOrigin.set(voice.language, [...(byOrigin.get(voice.language) ?? []), voice]);
     }
-    return [...byLanguage];
+    return [...byOrigin];
   });
+
+  // What the persona's voice speaks of Iris's languages, and what it does not
+  const chosen = $derived(voices.find((v) => v.id === draft?.voice));
+  const spoken = $derived(languages.filter((l) => chosen && spokenBy(chosen).includes(l.code)));
+  const unspoken = $derived(languages.filter((l) => chosen && !spokenBy(chosen).includes(l.code)));
 
   function setEngine(engine: SpeechEngine) {
     if (!draft || draft.engine === engine) return;
@@ -234,14 +263,46 @@
           {/each}
         </div>
       {/if}
+      {#if chosen && languages.length}
+        <dl class="spoken" aria-label="Languages of {draft.name || 'the persona'}">
+          <dt>Spoken</dt>
+          <dd>{spoken.map((l) => l.name).join(", ") || "None"}</dd>
+          {#if unspoken.length}
+            <dt>Not spoken</dt>
+            <dd class="text-ink-3">{unspoken.map((l) => l.name).join(", ")}</dd>
+          {/if}
+        </dl>
+      {/if}
+      {#if languages.length}
+        <div class="langs" role="group" aria-label="Voices that speak">
+          {#each languages as language}
+            <button
+              class="lang {asked.includes(language.code) ? 'active' : ''}"
+              aria-pressed={asked.includes(language.code)}
+              disabled={!asked.includes(language.code) && !addable.has(language.code)}
+              onclick={() => want(language.code)}
+            >
+              {language.name}
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {#if !shown.length && asked.length}
+        <p class="text-[12px] text-ink-3">
+          No voice here speaks {asked.map(nameOf).join(" and ")}
+        </p>
+      {/if}
       {#each groups as [language, list]}
         <div class="flex flex-col gap-1.5">
-          {#if groups.length > 1}
+          {#if language}
             <span class="text-[11.5px] text-ink-3">{language}</span>
           {/if}
           <div class="voices">
             {#each list as voice}
-              <div class="voice {draft.voice === voice.id ? 'active' : ''}">
+              <div
+                class="voice {draft.voice === voice.id ? 'active' : ''}"
+                title={spokenBy(voice).map(nameOf).join(", ")}
+              >
                 <button
                   class="play {store.previewing === `${draft.engine}:${voice.id}` ? 'playing' : ''}"
                   onclick={() => preview(voice.id)}
@@ -255,7 +316,10 @@
                   aria-checked={draft.voice === voice.id}
                   onclick={() => (draft!.voice = voice.id)}
                 >
-                  {voice.name}
+                  <span class="name">{voice.name}</span>
+                  {#if !alike}
+                    <span class="codes">{spokenBy(voice).join(" ")}</span>
+                  {/if}
                 </button>
               </div>
             {/each}
@@ -342,9 +406,47 @@
     border-color: var(--color-line-strong);
     background: var(--color-raised);
   }
+  .spoken {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.2rem 0.9rem;
+    font-size: 12px;
+    color: var(--color-ink-2);
+  }
+  .spoken dt {
+    color: var(--color-ink-3);
+  }
+  .langs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .lang {
+    height: 1.5rem;
+    padding: 0 0.55rem;
+    border-radius: 9999px;
+    border: 1px solid var(--color-line);
+    font-size: 11.5px;
+    color: var(--color-ink-2);
+    transition:
+      border-color 150ms,
+      color 150ms;
+  }
+  .lang:hover:not(:disabled) {
+    border-color: var(--color-line-strong);
+    color: var(--color-ink);
+  }
+  .lang.active {
+    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+    color: var(--color-ink);
+  }
+  .lang:disabled {
+    opacity: 0.35;
+  }
   .voices {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(146px, 1fr));
     gap: 6px;
   }
   .voice {
@@ -385,14 +487,27 @@
     color: var(--color-petal-warm);
   }
   .pick {
+    display: flex;
     min-width: 0;
     flex: 1;
-    overflow: hidden;
-    font-size: 12.5px;
-    color: var(--color-ink);
+    flex-direction: column;
     text-align: left;
+  }
+  .pick > span {
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .name {
+    font-size: 12.5px;
+    color: var(--color-ink);
+  }
+  /* The languages a voice speaks, the one it was made for first */
+  .codes {
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--color-ink-3);
   }
   .toggle {
     height: 1.75rem;

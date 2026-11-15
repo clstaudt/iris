@@ -611,6 +611,9 @@ class ScriptedConversations:
             self.screen = FakeScreen(**(conversation.screen or {})).__enter__()
         for plugin, on in conversation.tools.items():
             self._set("tool", (plugin, on), ("tool", plugin), (plugin, DEFAULT_TOOLS.get(plugin, False)))
+        if conversation.persona_voice:
+            persona_id = assistant.persona_speaking_with(*conversation.persona_voice)
+            self._set("persona", persona_id, "persona", getattr(assistant, "persona", "iris"))
         if conversation.persona:
             self._set("persona", conversation.persona, "persona", getattr(assistant, "persona", "iris"))
         if conversation.turn_detection:
@@ -1294,6 +1297,8 @@ class ScriptedConversations:
                 fail("sleep", "answered it")
         elif expectation == "silenced":
             self._judge_barge_in(result, budget, fail)
+        elif expectation == "shown":
+            self._judge_shown(running, view)
         else:
             if expectation == "wake" and not log.since(start, "wake", end):
                 fail("wake", "did not wake")
@@ -1407,6 +1412,26 @@ class ScriptedConversations:
                 fail("stop", f"Stop took {result.stop:.2f} s (budget {budget['stop']} s)")
         if turn.listen_through and result.self_cuts:
             fail("self_cuts", f"the voice was cut {result.self_cuts} times with nobody speaking")
+
+    def _judge_shown(self, running: Running, view: View):
+        """Answered in writing only: the reply is in a language the persona's
+        voice does not speak, no other voice says it, and the user was told
+        so (once for the voice and language, so in this turn or before)."""
+        result, turn = running.result, running.turn
+        fail = result.fail
+        if not result.heard:
+            fail("heard", "did not hear the turn")
+        elif result.heard_share < HEARD:
+            fail("heard", f"heard {result.heard!r}")
+        if not result.reply:
+            fail("shown", "no reply was shown")
+        if result.spoke:
+            fail("spoke", "spoke a reply its voice does not speak")
+        language = turn.reply_language or result.language
+        told = [d for _, _, d in self.assistant.log.since(0, "notice", view.end)
+                if d.get("kind") == "unspoken" and d.get("language") == language]
+        if not told:
+            fail("notice", f"not told that replies in {language} are not spoken")
 
     def _judge_words(self, running: Running):
         result, turn = running.result, running.turn
