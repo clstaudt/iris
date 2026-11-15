@@ -310,6 +310,7 @@ class IrisUnderTest:
         """A new conversation: nothing said before, and in English again."""
         self.assistant.conversation.conversation_history.clear()
         self.assistant.conversation_language = "en"
+        self.assistant._language_known = False
         self.assistant.conversation.language = "en"
 
     def seed_memory(self, topics: list[dict]):

@@ -110,8 +110,13 @@ class QuietStatus:
 class Transcript:
     def __init__(self, text, language):
         self.heard = (text, language)
+        # The conversation's language and the user's it was given, turn by turn
+        self.conversations = []
+        self.languages = []
 
-    def transcribe(self, audio_path):
+    def transcribe(self, audio_path, conversation=None, languages=None):
+        self.conversations.append(conversation)
+        self.languages.append(languages)
         return self.heard
 
 
@@ -160,6 +165,43 @@ def test_italian_that_whisper_takes_for_portuguese_is_answered_in_italian():
 def test_a_few_words_keep_to_the_language_whisper_heard():
     assert _answer_heard("kyutai", "Okay.", "de") == "de"
     assert _answer_heard("kyutai", "Ja.", "de") == "de"
+
+
+def _hearing(text, language):
+    """A bare assistant that hears this said, and answers nothing."""
+    assistant = _bare_assistant()
+    assistant.status_manager = QuietStatus()
+    assistant.interrupt_event = threading.Event()
+    assistant.transcriber = Transcript(text, language)
+    assistant.chat = lambda text, response_language, source=None, attachments=None: None
+    return assistant
+
+
+def test_the_first_thing_said_is_heard_as_whisper_hears_it():
+    """The conversation has no language before the user has said or typed
+    anything in it: Whisper is given none, as before."""
+    assistant = _hearing("La sinagoga è aperta al pubblico.", "it")
+    assistant._answer_spoken("/tmp/heard.wav")
+    assert assistant.transcriber.conversations == [None]
+
+
+def test_what_is_said_next_is_heard_in_the_conversations_language():
+    """A German speaker's Italian was heard as English, and written as an
+    English translation: Whisper is told the conversation is in Italian,
+    and which languages the user chose."""
+    assistant = _hearing("La sinagoga è aperta al pubblico.", "it")
+    assistant.chosen_languages = frozenset({"en", "it", "de"})
+    assistant._answer_spoken("/tmp/heard.wav")
+    assistant._answer_spoken("/tmp/heard.wav")
+    assert assistant.transcriber.conversations == [None, "it"]
+    assert assistant.transcriber.languages[-1] == {"en", "it", "de"}
+
+
+def test_a_typed_message_gives_the_conversation_its_language():
+    assistant = _hearing("La sinagoga è aperta al pubblico?", "it")
+    assistant._run_text_turn({"text": "Parliamo un po' in italiano, per favore.", "id": "t1"})
+    assistant._answer_spoken("/tmp/heard.wav")
+    assert assistant.transcriber.conversations == ["it"]
 
 
 def test_each_piece_of_the_reply_is_spoken_in_the_language_it_is_in():

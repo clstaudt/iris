@@ -169,7 +169,7 @@ class Transcribes:
     def __init__(self, text):
         self.text = text
 
-    def transcribe(self, path):
+    def transcribe(self, path, conversation=None, languages=None):
         return self.text, "en"
 
 
