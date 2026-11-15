@@ -270,7 +270,9 @@ class Walkthrough {
   private subscribe() {
     if (this.subscribed) return;
     this.subscribed = true;
-    onEvent((type, data) => {
+    // One listener, also after a hot reload in development (see IrisStore.init)
+    window.__irisOffWalkthroughEvent?.();
+    window.__irisOffWalkthroughEvent = onEvent((type, data) => {
       if (type === "setup.models") {
         this.downloads = data.models as SpeechDownload[];
         this.downloading = !!data.busy;
