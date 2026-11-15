@@ -1,10 +1,10 @@
 name: Pack Electron App
 
 on:
-  # Main is built once a day, when it has changed since the last build, and
+  # Main is built once a week (Sundays), when it has changed since the last build, and
   # by hand; not on every push: macOS minutes count ten times
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 3 * * 0"
   push:
     tags:
       - "v*"

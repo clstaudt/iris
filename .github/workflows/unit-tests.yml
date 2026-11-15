@@ -3,9 +3,9 @@ name: Unit tests
 on:
   push:
   workflow_dispatch:
-  # The macOS leg runs once a day and by hand
+  # The macOS leg runs once a week (Sundays) and by hand
   schedule:
-    - cron: "30 3 * * *"
+    - cron: "30 3 * * 0"
 
 jobs:
   unit:
@@ -14,7 +14,7 @@ jobs:
       matrix:
         # macOS as the app is built on (pack-electron.yml), for its own code
         # paths: MLX, CoreAudio, the platform branches. Its minutes count ten
-        # times, so it runs once a day and when started by hand; every push
+        # times, so it runs once a week and when started by hand; every push
         # runs Linux
         os: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest", "macos-15"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
