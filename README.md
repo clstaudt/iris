@@ -1,4 +1,6 @@
-# Iris
+<p align="center">
+  <img src="img/iris-title.png" width="80%" alt="Iris">
+</p>
 
 Iris is a modular voice and vision assistant, used through its desktop app. You talk with it as you would with a person, and it looks through the camera or at your screen when a question needs eyes. Each of its parts, from speech recognition to the voice, can be swapped.
 
