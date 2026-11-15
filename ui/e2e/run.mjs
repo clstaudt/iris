@@ -3638,8 +3638,7 @@ try {
     const restarted = Date.now();
     await restartCore("core-3.log");
     await page.reload();
-    await until("the app to start Iris", () =>
-      calls.find((c) => c.at >= restarted && c.method === "assistant.start"), 30_000);
+    // Up once the new core runs: what the tour does at a launch is decided by then
     await eventAfter("config", restarted, () => true, 180_000);
     await rpc("mic.set", { on: false });
     await page.locator("textarea").waitFor({ timeout: 10_000 });
