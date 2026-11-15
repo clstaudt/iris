@@ -90,7 +90,7 @@
       }
     },
     "dmg": {
-      "format": "ULMO",
+      "format": "ULFO",
       "title": "Iris"
     }
   }
