@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { BLOOM_STYLE, drawIris } from "../lib/iris";
   import { registerOrb } from "../lib/orb.svelte";
+  import { Shutter } from "../lib/shutter";
   import { STATE_COLORS, store, type AssistantState } from "../lib/state.svelte";
 
   interface Props {
@@ -20,9 +21,6 @@
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
 
-  /** States rendered as a camera aperture opening inside the circle. */
-  const APERTURE_STATES = new Set(["looking", "capturing_screen"]);
-
   /** Work with nothing to meter: the ring opens a gap and spins slowly.
    *  Listening and speaking stay closed rings and pulse with audio instead. */
   const SPINNER_STATES = new Set([
@@ -37,7 +35,6 @@
   const SPIN_SPEED = 0.7; // radians per second
 
   const BLADES = 6;
-  const SHUTTER_DURATION = 1.2; // seconds for one open-and-close
 
   // Startup bloom: while the models load an iris unfolds where the ring will
   // be, then its petals flatten out and fade into the ring.
@@ -73,8 +70,8 @@
     let col = hexToRgb(STATE_COLORS.idle);
     let level = 0; // first smoothing stage, tracks the incoming level events
     let eased = 0; // second stage, removes the steps between them
-    let shutter = 1; // progress through one open-and-close; 1 means finished
-    let wasLooking = false;
+    // A camera's aperture opens and closes once for each look
+    const shutter = new Shutter(store.shots);
     let spinner = 0; // eases the gap open, so the ring never snaps apart
     let spin = 0; // accumulated rotation of the gap
     let blooming = store.state === "starting";
@@ -176,12 +173,10 @@
         : awake.map((c, i) => c + (asleep[i] - c) * drowsy);
       for (let i = 0; i < 3; i++) col[i] += (target[i] - col[i]) * 0.05;
 
-      // One exposure per trigger: the shutter fires when vision starts and
-      // stays shut afterwards, however long the capture takes.
-      const looking = APERTURE_STATES.has(state);
-      if (looking && !wasLooking) shutter = 0;
-      wasLooking = looking;
-      if (shutter < 1) shutter = Math.min(1, shutter + dt / SHUTTER_DURATION);
+      // One exposure per look: the shutter fires when vision starts and
+      // stays shut afterwards, however long the capture takes. The canvas
+      // says how often it fired, for the end-to-end test
+      if (shutter.frame(store, dt)) canvas.dataset.shots = String(shutter.fired);
 
       spinner += ((SPINNER_STATES.has(state) ? 1 : 0) - spinner) * Math.min(1, dt * 3);
       spin = (spin + dt * SPIN_SPEED) % (Math.PI * 2);
@@ -269,7 +264,7 @@
       ctx!.lineWidth = Math.max(1.1, 2 * K);
       ctx!.stroke();
 
-      if (shutter < 1) drawAperture(shutter, r);
+      if (shutter.progress < 1) drawAperture(shutter.progress, r);
       ctx!.globalAlpha = 1;
     }
 
@@ -285,8 +280,8 @@
         col: [col[0], col[1], col[2]],
         level,
         eased,
-        shutter,
-        wasLooking,
+        shutter: shutter.progress,
+        shots: shutter.shown,
         spinner,
         spin,
         blooming,
@@ -297,8 +292,8 @@
         col = [motion.col[0], motion.col[1], motion.col[2]];
         level = motion.level;
         eased = motion.eased;
-        shutter = motion.shutter;
-        wasLooking = motion.wasLooking;
+        shutter.progress = motion.shutter;
+        shutter.shown = motion.shots;
         spinner = motion.spinner;
         spin = motion.spin;
         blooming = motion.blooming;
@@ -308,6 +303,7 @@
       rest: () => {
         cancelAnimationFrame(raf);
         raf = 0;
+        shutter.shown = null;
       },
       wake: () => {
         if (raf) return;
