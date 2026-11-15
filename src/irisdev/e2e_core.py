@@ -28,7 +28,8 @@ Their moments are the test's: milliseconds since the epoch.
 How well the model answers does not matter to the test, so every chat
 request asks it to answer without reasoning first: an OpenAI-compatible
 server through its chat template (enable_thinking off), Ollama with think
-off. Iris itself asks for no such thing.
+off. Iris itself asks for no such thing. A step that needs the model to
+choose a tool lets it reason again while it runs (e2e.reasoning {on}).
 
     python -m irisdev.e2e_core
 """
@@ -192,6 +193,16 @@ def _watched_lines(self, *args, **kwargs):
     return MODEL.watch(self, _iter_lines(self, *args, **kwargs))
 
 
+# Whether chat requests ask the model to answer without reasoning first
+REASONING = {"off": True}
+
+
+def reasoning(params: dict) -> dict:
+    """Let the model reason first again ({"on": true}), or not."""
+    REASONING["off"] = not params.get("on")
+    return {"ok": True, "reasoning": not REASONING["off"]}
+
+
 def without_reasoning(path: str, body: dict) -> dict:
     """A chat request's body, asking the model to answer at once: for an
     OpenAI-compatible server (/chat/completions) through its chat template,
@@ -208,7 +219,7 @@ _build_request = httpx.Client.build_request
 
 
 def _built_without_reasoning(self, method, url, *args, **kwargs):
-    if isinstance(kwargs.get("json"), dict):
+    if REASONING["off"] and isinstance(kwargs.get("json"), dict):
         kwargs["json"] = without_reasoning(httpx.URL(url).path, kwargs["json"])
     return _build_request(self, method, url, *args, **kwargs)
 
@@ -222,7 +233,7 @@ def main():
     # reply line by line, and build each request through httpx
     httpx.Response.iter_lines = _watched_lines
     httpx.Client.build_request = _built_without_reasoning
-    rpc_server.main({"e2e.speaker": speaker, "e2e.model": MODEL.report})
+    rpc_server.main({"e2e.speaker": speaker, "e2e.model": MODEL.report, "e2e.reasoning": reasoning})
 
 
 if __name__ == "__main__":

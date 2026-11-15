@@ -1765,17 +1765,25 @@ try {
   });
 
   await step("Stop during a tool ends the turn", async () => {
-    const since = await ask("Search the web for the population of Reykjavik and tell me.");
-    await afterThinking("a tool to run", since, () => events.find((e) => e.at >= since && e.type === "tool.use"));
-    const pressed = Date.now();
-    await stopButton.click();
-    await quiet(10_000);
-    const after = activity(pressed + 1500, Date.now());
-    check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
-    await checkSilent(pressed + 1500);
-    check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
-    const info = await rpc("app.info");
-    check(!["thinking", "speaking", "searching", "browsing"].includes(info.state), `Iris is ${info.state}`);
+    // Answering without reasoning first (irisdev/e2e_core.py), the model
+    // answered from what it knew after the conversation so far, or said it
+    // could not search; thinking first, it searches
+    await rpc("e2e.reasoning", { on: true });
+    try {
+      const since = await ask("Search the web for the population of Reykjavik and tell me.");
+      await afterThinking("a tool to run", since, () => events.find((e) => e.at >= since && e.type === "tool.use"));
+      const pressed = Date.now();
+      await stopButton.click();
+      await quiet(10_000);
+      const after = activity(pressed + 1500, Date.now());
+      check(after.sound === 0, `the voice went on: ${after.sound} audible moments after Stop`);
+      await checkSilent(pressed + 1500);
+      check(after.busy.length === 0, `Iris went on: ${after.busy.join(" > ")}`);
+      const info = await rpc("app.info");
+      check(!["thinking", "speaking", "searching", "browsing"].includes(info.state), `Iris is ${info.state}`);
+    } finally {
+      await rpc("e2e.reasoning", { on: false });
+    }
   });
 
   /** Whether a notice is in sight, below the conversation (not above it, where
