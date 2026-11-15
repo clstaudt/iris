@@ -10,6 +10,7 @@ same interface.
 """
 
 import copy
+import logging
 import os
 import threading
 import time
@@ -17,6 +18,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Protocol
 
+from iris.audio import voice_log
 from iris.controller import AssistantController
 from iris.events import EventBus
 from iris.personas import get_persona
@@ -85,7 +87,9 @@ class AssistantUnderTest(Protocol):
     turn it heard, "chat.continued" when the user went on with a turn it had
     taken, "chat.done" {text, interrupted} for each reply, "tool.use" {tool,
     label, detail}, "wake", "wake.window" {remaining}, "sleep", "config"
-    {...}, "turn.timing" {stages, components} and "error" {message}.
+    {...}, "turn.timing" {stages, components} and "error" {message}. Iris
+    also logs what its voice did over speech (iris.voice) as "voice"
+    {message}: each hold, what it was judged to be, where the voice went on.
     """
 
     name: str
@@ -141,8 +145,23 @@ def unwatch_verdicts(watcher):
         SmartTurn.__call__ = _ORIGINAL_JUDGE
 
 
+class _VoiceLines(logging.Handler):
+    """Iris's voice log (iris.voice), as "voice" {message} events in a log."""
+
+    def __init__(self, log: Log):
+        super().__init__(logging.INFO)
+        self.log = log
+
+    def emit(self, record: logging.LogRecord):
+        self.log("voice", {"message": record.getMessage()})
+
+
 class IrisUnderTest:
-    """Iris, as the app runs it, on an endpoint of a space."""
+    """Iris, as the app runs it, on an endpoint of a space.
+
+    The voice log (iris.voice) is one per process: with two Irises in one
+    (self-talk), each logs the other's lines too.
+    """
 
     def __init__(
         self,
@@ -193,6 +212,7 @@ class IrisUnderTest:
         self.controller: Optional[AssistantController] = None
         # The Whisper size it started with
         self.default_stt = ""
+        self._voice_lines = _VoiceLines(self.log)
 
     @property
     def assistant(self):
@@ -207,6 +227,9 @@ class IrisUnderTest:
         bus.subscribe(self.log)
         self.controller = AssistantController(bus)
         watch_verdicts(self)
+        voice_log.addHandler(self._voice_lines)
+        if not voice_log.isEnabledFor(logging.INFO):
+            voice_log.setLevel(logging.INFO)
         self.controller.start(dict(self.options))
         if not wait_until(lambda: self.state() in ("listening", "dormant"), self.start_timeout, 0.2):
             errors = [d.get("message") for _, _, d in self.log.since(0, "error")]
@@ -263,6 +286,7 @@ class IrisUnderTest:
 
     def close(self):
         unwatch_verdicts(self)
+        voice_log.removeHandler(self._voice_lines)
         if self.controller is not None:
             self.controller.stop()
             wait_until(lambda: self.state() == "idle", 10)

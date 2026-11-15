@@ -11,7 +11,7 @@ import re
 from typing import Optional
 
 from irisdev.voicetest.script import Check
-from irisdev.voicetest.scripted import GLUED, View, chime_of, flag_windows, state_timeline
+from irisdev.voicetest.scripted import GLUED, View, chime_of, flag_windows, replayed, state_timeline, voice_holds
 from irisdev.voicetest.wording import contains, digits, heard_share, normalized, term_found
 
 # Values in the reports are rounded; comparisons allow for it
@@ -179,6 +179,29 @@ def reply_not_interrupted(name: str = "interrupted") -> Check:
     def fn(result, view):
         cut = [d.get("text", "")[:60] for _, d in dones(view) if d.get("interrupted")]
         return f"the reply was cut: {cut}" if cut else None
+    return fn
+
+
+def played_once(name: str = "played_once") -> Check:
+    """The reply reached the speaker as it was synthesized: the voice was
+    never held, paused or resumed (no clip cut, nothing in the voice log),
+    and no clip played again what an earlier one had been heard playing."""
+    @check(name)
+    def fn(result, view):
+        clips = reply_clips(view)
+        problems = []
+        cut = [c for c in clips if c.stopped is not None]
+        if cut:
+            problems.append("cut at " + ", ".join(f"{c.stopped - view.running.ref_end:.2f}" for c in cut) + " s")
+        for earlier, clip in zip(clips, clips[1:]):
+            again = replayed(earlier, clip)
+            if again is not None:
+                problems.append(f"{again:.2f} s played twice at {clip.started - view.running.ref_end:.2f} s")
+        counts = voice_holds([(at, d.get("message", "")) for at, _, d in view.events("voice")])
+        if counts["held"] or counts["resumed"]:
+            problems.append(f"held {counts['held']} times ({counts['echo']} for its own echo), "
+                            f"resumed {counts['resumed']} times")
+        return "; ".join(problems) or None
     return fn
 
 

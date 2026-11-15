@@ -874,11 +874,13 @@ class VoiceAssistant:
                 closely), and not paused by the user."""
                 return self.speech_pipeline.is_active and not self.suspend_event.is_set()
 
-            def release():
+            def release(rewind: bool = True):
                 """Let the voice go on after a hold, unless the user paused
-                the conversation meanwhile."""
+                the conversation meanwhile: a little before where it was cut
+                (rewind), or exactly there, when the hold heard nothing of
+                the user."""
                 if not self.suspend_event.is_set():
-                    self.speech_pipeline.resume()
+                    self.speech_pipeline.resume(rewind)
 
             def listen_on(turn=audio_path):
                 whole_turn[0] = self.recorder.listen_on(
