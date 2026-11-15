@@ -180,7 +180,7 @@ def _hearing(text, language):
 def test_the_first_thing_said_is_heard_as_whisper_hears_it():
     """The conversation has no language before the user has said or typed
     anything in it: Whisper is given none, as before."""
-    assistant = _hearing("Il teatro è aperto tutte le sere.", "it")
+    assistant = _hearing("La pizza margherita costa sette euro.", "it")
     assistant._answer_spoken("/tmp/heard.wav")
     assert assistant.transcriber.conversations == [None]
 
@@ -189,7 +189,7 @@ def test_what_is_said_next_is_heard_in_the_conversations_language():
     """Italian said with an accent was heard as English, and written as an
     English translation: Whisper is told the conversation is in Italian,
     and which languages the user chose."""
-    assistant = _hearing("Il teatro è aperto tutte le sere.", "it")
+    assistant = _hearing("La pizza margherita costa sette euro.", "it")
     assistant.chosen_languages = frozenset({"en", "it"})
     assistant._answer_spoken("/tmp/heard.wav")
     assistant._answer_spoken("/tmp/heard.wav")
@@ -198,7 +198,7 @@ def test_what_is_said_next_is_heard_in_the_conversations_language():
 
 
 def test_a_typed_message_gives_the_conversation_its_language():
-    assistant = _hearing("Il teatro è aperto stasera?", "it")
+    assistant = _hearing("Domani pioverà a Milano?", "it")
     assistant._run_text_turn({"text": "Parliamo un po' in italiano, per favore.", "id": "t1"})
     assistant._answer_spoken("/tmp/heard.wav")
     assert assistant.transcriber.conversations == ["it"]

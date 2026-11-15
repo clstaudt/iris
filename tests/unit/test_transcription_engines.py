@@ -283,7 +283,7 @@ def _wrong(likelihoods, expected: str, conversation: str | None) -> tuple[int, i
 
 
 @pytest.mark.parametrize(
-    "engine, alone, told", [("mlx", 38, 16), ("faster-whisper", 58, 38)]
+    "engine, alone, told", [("mlx", 30, 13), ("faster-whisper", 49, 30)]
 )  # fmt: skip
 def test_accented_italian_is_written_in_italian_far_more_often(engine, alone, told):
     """Of 195 Italian sentences said by voices made for other languages,
@@ -301,20 +301,22 @@ def test_a_switch_to_one_of_the_users_languages_is_followed_as_before(engine):
 
 
 @pytest.mark.parametrize(
-    "engine, alone, told", [("mlx", 2, 2), ("faster-whisper", 6, 6)]
+    "engine, alone, told", [("mlx", 3, 4), ("faster-whisper", 7, 7)]
 )  # fmt: skip
-def test_a_switch_to_another_language_is_followed_as_before(engine, alone, told):
+def test_a_switch_to_another_language_must_be_clearer(engine, alone, told):
     """German, French, Spanish and Portuguese, which the user did not
-    choose: 92 sentences, by voices made for them and for others."""
+    choose: 92 sentences, by voices made for them and for others. MLX keeps
+    one it heard by itself in Italian: Portuguese said with an English
+    accent, which it found 2.4 times likelier than Italian."""
     each = [_wrong(_heard(engine, said), said, "it") for said in ("de", "fr", "es", "pt")]
     assert tuple(map(sum, zip(*each))) == (alone, told)
 
 
 @pytest.mark.parametrize(
-    "engine, alone, told", [("mlx", 38, 38), ("faster-whisper", 58, 61)]
+    "engine, alone, told", [("mlx", 30, 30), ("faster-whisper", 49, 54)]
 )  # fmt: skip
 def test_switching_to_italian_with_an_accent_from_english(engine, alone, told):
     """Leaving the conversation's English for Italian takes Whisper finding
-    Italian twice as likely: faster-whisper loses 3 switches of 195 that it
+    Italian twice as likely: faster-whisper loses 5 switches of 195 that it
     heard by itself."""
     assert _wrong(_heard(engine, "it", accented=True), "it", "en") == (alone, told)
