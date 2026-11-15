@@ -252,7 +252,11 @@ function stubIris({ settings }) {
       return null;
     };
     window.iris = {
-      rpc: (method, params) => window.__irisRpc(method, params ?? {}),
+      // Electron copies what the window sends with the structured clone
+      // algorithm, which refuses a value Svelte keeps reactive ($state, a
+      // proxy): "An object could not be cloned". So does this, or a request
+      // the app could never send would pass here
+      rpc: async (method, params) => window.__irisRpc(method, structuredClone(params ?? {})),
       onEvent: (callback) => {
         listeners.push(callback);
         return () => listeners.splice(listeners.indexOf(callback), 1);
@@ -1041,6 +1045,13 @@ try {
     const made = Date.now();
     await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
     await page.getByRole("button", { name: "Clone again" }).waitFor({ timeout: 120_000 });
+    // The clone reached the core with the languages picked, which the editor
+    // keeps as Svelte state: Electron would refuse them as they are kept
+    check(calls.some((c) => c.method === "voice.clone" && c.at >= made && c.params.languages?.includes("en")),
+      "the clone did not reach the core with its languages");
+    const refused = await page.evaluate(() =>
+      window.iris.rpc("app.info", { kept: new Proxy([], {}) }).then(() => "", (e) => String(e)));
+    check(refused.includes("could not be cloned"), "the test's window sends what Electron's would refuse");
     check(await page.locator(".voice.active", { hasText: "Iris" }).count(), "the cloned voice is not chosen");
     await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
     await voiceDone();
