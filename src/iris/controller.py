@@ -32,6 +32,7 @@ from iris.personas import (
     voice_users,
 )
 from iris.llm_client import is_openai, resolve_host
+from iris.roles import delete_role, find_role, reload_roles, save_role
 from iris.plugins import load as load_plugins
 from iris.plugins import plugin_dir
 from iris.transcription import (
@@ -848,7 +849,7 @@ class AssistantController:
         persona = self._thread_persona(found)
         if persona != assistant.persona.id:
             self.set_persona(persona, note=False)
-        assistant.conversation.open_thread(found["id"], found["amnesia"])
+        assistant.conversation.open_thread(found["id"], found["role"], found["amnesia"])
 
     @staticmethod
     def _thread_persona(thread: dict) -> str:
@@ -864,8 +865,15 @@ class AssistantController:
         threads = []
         for thread in memory.store.threads():
             persona = self._thread_persona(thread)
+            role = find_role(thread["role"])
             threads.append(
-                {**thread, "persona": persona, "persona_name": get_persona(persona).name}
+                {
+                    **thread,
+                    "persona": persona,
+                    "persona_name": get_persona(persona).name,
+                    "role": role.id if role else None,
+                    "role_name": role.name if role else "",
+                }
             )
         return {"threads": threads, "open": self.assistant.conversation.thread}
 
@@ -882,45 +890,57 @@ class AssistantController:
         reload_personas()
         if thread["id"] == self.assistant.conversation.thread:
             return {"ok": True, "id": thread["id"]}  # open already: nothing changes
-        self._go_to_thread(thread["id"], self._thread_persona(thread), thread["amnesia"])
+        self._go_to_thread(
+            thread["id"], self._thread_persona(thread), thread["role"], thread["amnesia"]
+        )
         self._switched()
         return {"ok": True, "id": thread["id"]}
 
-    def new_thread(self, persona: str) -> dict:
-        """Go on in a new thread with this persona. It is stored with its
-        first turn; until then another persona can be chosen for it."""
+    def new_thread(self, persona: str, role: str | None = None) -> dict:
+        """Go on in a new thread with this persona, and this role if one is
+        given. It is stored with its first turn; until then another persona
+        or role can be chosen for it. Neither changes afterwards."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         reload_personas()  # the persona as its file says now
         if persona not in list_personas():
             return {"ok": False, "error": f"Unknown persona: {persona}"}
+        if role and find_role(role) is None:
+            return {"ok": False, "error": f"Unknown role: {role}"}
         # Leaving a thread for a new one is heard; choosing another persona
-        # for the new one, before anything is said in it, is not
+        # or role for the new one, before anything is said in it, is not
         leaving = self.assistant.conversation.thread is not None
-        self._go_to_thread(None, persona)
+        self._go_to_thread(None, persona, role or None)
         self._switched(chime=leaving)
         return {"ok": True}
 
     def forget_thread(self, thread_id) -> dict:
         """Delete a thread with its memory. Forgetting the open one leaves a
-        new thread, with the same persona."""
+        new thread, with the same persona and role."""
         memory = getattr(self.assistant, "memory", None)
         if memory is None:
             return {"ok": False, "error": "Memory is off"}
         thread_id = int(thread_id)
-        if self.assistant.conversation.thread == thread_id:
-            self._go_to_thread(None, self.assistant.persona.id)
+        conversation = self.assistant.conversation
+        if conversation.thread == thread_id:
+            self._go_to_thread(None, self.assistant.persona.id, conversation.role)
         memory.store.forget_thread(thread_id)
         self.bus.emit("memory.updated", {})
         self.bus.emit("threads.changed", {})
         return {"ok": True}
 
-    def _go_to_thread(self, thread_id: int | None, persona: str, amnesia: bool = False):
+    def _go_to_thread(
+        self,
+        thread_id: int | None,
+        persona: str,
+        role: str | None = None,
+        amnesia: bool = False,
+    ):
         """Leave the thread Iris is in for another (None: a new one). A reply
         underway stops, as Stop does, and is kept in the thread it was given
         in; messages waiting for it are dropped. Iris takes on the thread's
-        persona, its memory is the conversation's, and the app is shown the
-        thread's recent turns."""
+        persona, its role and its memory, and the app is shown the thread's
+        recent turns."""
         assistant = self.assistant
         if assistant.replying:
             self.interrupt()
@@ -930,7 +950,7 @@ class AssistantController:
         self._drop_waiting_turns()
         if persona != assistant.persona.id:
             self.set_persona(persona, note=False)
-        assistant.conversation.open_thread(thread_id, amnesia)
+        assistant.conversation.open_thread(thread_id, role, amnesia)
         with self._transcript_lock:
             self._transcript = []
         self.bus.emit("thread.opened", {"id": thread_id})
@@ -1910,6 +1930,40 @@ class AssistantController:
 
         threading.Thread(target=speak, daemon=True).start()
         return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # Roles: a focus a thread can be given
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def roles_list() -> dict:
+        """Every role, by name, re-read so files added by hand show up."""
+        return {"roles": [role.to_dict() for role in reload_roles()]}
+
+    def role_save(self, settings: dict) -> dict:
+        """Save a role edited in the app (a new one has no id). Its threads
+        have the new focus from their next turn."""
+        if not (settings.get("name") or "").strip():
+            return {"ok": False, "error": "The role needs a name"}
+        role_id = save_role(settings, settings.get("id") or None)
+        if self.assistant is not None:
+            self.bus.emit("config", self.assistant.config_info())
+        self.bus.emit("threads.changed", {})
+        return {"ok": True, "id": role_id, **self.roles_list()}
+
+    def role_delete(self, role_id: str) -> dict:
+        """Delete the user's role, or reset an edited one that ships with
+        Iris. The threads of a role that is gone go on without one."""
+        if not delete_role(role_id):
+            memory = getattr(self.assistant, "memory", None)
+            if memory is not None:
+                memory.store.clear_role(role_id)
+                if self.assistant.conversation.role == role_id:
+                    self.assistant.conversation.role = None
+        if self.assistant is not None:
+            self.bus.emit("config", self.assistant.config_info())
+        self.bus.emit("threads.changed", {})
+        return {"ok": True, **self.roles_list()}
 
     def history(self) -> dict:
         """The conversation so far, as the events that built it."""

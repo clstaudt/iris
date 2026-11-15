@@ -8,7 +8,7 @@ import pytest
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from iris import personas  # noqa: E402  (found through the path above)
+from iris import personas, roles  # noqa: E402  (found through the path above)
 
 
 def pytest_configure(config):
@@ -40,3 +40,14 @@ def no_user_voices(tmp_path_factory, monkeypatch):
     """Voices the user cloned stay out of the tests: each test has a folder
     of its own for them."""
     monkeypatch.setenv("IRIS_VOICES_DIR", str(tmp_path_factory.mktemp("voices")))
+
+
+@pytest.fixture(autouse=True)
+def no_user_roles(tmp_path_factory, monkeypatch):
+    """The user's own roles stay out of the tests: only those shipped with
+    Iris are loaded."""
+    monkeypatch.setattr(roles, "USER_DIR", tmp_path_factory.mktemp("roles"))
+    roles.reload_roles()
+    yield
+    monkeypatch.undo()
+    roles.reload_roles()

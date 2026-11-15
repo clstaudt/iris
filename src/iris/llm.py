@@ -20,6 +20,7 @@ from iris.llm_client import effective_host as effective_host  # imported from he
 from iris.markup import MarkupFilter, TypedCall, strip_markup
 from iris.memory import LIVE_TOKENS, PIN_TURNS, PINNED_TOKENS, MemoryKeeper, estimate_tokens
 from iris.personas import Persona, get_persona
+from iris.roles import find_role
 
 warnings.filterwarnings("ignore")
 
@@ -289,8 +290,9 @@ class ConversationManager:
         self.asked: Optional[str] = None
         self.memory = memory
         # The thread the conversation is in, or None for a new one, which is
-        # stored with its first turn (see open_thread)
+        # stored with its first turn (see open_thread), and the thread's role
         self.thread: Optional[int] = None
+        self.role: Optional[str] = None
         # Told when a turn was stored or taken back: a new thread is listed
         # with its first turn, as its reply begins
         self.on_stored: Optional[Callable[[], None]] = None
@@ -604,13 +606,16 @@ class ConversationManager:
         """Turns are held back, not written: amnesia mode, or memory off."""
         return self.memory is not None and (self.amnesia or not self.remember)
 
-    def open_thread(self, thread: Optional[int], amnesia: bool = False):
+    def open_thread(
+        self, thread: Optional[int], role: Optional[str] = None, amnesia: bool = False
+    ):
         """Go on in another thread: its turns and topics are the
-        conversation's memory from now on, in amnesia mode if it is. None is
-        a new thread, stored with its first turn. What belonged to the
-        thread left (turns held back by amnesia, topics recalled, files
-        shared) stays behind."""
+        conversation's memory from now on, its role (an id, or None) the
+        focus, in amnesia mode if it is. None is a new thread, stored with
+        its first turn. What belonged to the thread left (turns held back by
+        amnesia, topics recalled, files shared) stays behind."""
         self.thread = thread
+        self.role = role
         self.amnesia = bool(amnesia)
         self.unremembered = []
         self.pinned = {}
@@ -621,7 +626,7 @@ class ConversationManager:
         """Store a turn in the thread, which a new thread's first turn creates."""
         store = self.memory.store
         if self.thread is None:
-            self.thread = store.create_thread(self.persona.id, self.amnesia)
+            self.thread = store.create_thread(self.persona.id, self.role, self.amnesia)
         return store.add_turn(self.thread, role, text, source)
 
     def _store_asked(self, prompt: str, source: Optional[str]):
@@ -637,7 +642,9 @@ class ConversationManager:
             if self.amnesia:
                 if self.thread is not None:
                     return
-                self.thread = self.memory.store.create_thread(self.persona.id, True)
+                self.thread = self.memory.store.create_thread(
+                    self.persona.id, self.role, amnesia=True
+                )
             else:
                 role = "system" if source == OPENING else "user"
                 turn = self._store(role, prompt, None if role == "system" else source)
@@ -731,8 +738,11 @@ class ConversationManager:
         Returns:
             Managed list of messages
         """
-        # Build system prompt with persona description
+        # Build system prompt with persona description, then the thread's
+        # focus, as the role says it now
         system_content = self.persona.description
+        if role := find_role(self.role):
+            system_content += f"\n\nYour role in this conversation: {role.name}. {role.focus}"
 
         # How to use the tools that are on, from each tool's guidance
         if self.tools and with_tools:

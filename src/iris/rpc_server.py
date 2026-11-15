@@ -255,7 +255,9 @@ def main(extra: dict | None = None):
         # Threads: each a conversation with one persona and its own memory
         "threads.list": lambda params: controller.threads_list(),
         "threads.open": lambda params: controller.open_thread(params.get("id", -1)),
-        "threads.new": lambda params: controller.new_thread(params.get("persona", "iris")),
+        "threads.new": lambda params: controller.new_thread(
+            params.get("persona", "iris"), params.get("role")
+        ),
         "threads.forget": lambda params: controller.forget_thread(params.get("id", -1)),
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
@@ -302,6 +304,10 @@ def main(extra: dict | None = None):
         "plugins.list": lambda params: controller.plugins_list(),
         "engines.list": lambda params: controller.engines_list(),
         "persona.list": lambda params: controller.list_personas(),
+        # Roles: a focus a thread can be given
+        "roles.list": lambda params: controller.roles_list(),
+        "roles.save": lambda params: controller.role_save(params),
+        "roles.delete": lambda params: controller.role_delete(params.get("id", "")),
         "persona.get": lambda params: controller.persona_get(params.get("id", "")),
         "persona.voices": lambda params: controller.persona_voices(),
         "persona.save": lambda params: controller.persona_save(params),

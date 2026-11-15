@@ -33,6 +33,7 @@ from iris.memory import DEFAULT_PATH, MemoryKeeper, MemoryStore, chat_json
 from iris.personas import Persona, get_persona
 from iris.plugin import Plugin, PluginContext
 from iris.plugins import BUILT_IN
+from iris.roles import find_role
 from iris.status import StatusManager
 from iris.timing import TurnTiming
 from iris.tools import Tools
@@ -534,6 +535,9 @@ class VoiceAssistant:
             "amnesia": self.conversation.amnesia,
             # The thread the conversation is in; None for a new one
             "thread": self.conversation.thread,
+            # Its role, if it has one that is still there
+            "role": role.id if (role := find_role(self.conversation.role)) else None,
+            "role_name": role.name if role else "",
             "wake_word": self.wake_word or "",
             "wake_window": self.wake_window,
             "sleep_word": self.sleep_word or "",
