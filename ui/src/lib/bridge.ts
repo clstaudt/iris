@@ -12,7 +12,9 @@ export interface OrbMotion {
   level: number;
   eased: number;
   shutter: number;
-  wasLooking: boolean;
+  /** The looks the orb has shown; null for one at rest, which has missed
+   *  them */
+  shots: number | null;
   spinner: number;
   spin: number;
   blooming: boolean;
@@ -30,6 +32,8 @@ export interface OrbInputs {
   awakeUntil: number | null;
   /** The latest message, when it is an error that needs the user */
   error: string | null;
+  /** The looks Iris has begun through the camera or at the screen */
+  shots: number;
 }
 
 export interface OrbHandoff {

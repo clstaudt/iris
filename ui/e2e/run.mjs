@@ -11,7 +11,7 @@
 // page, with the orb relayed between the two as the app's main process does.
 // Its microphone and speaker are a virtual room (irisdev.e2e_core), which
 // holds only Iris's own voice coming back: the real room is never heard, and
-// nothing sounds on the speakers. Iris sleeps until a wake word nobody says.
+// nothing sounds on the speakers. Its camera is a stand-in as well. Iris sleeps until a wake word nobody says.
 // The app is restarted with a new core near the end. Beside the model server
 // it is given, the test runs a small one of its own, with fixed replies, to
 // switch servers to.
@@ -2173,6 +2173,33 @@ try {
     await until("the conversation", () => presence.at(-1) === false, 5000);
     const went = presence.slice(shown).join();
     check(went === "true,false,true,false,true,false", `presence went ${went}`);
+  });
+
+  await step("presence: the orb's shutter fires as Iris looks through the camera", async () => {
+    await toConversation();
+    await voiceDone();
+    await rpc("mic.set", { on: false });
+    const orb = (await openPresence()).locator('[aria-label="iris"]');
+    await page.locator('button[title="Presence"]').click();
+    await until("presence", () => presence.at(-1) === true, 5000);
+    // The open-and-closes the orb in presence began
+    const fired = async () => Number((await orb.locator("canvas").getAttribute("data-shots")) ?? 0);
+    const before = await fired();
+    const taken = (await rpc("e2e.camera")).taken;
+    // Asked while only the orb shows. What Iris says before it looks, if
+    // anything, is still heard while the camera takes the picture, and the
+    // state shows it speaking all the while, not looking
+    const since = Date.now();
+    await rpc("chat.send_text", { text: "Take a look through the camera: which colour do you see?" });
+    await afterThinking("the camera", since, () =>
+      events.find((e) => e.at >= since && e.type === "tool.use" && e.data.tool === "look"));
+    await replyEvent("chat.done", since);
+    check((await rpc("e2e.camera")).taken === taken + 1, "the camera took no picture");
+    const shots = (await fired()) - before;
+    check(shots === 1, `the orb in presence fired its shutter ${shots} times for one picture`);
+    await presencePage.keyboard.press("Escape");
+    await until("the conversation", () => presence.at(-1) === false, 5000);
+    await voiceDone();
   });
 
   // ------------------------------------------------------------ threads
