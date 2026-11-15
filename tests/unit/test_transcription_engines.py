@@ -138,11 +138,11 @@ def test_the_conversations_language_heard_as_likeliest_is_kept():
 def test_a_language_the_user_did_not_choose_must_be_clearer_still():
     """Italian with an accent was taken for Spanish six times likelier."""
     spanish = {"es": 0.6, "it": 0.1, "pt": 0.1}
-    assert language_heard(spanish, "it", {"en", "it", "de"}) == "it"
+    assert language_heard(spanish, "it", {"en", "it"}) == "it"
     assert language_heard(spanish, "it", {"en", "it", "es"}) == "es"
     assert language_heard(spanish, "it") == "es"
     # Spanish said clearly is followed all the same
-    assert language_heard({"es": 0.93, "it": 0.02}, "it", {"en", "it", "de"}) == "es"
+    assert language_heard({"es": 0.93, "it": 0.02}, "it", {"en", "it"}) == "es"
 
 
 def test_the_first_utterance_is_in_the_likeliest_language():
@@ -260,7 +260,7 @@ def test_mlx_hears_the_first_utterance_as_before(apple_silicon, monkeypatch):
 # voices, with each engine's default model (fixtures/whisper_languages.json)
 HEARD = json.loads((Path(__file__).parent / "fixtures" / "whisper_languages.json").read_text())
 # The user's languages in the measurements
-USERS = {"en", "it", "de"}
+USERS = {"en", "it"}
 
 
 def _heard(engine: str, said: str, accented: bool | None = None) -> list[dict[str, float]]:
@@ -293,10 +293,10 @@ def test_accented_italian_is_written_in_italian_far_more_often(engine, alone, to
 
 
 @pytest.mark.parametrize("engine", ["mlx", "faster-whisper"])
-@pytest.mark.parametrize("said", ["en", "de"])
-def test_a_switch_to_one_of_the_users_languages_is_followed_as_before(engine, said):
-    likelihoods = _heard(engine, said)
-    alone, told = _wrong(likelihoods, said, "it")
+def test_a_switch_to_one_of_the_users_languages_is_followed_as_before(engine):
+    """English: 48 sentences, by voices made for it and for others."""
+    likelihoods = _heard(engine, "en")
+    alone, told = _wrong(likelihoods, "en", "it")
     assert told == alone < len(likelihoods) / 10
 
 
@@ -304,9 +304,9 @@ def test_a_switch_to_one_of_the_users_languages_is_followed_as_before(engine, sa
     "engine, alone, told", [("mlx", 2, 2), ("faster-whisper", 6, 6)]
 )  # fmt: skip
 def test_a_switch_to_another_language_is_followed_as_before(engine, alone, told):
-    """French, Spanish and Portuguese, which this user did not choose: 60
-    sentences, by voices made for them and for others."""
-    each = [_wrong(_heard(engine, said), said, "it") for said in ("fr", "es", "pt")]
+    """German, French, Spanish and Portuguese, which the user did not
+    choose: 92 sentences, by voices made for them and for others."""
+    each = [_wrong(_heard(engine, said), said, "it") for said in ("de", "fr", "es", "pt")]
     assert tuple(map(sum, zip(*each))) == (alone, told)
 
 

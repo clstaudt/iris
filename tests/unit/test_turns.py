@@ -190,11 +190,11 @@ def test_what_is_said_next_is_heard_in_the_conversations_language():
     English translation: Whisper is told the conversation is in Italian,
     and which languages the user chose."""
     assistant = _hearing("Il teatro è aperto tutte le sere.", "it")
-    assistant.chosen_languages = frozenset({"en", "it", "de"})
+    assistant.chosen_languages = frozenset({"en", "it"})
     assistant._answer_spoken("/tmp/heard.wav")
     assistant._answer_spoken("/tmp/heard.wav")
     assert assistant.transcriber.conversations == [None, "it"]
-    assert assistant.transcriber.languages[-1] == {"en", "it", "de"}
+    assert assistant.transcriber.languages[-1] == {"en", "it"}
 
 
 def test_a_typed_message_gives_the_conversation_its_language():

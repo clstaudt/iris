@@ -324,9 +324,9 @@ def test_the_languages_chosen_are_the_users_for_whisper(hub, monkeypatch):
     controller = AssistantController(EventBus())
     controller.assistant = SimpleNamespace(tts_generator=SimpleNamespace(models_dir=None))
 
-    result = controller.set_languages(["it", "de"])
+    result = controller.set_languages(["it"])
 
-    assert controller.assistant.chosen_languages == {"en", "it", "de"}
+    assert controller.assistant.chosen_languages == {"en", "it"}
     for job in result["jobs"]:
         controller.readier.wait(job["id"], 5)
 
