@@ -537,6 +537,14 @@ async function clickLit(name) {
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
 }
 
+/** Until Iris has been silent for a while: the voice can pause between
+ *  sentences, so a greeting is over only then. */
+const silentFor = (ms) =>
+  until("Iris to be silent", () => {
+    const sound = events.findLast((e) => e.type === "audio.output" && e.data.rms > 0);
+    return !sound || Date.now() - sound.at > ms;
+  }, 60_000);
+
 /** That the tour since a moment asked the core for nothing but lists, and
  *  that the speaker played nothing. */
 async function checkTourQuiet(since) {
@@ -816,6 +824,14 @@ try {
 
   await step("first run: the tour lights each feature at its control, opens what it shows, and leaves the app as it was", async () => {
     try {
+      // The greeting is spoken once its voice is ready, which can be after
+      // its text: what the tour plays, if anything, is told from its end
+      const greeting = events.find((e) => e.type.startsWith("chat."));
+      await until("the greeting to be spoken", () =>
+        events.some((e) => e.type === "state" && e.data.state === "speaking" && e.at >= greeting.at), 60_000
+      ).catch(() => {});
+      await voiceDone();
+      await silentFor(3000);
       const since = Date.now();
       await tourAt(1, "orb", ["composer", "orb"]);
       await page.screenshot({ path: path.join(OUT, "tour-talking.png") });
@@ -3371,6 +3387,7 @@ try {
     try {
       await openSettings("Pipeline");
       const sidebar = (await settings()).sidebar;
+      await silentFor(3000);
       const since = Date.now();
       await page.locator('nav[aria-label="Settings"] button', { hasText: "Tour" }).click();
       // The conversation, to show what is in it
