@@ -70,7 +70,9 @@ CREATE TABLE IF NOT EXISTS threads (
     persona TEXT NOT NULL,
     created REAL NOT NULL,
     -- its last turn
-    updated REAL NOT NULL
+    updated REAL NOT NULL,
+    -- 1 while nothing of it is written (amnesia mode)
+    amnesia INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS topics (
     id INTEGER PRIMARY KEY,
@@ -176,6 +178,9 @@ class MemoryStore:
     def _into_threads(self):
         """A database from before threads: everything in it becomes the
         first thread, with Iris."""
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(threads)")}
+        if "amnesia" not in columns:  # threads from before amnesia was each one's own
+            self._db.execute("ALTER TABLE threads ADD COLUMN amnesia INTEGER NOT NULL DEFAULT 0")
         for table in ("turns", "topics"):
             columns = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}
             if "thread_id" not in columns:
@@ -215,13 +220,19 @@ class MemoryStore:
 
     # -- threads ------------------------------------------------------------
 
-    def create_thread(self, persona: str) -> int:
-        """A new thread with this persona (its id), as its first turn is stored."""
+    def create_thread(self, persona: str, amnesia: bool = False) -> int:
+        """A new thread with this persona (its id), as its first turn is
+        stored; in amnesia mode, as its first turn is held back."""
         now = time.time()
         return self._write(
-            "INSERT INTO threads (persona, created, updated) VALUES (?, ?, ?)",
-            (persona, now, now),
+            "INSERT INTO threads (persona, created, updated, amnesia) VALUES (?, ?, ?, ?)",
+            (persona, now, now, int(amnesia)),
         )
+
+    def set_amnesia(self, thread: int, on: bool):
+        """Whether nothing of the thread is written, kept for when it is
+        opened again."""
+        self._write("UPDATE threads SET amnesia = ? WHERE id = ?", (int(on), thread))
 
     def threads(self) -> list[dict]:
         """Every thread, the one talked in last first: {id, persona, title,
@@ -253,6 +264,7 @@ class MemoryStore:
         it a new thread)."""
         thread = dict(row)
         thread["title"] = thread["title"] or ""
+        thread["amnesia"] = bool(thread["amnesia"])
         return thread
 
     def forget_thread(self, thread_id: int):

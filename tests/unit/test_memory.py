@@ -604,18 +604,22 @@ def test_forgetting_everything_starts_the_conversation_over(store, thread):
     assert [t["id"] for t in store.threads()] == [conversation.thread]
 
 
-def test_forgetting_everything_in_amnesia_mode_forgets_its_turns_and_stays_in_it(store, thread):
+def test_forgetting_everything_in_amnesia_mode_forgets_its_turns_in_a_new_thread(store, thread):
     conversation = _conversation(store, thread)
     conversation.set_amnesia(True)
     _reply(conversation, "Something private", "Understood.")
 
     conversation.forget()
+    store.forget_all()
     assert len(conversation.manage_context()) == 1
-    assert conversation.amnesia is True
+    # Amnesia was the forgotten thread's: the new one remembers
+    assert conversation.amnesia is False
 
     _reply(conversation, "Something else", "Noted.")
-    assert store.turn_count() == 0
-    assert [m["content"] for m in conversation.manage_context()[1:]] == ["Something else", "Noted."]
+    assert [t["text"] for t in store.recent_turns(conversation.thread)] == [
+        "Something else",
+        "Noted.",
+    ]
 
 
 def test_a_reply_begun_before_everything_was_forgotten_is_not_kept(store, thread):

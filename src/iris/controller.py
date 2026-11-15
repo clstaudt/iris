@@ -457,6 +457,9 @@ class AssistantController:
         kwargs.setdefault("sleep_word", persona.sleep_word)
         # {plugin id: enabled} chosen in the UI; the others follow their default
         kwargs["tools"] = kwargs.pop("tools", {}) or {}
+        # Memory's own switch; and amnesia, kept for every thread before each
+        # had its own, for the thread Iris starts in
+        remember = bool(kwargs.pop("remember", True))
         amnesia = bool(kwargs.pop("amnesia", False))
         # The thread to go on in: an id, or None for a new one with the
         # persona; without one, the thread talked in last
@@ -489,9 +492,12 @@ class AssistantController:
                 plugins=self.plugins.plugins,
                 **kwargs,
             )
-            self.assistant.conversation.set_amnesia(amnesia)
             self.assistant.on_voice_not_ready = self._voice_not_ready
             self._enter_first_thread(thread)
+            if not remember:
+                self.assistant.conversation.set_remember(False)
+            if amnesia:
+                self.assistant.conversation.set_amnesia(True)
             self.bus.emit("config", self.assistant.config_info())
             if restore:
                 self._restore_thread()
@@ -831,6 +837,8 @@ class AssistantController:
         if getattr(assistant, "memory", None) is None:
             return
         store = assistant.memory.store
+        # The persona as its file says now
+        reload_personas()
         found = None
         if wanted is not None:
             found = store.thread(wanted) if wanted is not LAST_THREAD else None
@@ -840,7 +848,7 @@ class AssistantController:
         persona = self._thread_persona(found)
         if persona != assistant.persona.id:
             self.set_persona(persona, note=False)
-        assistant.conversation.open_thread(found["id"])
+        assistant.conversation.open_thread(found["id"], found["amnesia"])
 
     @staticmethod
     def _thread_persona(thread: dict) -> str:
@@ -869,9 +877,12 @@ class AssistantController:
         thread = memory.store.thread(int(thread_id))
         if thread is None:
             return {"ok": False, "error": f"No thread {thread_id}"}
+        # The thread's persona as its file says now: it may have been edited
+        # while another one spoke, which no look at the file in use noticed
+        reload_personas()
         if thread["id"] == self.assistant.conversation.thread:
             return {"ok": True, "id": thread["id"]}  # open already: nothing changes
-        self._go_to_thread(thread["id"], self._thread_persona(thread))
+        self._go_to_thread(thread["id"], self._thread_persona(thread), thread["amnesia"])
         self._switched()
         return {"ok": True, "id": thread["id"]}
 
@@ -880,6 +891,7 @@ class AssistantController:
         first turn; until then another persona can be chosen for it."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
+        reload_personas()  # the persona as its file says now
         if persona not in list_personas():
             return {"ok": False, "error": f"Unknown persona: {persona}"}
         # Leaving a thread for a new one is heard; choosing another persona
@@ -903,7 +915,7 @@ class AssistantController:
         self.bus.emit("threads.changed", {})
         return {"ok": True}
 
-    def _go_to_thread(self, thread_id: int | None, persona: str):
+    def _go_to_thread(self, thread_id: int | None, persona: str, amnesia: bool = False):
         """Leave the thread Iris is in for another (None: a new one). A reply
         underway stops, as Stop does, and is kept in the thread it was given
         in; messages waiting for it are dropped. Iris takes on the thread's
@@ -918,7 +930,7 @@ class AssistantController:
         self._drop_waiting_turns()
         if persona != assistant.persona.id:
             self.set_persona(persona, note=False)
-        assistant.conversation.open_thread(thread_id)
+        assistant.conversation.open_thread(thread_id, amnesia)
         with self._transcript_lock:
             self._transcript = []
         self.bus.emit("thread.opened", {"id": thread_id})
@@ -993,8 +1005,18 @@ class AssistantController:
             "turns": topic.turns,
         }
 
+    def set_remember(self, on: bool) -> dict:
+        """Switch memory on or off, for every thread: off, nothing is
+        written, and memory is neither in the prompt nor offered as tools."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        self.assistant.conversation.set_remember(on)
+        self.bus.emit("config", self.assistant.config_info())
+        return {"ok": True}
+
     def set_amnesia(self, on: bool) -> dict:
-        """While on, nothing of the conversation is written to memory."""
+        """While on, nothing of the open thread is written to memory; kept
+        with the thread."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         self.assistant.conversation.set_amnesia(on)
