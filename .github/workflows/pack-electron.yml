@@ -16,6 +16,14 @@ on:
 permissions:
   contents: write
 
+# One build of a ref at a time: builds of main pushed close together each
+# replace the assets of the rolling "latest" pre-release, and two doing so
+# at once fail on each other's deleted assets. A later push waits for the
+# one running, and none is cancelled
+concurrency:
+  group: pack-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     # Apple Silicon only: the core needs MLX. Pinned to macos-15 (not
