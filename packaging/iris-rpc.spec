@@ -76,7 +76,8 @@ a = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     # Installed for other tools but never used by the core. torch stays:
-    # Pocket TTS runs on it, and the voice imports it
+    # Pocket TTS runs on it, and the voice imports it. typer stays too:
+    # huggingface_hub's login, which voice cloning uses, imports it
     excludes=[
         "torchvision",
         "torchaudio",
@@ -85,7 +86,6 @@ a = Analysis(
         "tkinter",
         "IPython",
         "pytest",
-        "typer",
         "irisdev",
         # misaki's frontend for Kokoro's v1.1 Mandarin model, with the 43 MB
         # of readings only it uses; Iris speaks v1.0 with misaki's own
