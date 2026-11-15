@@ -1073,7 +1073,11 @@ class AudioRecorder:
                                     _db(getattr(echo, "suppression", None)),
                                 )
                                 held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, True, 0, False
-                                held_near, held_out, loudest, above = bar > hold_after, stood_out, None, None
+                                # Heard from the hold on, unless a canceller
+                                # that lets the voice through leaves it to
+                                # die away there too
+                                held_out = clear or (stood_out and getattr(echo, "cancelling", True))
+                                held_near, loudest, above = bar > hold_after, None, None
                             continue
                         if waiting:
                             # The voice ended meanwhile: what was heard is

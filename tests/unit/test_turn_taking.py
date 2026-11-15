@@ -648,6 +648,18 @@ class TestOverTheVoice:
         Path(path).unlink()
         assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
 
+    def test_a_noise_over_the_voice_let_through_is_not_the_users(self, monkeypatch):
+        # A door slams while the canceller lets the voice through: what it
+        # lets through is sure to be speech, the door makes it stand out
+        # above the echo. Held, the voice dies away as the echo it is
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.3),
+                                    np.zeros(SAMPLE_RATE * 2)])
+        echo = Weighed(lambda t: (12.0, 11.0) if np.abs(_at(recording, t)).max() > 0.2 else (-2.0, -3.0),
+                       cancelling=False)
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(2.5), echo=echo)
+        assert path is None and spoke == []
+        assert (voice.holds, voice.releases) == (1, 1)
+
     def test_not_listened_to_until_the_canceller_has_learned_the_room(self, monkeypatch):
         recording = np.concatenate(
             [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.8), np.zeros(SAMPLE_RATE)]
@@ -685,8 +697,8 @@ class Weighed(PassThrough):
     recording, or (heard, left, before) with what it left of the voice just
     before."""
 
-    def __init__(self, levels):
-        super().__init__(settled=True, cancelling=True)
+    def __init__(self, levels, cancelling=True):
+        super().__init__(settled=True, cancelling=cancelling)
         self.levels = levels
         self._first = None
 

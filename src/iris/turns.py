@@ -83,8 +83,10 @@ HOLD_WITHIN_ECHO = 0.0
 # least this share of the time is the user's; anything less was the echo.
 # Speech that stood out (above the echo, or out of what the canceller
 # leaves) was not the echo: it is heard from the moment the voice is held,
-# and is the user's unless it ended as the voice was held (a burst that is
-# not speech: a cough, a door)
+# and is the user's unless it ended as the voice was held. Not while the
+# canceller measurably lets the voice through: a door slammed over the
+# voice let through stands out above the echo, and the voice dies away in
+# the hold as it would
 HOLD = 0.55
 HOLD_SETTLE = 0.25
 HOLD_SPEECH = 0.5
