@@ -684,8 +684,9 @@ class IrisStore {
         break;
 
       // Something to know that is not a fault, such as replies shown and
-      // not spoken. It goes above the reply streaming in, where it stays
-      // when the transcript is rebuilt (the reply comes whole after it)
+      // not spoken, or the speaker or microphone Iris switched to. It goes
+      // above the reply streaming in, where it stays when the transcript is
+      // rebuilt (the reply comes whole after it)
       case "notice": {
         const notice: ChatMessage = {
           role: "system",
