@@ -64,7 +64,7 @@
           : 'text-ink-3'}"
         title="Settings"
       >
-        <Icon name="sliders" size={15} />
+        <Icon name="settings" size={15} />
       </button>
     </div>
   </header>
