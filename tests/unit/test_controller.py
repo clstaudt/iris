@@ -336,6 +336,8 @@ def test_forgetting_everything_is_answered_and_told_to_every_window(tmp_path):
     assert controller.memory_topics() == {"topics": [], "turns": 0}
     assert controller._turns.empty()
     assert len(controller.assistant.conversation.manage_context()) == 1
+    # Every thread goes, and Iris goes on in a new one
+    assert store.threads() == [] and conversation.thread is None
 
 
 def test_a_silent_microphone_is_warned_about_once(monkeypatch):

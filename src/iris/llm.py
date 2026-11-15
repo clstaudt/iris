@@ -600,13 +600,15 @@ class ConversationManager:
         store.add_turn(self.thread, role, text, source)
 
     def forget(self):
-        """Start the conversation over, as if nothing had been said: no
-        recent turns, recalled topics or shared files go to the model any
-        more, nor does the language spoken last. A reply begun before is
-        not kept, should it end later. Amnesia mode stays as it is. What is
-        stored in memory is the store's to forget (MemoryStore.forget_all)."""
+        """Start the conversation over, as if nothing had been said, in a
+        new thread: no recent turns, recalled topics or shared files go to
+        the model any more, nor does the language spoken last. A reply begun
+        before is not kept, should it end later. Amnesia mode stays as it
+        is. What is stored in memory is the store's to forget
+        (MemoryStore.forget_all)."""
         with self._keeping:
             self._forgotten += 1
+            self.thread = None
             self.conversation_history = []
             self.unremembered = []
             self.pinned = {}

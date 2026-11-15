@@ -24,9 +24,10 @@ mid-generation (closing its connection makes Ollama stop at once), so a turn
 never waits behind filing. Every step is saved as it completes, so stopping
 loses nothing; the next quiet spell carries on.
 
-Everything can be forgotten at once (forget_all): every turn, every topic and
-the search index, and the file is rebuilt so the words are gone from it too.
-A filing step that read the turns before writes nothing afterwards.
+A thread can be forgotten with all it holds (forget_thread), and everything
+at once (forget_all): every thread, turn and topic and the search index, and
+the file is rebuilt so the words are gone from it too. A filing step that
+read the turns before writes nothing afterwards.
 """
 
 import json
@@ -461,14 +462,15 @@ class MemoryStore:
             self._db.commit()
 
     def forget_all(self):
-        """Forget everything: every turn, every topic and the search index.
-        The file is rebuilt afterwards, so the words are gone from it, not
-        just unlisted: deleted rows stay in its free pages, and the index
-        keeps the words of deleted turns until it is cleared."""
+        """Forget everything: every thread, with its turns and topics, and the
+        search index. The file is rebuilt afterwards, so the words are gone
+        from it, not just unlisted: deleted rows stay in its free pages, and
+        the index keeps the words of deleted turns until it is cleared."""
         with self._lock:
             self.generation += 1
             self._db.execute("DELETE FROM turns")
             self._db.execute("DELETE FROM topics")
+            self._db.execute("DELETE FROM threads")
             self._db.execute("INSERT INTO turns_fts(turns_fts) VALUES ('delete-all')")
             self._db.commit()
             self._db.execute("VACUUM")

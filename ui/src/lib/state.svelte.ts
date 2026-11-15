@@ -789,6 +789,10 @@ class IrisStore {
     this.restoredCount = 0;
     this.memoryTopics = [];
     this.memoryTurns = 0;
+    // Every thread is gone: Iris goes on in a new one
+    this.choosing = false;
+    this.settleThread(null);
+    this.threads = [];
     if (this.showsMemory) this.loadMemory();
   }
 

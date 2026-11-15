@@ -645,7 +645,8 @@ def test_forgetting_everything_leaves_nothing_in_the_store_or_its_file(tmp_path)
 
     store.forget_all()
 
-    assert store.turn_count() == 0 and store.topics(thread) == []
+    # Every thread goes, with all it held
+    assert store.threads() == [] and store.turn_count() == 0 and store.topics(thread) == []
     assert store.search(thread, "Quokkabar") == [] and store.unfiled_exchanges() == []
     db = sqlite3.connect(path)
     # The search index holds no word of it
@@ -656,7 +657,7 @@ def test_forgetting_everything_leaves_nothing_in_the_store_or_its_file(tmp_path)
     db.close()
     assert b"quokkabar" not in path.read_bytes().lower()
     # Iris started again has nothing to show of the conversation
-    assert MemoryStore(path).recent_turns(thread) == []
+    assert MemoryStore(path).threads() == []
 
 
 def test_a_decision_made_while_everything_was_forgotten_files_nothing(store, thread):
@@ -721,7 +722,9 @@ def test_forgetting_everything_starts_the_conversation_over(store, thread):
     conversation.forget()
     store.forget_all()
 
-    # The next prompt carries the persona and an empty memory, nothing else
+    # The next prompt carries the persona and an empty memory, nothing else,
+    # in a new thread
+    assert conversation.thread is None
     [system] = conversation.manage_context()
     assert "Memory index:\n(nothing yet)" in system["content"]
     assert "Chiado" not in system["content"] and "Lisbon" not in system["content"]
@@ -731,6 +734,7 @@ def test_forgetting_everything_starts_the_conversation_over(store, thread):
     # And the conversation goes on, remembered as ever
     _reply(conversation, "Hi", "Hello!")
     assert [t["text"] for t in store.recent_turns(conversation.thread)] == ["Hi", "Hello!"]
+    assert [t["id"] for t in store.threads()] == [conversation.thread]
 
 
 def test_forgetting_everything_in_amnesia_mode_forgets_its_turns_and_stays_in_it(store, thread):

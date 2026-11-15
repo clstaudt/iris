@@ -978,9 +978,10 @@ class AssistantController:
         return {"ok": True}
 
     def memory_forget_all(self) -> dict:
-        """Forget everything: all that is remembered, and the conversation,
-        in the model's context and in the app (see
-        VoiceAssistant.forget_everything)."""
+        """Forget everything: every thread and all that is remembered, and
+        the conversation, in the model's context and in the app (see
+        VoiceAssistant.forget_everything). Iris goes on in a new thread,
+        with the same persona."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         self.assistant.forget_everything()
