@@ -7,11 +7,12 @@ of it, and a memory from before threads becomes the first, with Iris."""
 import sqlite3
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from iris import personas
+from iris.assistant import VoiceAssistant
 from iris.audio import AudioPlayer
 from iris.controller import LAST_THREAD, AssistantController
 from iris.events import EventBus
@@ -161,27 +162,17 @@ def test_filing_files_each_exchange_into_topics_of_its_own_thread(store):
     assert store.unfiled_exchanges() == []
 
 
-def test_a_thread_is_titled_by_its_first_topic_else_the_user_s_first_words(store):
+def test_a_thread_is_titled_by_its_earliest_topic_only(store):
     thread = store.create_thread("iris")
-    _exchange(
-        store,
-        thread,
-        "What would be a good plan for three days in Lisbon at the end of October?",
-        "Alfama, Belém and Sintra.",
-    )
-    assert store.thread(thread)["title"] == "What would be a good plan for three days in…"
+    store.add_turn(thread, "system", "Greet the user.")
+    store.add_turn(thread, "assistant", "Hello! I'm here whenever you want to talk.")
+    _exchange(store, thread, "What would be a good plan for three days in Lisbon?", "Alfama.")
+    # Neither Iris's words nor the user's title it: until a topic is filed it
+    # has no title (the app calls it a new thread)
+    assert store.thread(thread)["title"] == ""
     store.create_topic(thread, "Lisbon trip", "late Oct", "Trip in late October.")
     store.create_topic(thread, "Flights", "Friday", "Arriving Friday.")
     assert store.thread(thread)["title"] == "Lisbon trip"
-
-    # Nothing of Iris's own titles a thread: until the user has said
-    # anything, it has no title (the app calls it a new thread)
-    greeted = store.create_thread("iris")
-    store.add_turn(greeted, "system", "Greet the user.")
-    store.add_turn(greeted, "assistant", "Hello! I'm here whenever you want to talk.")
-    assert store.thread(greeted)["title"] == ""
-    store.add_turn(greeted, "user", "Thanks, what's the weather?", "voice")
-    assert store.thread(greeted)["title"] == "Thanks, what's the weather?"
 
 
 def test_threads_are_listed_the_one_talked_in_last_first(store, monkeypatch):
@@ -282,6 +273,11 @@ class ThreadAssistant(FakeAssistant):
         self.tts_generator.prepare = lambda: None
         self.tts_generator.speaks = lambda language: True
         self.player = AudioPlayer()
+        self.listening_paused = False
+        self.chimes = 0
+
+    def thread_chime(self):
+        self.chimes += 1
 
     def config_info(self):
         return {"persona": self.persona.name, "thread": self.conversation.thread}
@@ -472,3 +468,122 @@ def test_the_memory_panel_shows_the_open_thread_s_topics(dirs, store):
     assert [t["title"] for t in controller.memory_topics()["topics"]] == ["Pod bay doors"]
     assert controller.memory_topic(trip)["ok"] is False
 
+
+
+# -- listed at once --------------------------------------------------------------
+
+
+def _model(conversation, answer, meanwhile=lambda: None):
+    """The model's reply, which comes once meanwhile() has looked around."""
+
+    def chunks():
+        meanwhile()
+        yield {"message": {"content": answer}}
+
+    conversation.client = MagicMock()
+    conversation.client.chat.side_effect = lambda **kwargs: chunks()
+
+
+def test_a_new_thread_is_listed_with_its_first_message_as_the_reply_begins(store):
+    conversation = _conversation(store)
+    stored = []
+    conversation.on_stored = lambda: stored.append(len(store.threads()))
+    seen = []
+    _model(conversation, "A dock for pods.", lambda: seen.append(store.threads()))
+
+    "".join(conversation.chat_stream("What is a pod bay?", keep=False))
+    # Listed before a word of the reply came, a new thread until filed
+    [[thread]] = seen
+    assert thread["title"] == "" and stored == [1]
+    sent = conversation.client.chat.call_args.kwargs["messages"]
+    assert sum("What is a pod bay?" in m["content"] for m in sent) == 1  # asked once
+    # The reply joins it once heard
+    conversation.keep("What is a pod bay?", "A dock for pods.", "voice")
+    assert [t["text"] for t in store.recent_turns(thread["id"])] == [
+        "What is a pod bay?",
+        "A dock for pods.",
+    ]
+    assert len(store.threads()) == 1
+
+
+def test_a_first_message_stopped_before_its_reply_leaves_no_thread(store):
+    conversation = _conversation(store)
+    _model(conversation, "")
+    "".join(conversation.chat_stream("Hello?", keep=False))
+    assert len(store.threads()) == 1
+    conversation.forgo()  # nothing of the reply was heard
+    assert store.threads() == [] and conversation.thread is None
+
+    # In a thread that holds more, only the turn is taken back
+    _model(conversation, "Hi!")
+    "".join(conversation.chat_stream("Hi", keep=True))
+    thread = conversation.thread
+    _model(conversation, "")
+    "".join(conversation.chat_stream("And then?", keep=False))
+    conversation.forgo()
+    assert [t["text"] for t in store.recent_turns(thread)] == ["Hi", "Hi!"]
+
+
+def test_a_reply_cut_short_keeps_what_was_heard_with_its_question(store):
+    conversation = _conversation(store)
+    _model(conversation, "Alfama, Belém and Sintra, then Cascais.")
+    "".join(conversation.chat_stream("Plan a Lisbon trip", keep=False))
+    conversation.keep("Plan a Lisbon trip", "Alfama, Belém", "text")
+    assert [t["text"] for t in store.recent_turns(conversation.thread)] == [
+        "Plan a Lisbon trip",
+        "Alfama, Belém",
+    ]
+
+
+def test_in_amnesia_mode_a_first_message_lists_no_thread(store):
+    conversation = _conversation(store)
+    conversation.set_amnesia(True)
+    seen = []
+    _model(conversation, "Understood.", lambda: seen.append(store.threads()))
+    "".join(conversation.chat_stream("Something private", keep=True))
+    assert seen == [[]] and store.threads() == []
+
+
+# -- switching is heard and pauses listening ---------------------------------------
+
+
+def test_opening_another_thread_chimes_and_pauses_listening_until_resumed(dirs, store):
+    iris, hal = _two_threads(store)
+    controller, _ = _controller(store)
+    assistant = controller.assistant
+    controller.open_thread(iris)
+    assert assistant.chimes == 1 and assistant.listening_paused
+
+    assert controller.resume()["ok"] is True
+    assert not assistant.listening_paused
+    # The thread open already: nothing changes, nothing is heard
+    controller.open_thread(iris)
+    assert assistant.chimes == 1 and not assistant.listening_paused
+
+    controller.open_thread(hal)
+    assert assistant.chimes == 2 and assistant.listening_paused
+    # Switched on, the microphone listens again too
+    controller.set_mic(True)
+    assert not assistant.listening_paused
+
+
+def test_starting_a_new_thread_chimes_once_and_pauses_listening(dirs, store):
+    iris, _ = _two_threads(store)
+    controller, _ = _controller(store)
+    assistant = controller.assistant
+    assistant.conversation.open_thread(iris)
+
+    controller.new_thread("hal")
+    assert assistant.chimes == 1 and assistant.listening_paused
+    # Another persona for the new thread, before anything is said: no chime
+    controller.new_thread("iris")
+    assert assistant.chimes == 1
+
+
+def test_while_listening_is_paused_the_microphone_is_closed_and_shown_paused():
+    assistant = VoiceAssistant.__new__(VoiceAssistant)
+    for event in ("pause_event", "suspend_event", "hold_event", "stop_event"):
+        setattr(assistant, event, threading.Event())
+    assert not assistant._mic_closed()
+    assistant.listening_paused = True
+    assert assistant._mic_closed()
