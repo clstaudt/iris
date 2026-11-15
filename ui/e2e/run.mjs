@@ -229,6 +229,14 @@ await page.exposeFunction("__irisRpc", async (method, params) => {
   call.result = await rpc(method, params);
   return call.result;
 });
+/** The system's save and open dialogs for a persona's file, as main.ts
+ *  opens them: the path each gives, which a step sets (null: cancelled),
+ *  and what was asked of them, in order. */
+const dialogs = { save: null, open: null, asked: [] };
+await page.exposeFunction("__irisDialog", (kind, name) => {
+  dialogs.asked.push({ kind, name });
+  return dialogs[kind];
+});
 /** What the page asked of the window: presence on or off, in order. */
 const presence = [];
 /** Presence's window: a page of its own, opened when first needed */
@@ -290,6 +298,8 @@ function stubIris({ settings }) {
       askMicrophone: async () => sessionStorage.getItem("e2e.mic") ?? "granted",
       isPackaged: async () => false,
       chooseFolder: async () => null,
+      savePersonaFile: (name) => window.__irisDialog("save", name),
+      openPersonaFile: () => window.__irisDialog("open"),
       presence: false,
       setPresence: (on) => window.__irisPresence(on),
       onOrb: (handlers) => {
@@ -3179,6 +3189,77 @@ try {
     } finally {
       await rpc("e2e.reasoning", { on: false });
     }
+  });
+
+  await step("persona files: a persona is exported with its cloned voice, deleted with it, and imported back, speaking with the voice", async () => {
+    // A persona of the user's, with a voice cloned for it and made for German
+    huggingFace({ token: CLONE_TOKEN, terms: true });
+    sample = sample ?? speechSample();
+    const prepared = await rpc("voice.sample", { data: sample.toString("base64"), name: "sample.wav" });
+    check(prepared.ok, prepared.error);
+    const made = await rpc("voice.clone", { name: "Noam", sample: prepared.sample, languages: ["de"] });
+    check(made.ok, made.error);
+    const voice = made.voice.id;
+    const cloned = await until("the voice made for German", async () => {
+      const found = (await library()).kyutai.find((v) => v.id === voice);
+      return found?.cloned.made.includes("de") ? found : null;
+    }, 180_000);
+    const saved = await rpc("persona.save", {
+      name: "Noam", engine: "kyutai", voice, speed: 1, audio_filter: "",
+      description: "You are Noam, made by a test.", wake_word: "", sleep_word: "",
+    });
+    check(saved.ok, saved.error);
+    // Exported from the persona editor, to the file the save dialog gives
+    await openSettings("Personas");
+    await page.locator("button.card", { hasText: "Noam" }).click();
+    await until("Noam's form", async () => (await page.locator("input.title").inputValue()) === "Noam");
+    const file = path.join(coreHome, "Noam.irispersona");
+    dialogs.save = file;
+    await page.getByRole("button", { name: "Export", exact: true }).click();
+    await until("the persona file", () => fs.existsSync(file), 30_000);
+    check(dialogs.asked.at(-1)?.kind === "save" && dialogs.asked.at(-1).name === "Noam",
+      `the save dialog was asked ${JSON.stringify(dialogs.asked.at(-1))}`);
+    await page.screenshot({ path: path.join(OUT, "persona-export.png") });
+    const held = execFileSync(python, ["-I", "-c", "import sys, zipfile; print(' '.join(sorted(zipfile.ZipFile(sys.argv[1]).namelist())))", file])
+      .toString().trim();
+    check(held === "persona.yaml voice/english.safetensors voice/german.safetensors voice/sample.wav voice/voice.yaml",
+      `the file holds ${held}`);
+    // The persona deleted, and its voice on the Voices page
+    await page.locator("button.s-btn.danger", { hasText: "Delete" }).click();
+    await page.locator("button.s-btn.danger", { hasText: "Confirm delete" }).click();
+    await until("Noam to be gone", async () => !(await page.locator("button.card", { hasText: "Noam" }).count()));
+    await voicesPage();
+    await card(voice).getByRole("button", { name: "Delete" }).click();
+    await card(voice).getByRole("button", { name: "Confirm delete" }).click();
+    await card(voice).waitFor({ state: "detached", timeout: 10_000 });
+    check(!(await cloneOf(cloned.name)), "the voice is still there");
+    // A file that is no persona file is refused, and says so
+    await openSettings("Personas");
+    const junk = path.join(coreHome, "Junk.irispersona");
+    fs.writeFileSync(junk, "not a persona");
+    dialogs.open = junk;
+    await page.getByRole("button", { name: "Import", exact: true }).click();
+    await page.getByText("This is not an Iris persona file").waitFor({ timeout: 10_000 });
+    // Imported from the file the open dialog gives: Noam is back, and opens
+    dialogs.open = file;
+    await page.getByRole("button", { name: "Import", exact: true }).click();
+    await until("Noam's form", async () => (await page.locator("input.title").inputValue()) === "Noam", 30_000);
+    check(await page.locator("button.card", { hasText: "Noam" }).count() === 1, "Noam is not in the list once");
+    check(!(await page.getByText("This is not an Iris persona file").count()), "the refusal stays");
+    await page.screenshot({ path: path.join(OUT, "persona-import.png") });
+    const back = await rpc("persona.get", { id: saved.id });
+    const imported = await cloneOf(cloned.name);
+    check(back.ok && imported && back.voice === imported.id, `Noam speaks with ${back.voice}, the voice is ${imported?.id}`);
+    check(imported.cloned.made.join() === cloned.cloned.made.join(), `the voice is made for ${imported.cloned.made}, not ${cloned.cloned.made}`);
+    // Noam speaks with the voice, and the speaker plays it
+    const since = Date.now();
+    await page.locator(".voice.active .play").click();
+    await heard(since);
+    const asked = calls.find((c) => c.at >= since && c.method === "persona.preview");
+    check(asked?.params.voice === imported.id, `the preview asked for ${JSON.stringify(asked?.params)}`);
+    // And the voice is on the Voices page, with Noam
+    await voicesPage();
+    await card(imported.id).locator(".user", { hasText: "Noam" }).waitFor({ timeout: 5000 });
   });
 
   await step("nothing went wrong in the page", async () => {

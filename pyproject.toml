@@ -37,6 +37,9 @@ dependencies = [
     "num2words>=0.5.14",
     "pykakasi>=2.3.0",
     "misaki[zh]>=0.9.4",
+    # The voice states persona files bring with a cloned voice, read and
+    # written directly, not only through Pocket TTS
+    "safetensors>=0.8.0",
 ]
 
 [project.scripts]

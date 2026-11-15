@@ -147,6 +147,12 @@ def test_a_persona_without_a_name_is_not_saved(client):
     assert result["result"]["ok"] is False
 
 
+def test_a_persona_is_exported_and_imported_only_with_a_file_chosen(client):
+    exported = client.call("persona.export", {"id": "iris", "path": ""})["result"]
+    imported = client.call("persona.import", {"path": ""})["result"]
+    assert exported == imported == {"ok": False, "error": "No file was chosen"}
+
+
 def test_pause_resume_require_running_assistant(client):
     for method in ("assistant.pause", "assistant.resume"):
         response = client.call(method)

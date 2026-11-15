@@ -16,7 +16,9 @@ is cloned, and so is each language chosen then; another one when the voice
 is made ready for it (iris.readiness), with that language's cloning model,
 fetched first, with progress. Never while Iris speaks: a reply in a
 language the voice is not made for yet is shown, not spoken. Personas name
-the voice "clone:<folder>". It is the same voice in every language.
+the voice "clone:<folder>". It is the same voice in every language. A
+voice also comes into the library with a persona imported from a file
+(iris.persona_files), with its sample and the languages made of it.
 
 A cloned voice stays until the user deletes it on the Voices page: one made
 in the persona editor and not saved with the persona, or made again before
@@ -231,16 +233,55 @@ def make_voice(
     (at RATE) and its name. Another voice of that name gets a number, and
     so does one whose folder a persona names (taken) though it is not
     there: the persona would speak with the new voice unasked."""
-    base = slug(name)
     shown = name.strip() or "Cloned voice"
-    folder, n = voices_dir() / base, 2
-    while folder.exists() or folder.name in _forgotten or taken(PREFIX + folder.name):
-        folder, n = voices_dir() / f"{base}-{n}", n + 1
+    folder, n = _free_folder(slug(name), taken)
     folder.mkdir(parents=True)
     if n > 2:
         shown = f"{shown} {n - 1}"
     _write_sample(folder, sample)
     _write_info(folder, name=shown)
+    return folder
+
+
+def _free_folder(base: str, taken: Callable[[str], bool]) -> tuple[Path, int]:
+    """A folder for a new voice: base, or base-2, base-3... when a voice has
+    it, had it while the core runs, or a persona names it (taken). With the
+    number after the last one tried."""
+    folder, n = voices_dir() / base, 2
+    while folder.exists() or folder.name in _forgotten or taken(PREFIX + folder.name):
+        folder, n = voices_dir() / f"{base}-{n}", n + 1
+    return folder, n
+
+
+def add_voice(made: Path, base: str, name: str, taken: Callable[[str], bool]) -> Path:
+    """Add a voice made elsewhere to the library: one imported with a
+    persona, complete in made (a folder of its own in the voices folder,
+    whose name no voice takes). It is kept in the folder base, numbered as
+    make_voice numbers one when that is taken, and named name, numbered as
+    "Noam 2" when another cloned voice has it.
+
+    Returns:
+        Its folder
+    """
+    names = {voice["name"].casefold() for voice in cloned_voices()}
+    shown, n = name, 2
+    while shown.casefold() in names:
+        shown, n = f"{name} {n}", n + 1
+    _write_info(made, name=shown)
+    base = base if FOLDER_NAME.fullmatch(base) else slug(name)
+    # The folder is taken before the voice moves in, its sample last: a
+    # voice cloned meanwhile takes another, and none is listed half there
+    while True:
+        folder, _ = _free_folder(base, taken)
+        try:
+            folder.mkdir(parents=True)
+            break
+        except FileExistsError:
+            continue
+    for file in sorted(made.iterdir(), key=lambda path: path.name == SAMPLE_FILE):
+        file.replace(folder / file.name)
+    made.rmdir()
+    logger.info("Added the cloned voice %s%s (%s) from a persona file", PREFIX, folder.name, shown)
     return folder
 
 
