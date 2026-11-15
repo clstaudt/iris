@@ -2908,6 +2908,99 @@ try {
     await showThreads(false);
   });
 
+  await step("orb: a memory filed plays the keep once, in the window and in presence, and forgetting or switching threads plays none", async () => {
+    await toConversation();
+    await atRest();
+    await voiceDone();
+    const micOn = config().mic_on;
+    await rpc("mic.set", { on: false });
+    // Each orb's canvas says how many keeps it began, as it does its shutters
+    const windowOrb = page.locator('canvas[aria-label="assistant status"]');
+    const keeps = async (canvas) => Number((await canvas.getAttribute("data-kept")) ?? 0);
+    /** Memory written from a moment on, as the core tells of it */
+    const writes = (since) =>
+      events.filter((e) => e.at >= since && e.type === "memory.updated" && e.data.written === true).length;
+    /** Frames the page draws: at 60 Hz or less, these are two seconds of
+     *  the orb, in which a keep (one second) ends and one after it begins */
+    const frames = (on) =>
+      on.evaluate(() => new Promise((resolve) => {
+        let left = 120;
+        const tick = () => (--left > 0 ? requestAnimationFrame(tick) : resolve());
+        requestAnimationFrame(tick);
+      }));
+    /** Something worth remembering, said; filed as Iris files it in a quiet
+     *  spell, but now (e2e.file_memory). Returns when filing began */
+    async function remember(say) {
+      const stored = (await rpc("e2e.memory")).turns;
+      const since = await say();
+      const done = await replyEvent("chat.done", since);
+      check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
+      await until("the exchange to be kept", async () => (await rpc("e2e.memory")).turns === stored + 2, 120_000);
+      await voiceDone();
+      const filing = Date.now();
+      check((await rpc("e2e.file_memory")).topics.length > 0, "nothing was filed");
+      await eventAfter("memory.updated", filing, (data) => data.written === true, 30_000);
+      return filing;
+    }
+
+    // Filed while the window shows: its orb plays the keep, once
+    const before = await keeps(windowOrb);
+    const filed = await remember(() => ask("Please remember this: my bicycle is called Marigold."));
+    await until("the keep in the window", async () => (await keeps(windowOrb)) > before, 5000);
+    await windowOrb.screenshot({ path: path.join(OUT, "orb-keep.png") });
+    await frames(page);
+    check(writes(filed) === 1, `the core told of ${writes(filed)} writes for one filing`);
+    const played = (await keeps(windowOrb)) - before;
+    check(played === 1, `the orb played ${played} keeps for one write`);
+
+    // Filed while only the orb shows: presence plays it, once, and the
+    // window, shown again, does not play it after
+    const orb = (await openPresence()).locator('[aria-label="iris"] canvas');
+    await page.locator('button[title="Presence"]').click();
+    await until("presence", () => presence.at(-1) === true, 5000);
+    const inWindow = await keeps(windowOrb);
+    const inPresence = await keeps(orb);
+    await remember(async () => {
+      const since = Date.now();
+      await rpc("chat.send_text", { text: "Please remember this too: my kayak is called Juniper." });
+      return since;
+    });
+    await until("the keep in presence", async () => (await keeps(orb)) > inPresence, 5000);
+    await frames(presencePage);
+    check((await keeps(orb)) - inPresence === 1, `presence played ${(await keeps(orb)) - inPresence} keeps for one write`);
+    await presencePage.keyboard.press("Escape");
+    await until("the conversation", () => presence.at(-1) === false, 5000);
+    await frames(page);
+    check((await keeps(windowOrb)) === inWindow, "the window played the keep presence showed");
+
+    // A topic forgotten in the memory panel, a new thread and back again:
+    // memory is updated, and nothing is written
+    const calm = Date.now();
+    const kept = await keeps(windowOrb);
+    await page.locator('button[title="Memory"]').click();
+    const memoryPanel = page.locator('aside[aria-label="Memory"]');
+    for (const { id, title } of (await rpc("memory.topics")).topics) {
+      const topic = await rpc("memory.topic", { id });
+      if (!topic.turns.some((turn) => /Marigold|Juniper/.test(turn.text))) continue;
+      const forgotten = Date.now();
+      await memoryPanel.locator("button", { hasText: title }).first().click();
+      await memoryPanel.locator("button", { hasText: exactly("Forget") }).click();
+      await eventAfter("memory.updated", forgotten);
+    }
+    // The window took the update in: it lists the threads again after it
+    await until("the update taken in", () => calls.some((c) => c.at >= calm && c.method === "threads.list"));
+    await page.locator('button[title="Close memory"]').click();
+    const open = (await threads()).open;
+    await newThreadWith("Iris");
+    await openThread(open);
+    await showThreads(false);
+    await frames(page);
+    check(events.some((e) => e.at >= calm && e.type === "memory.updated"), "forgetting did not update memory");
+    check(writes(calm) === 0, `forgetting and switching threads wrote memory ${writes(calm)} times`);
+    check((await keeps(windowOrb)) === kept, `the orb played ${(await keeps(windowOrb)) - kept} keeps for forgetting and switching threads`);
+    await rpc("mic.set", { on: micOn });
+  });
+
   // -------------------------------------------------------------- roles
 
   const chips = page.locator('[role="radiogroup"][aria-label="Role"] .chip');

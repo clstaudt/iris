@@ -68,6 +68,7 @@ function orbInputs(): OrbInputs {
     awakeUntil: store.awakeUntil === null ? null : performance.timeOrigin + store.awakeUntil,
     error: store.presenceError,
     shots: store.shots,
+    kept: store.kept,
   };
 }
 
@@ -80,6 +81,7 @@ function applyOrbInputs(inputs: OrbInputs) {
   store.outputLevel = inputs.outputLevel;
   store.awakeUntil = inputs.awakeUntil === null ? null : inputs.awakeUntil - performance.timeOrigin;
   store.shots = inputs.shots;
+  store.kept = inputs.kept;
   presence.error = inputs.error;
 }
 

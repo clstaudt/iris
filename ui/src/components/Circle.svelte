@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { BLOOM_STYLE, drawIris } from "../lib/iris";
+  import { Keep, keepLight } from "../lib/keep";
   import { registerOrb } from "../lib/orb.svelte";
   import { Shutter } from "../lib/shutter";
   import { STATE_COLORS, store, type AssistantState } from "../lib/state.svelte";
@@ -72,6 +73,8 @@
     let eased = 0; // second stage, removes the steps between them
     // A camera's aperture opens and closes once for each look
     const shutter = new Shutter(store.shots);
+    // A ring of light drawn in for each memory written
+    const keep = new Keep(store.kept);
     let spinner = 0; // eases the gap open, so the ring never snaps apart
     let spin = 0; // accumulated rotation of the gap
     let blooming = store.state === "starting";
@@ -127,6 +130,42 @@
       ctx!.restore();
     }
 
+    /** A memory written: a ring of light leaves the orb's ring and is
+     *  drawn in toward its heart, fading as it goes, and the heart glows
+     *  softly as it takes it in. While Iris works the ring of light has
+     *  the ring's gap, and turns with it. */
+    function drawKeep(light: ReturnType<typeof keepLight>, radius: number, gap: number) {
+      ctx!.save();
+      if (light.heart > 1e-3) {
+        const heart = ctx!.createRadialGradient(cx, cy, 0, cx, cy, radius * 0.6);
+        heart.addColorStop(0, colStr(0.28 * light.heart));
+        heart.addColorStop(1, colStr(0));
+        ctx!.fillStyle = heart;
+        ctx!.beginPath();
+        ctx!.arc(cx, cy, radius * 0.6, 0, Math.PI * 2);
+        ctx!.fill();
+      }
+      if (light.glow > 1e-3) {
+        const r = radius * light.reach;
+        ctx!.beginPath();
+        if (gap < 1e-3) ctx!.arc(cx, cy, r, 0, Math.PI * 2);
+        else ctx!.arc(cx, cy, r, spin, spin + Math.PI * 2 - gap);
+        ctx!.lineCap = "round";
+        // A fixed blur, as the ring's: its opacity carries the fade
+        ctx!.shadowColor = colStr(0.7 * light.glow);
+        ctx!.shadowBlur = Math.max(8, 20 * K);
+        ctx!.strokeStyle = colStr(0.45 * light.glow);
+        // Thinner as it goes in
+        ctx!.lineWidth = Math.max(1.2, 4 * K * light.reach);
+        ctx!.stroke();
+        ctx!.shadowBlur = 0;
+        ctx!.strokeStyle = `rgba(255, 255, 255, ${0.25 * light.glow})`;
+        ctx!.lineWidth = Math.max(0.7, 1.2 * K);
+        ctx!.stroke();
+      }
+      ctx!.restore();
+    }
+
     /** The startup bloom: the iris opening while the models load, then
      *  merging into the ring. The flower itself is drawn by lib/iris. */
     function drawBloom(time: number, u: number, m: number) {
@@ -177,6 +216,9 @@
       // stays shut afterwards, however long the capture takes. The canvas
       // says how often it fired, for the end-to-end test
       if (shutter.frame(store, dt)) canvas.dataset.shots = String(shutter.fired);
+      // One keep per memory written, said on the canvas likewise
+      if (keep.frame(store, dt)) canvas.dataset.kept = String(keep.played);
+      const light = keepLight(keep.progress);
 
       spinner += ((SPINNER_STATES.has(state) ? 1 : 0) - spinner) * Math.min(1, dt * 3);
       spin = (spin + dt * SPIN_SPEED) % (Math.PI * 2);
@@ -220,7 +262,8 @@
       const breathe = 0.5 + 0.5 * Math.sin(time * 0.55);
       // Kept well off zero: the ring should brighten with the voice, not blink
       const glow = (0.4 + shown * 0.6) * (1 - 0.35 * drowsy);
-      const r = R * (1 + shown * 0.045); // the ring swells with the audio it meters
+      // The ring swells with the audio it meters, and gives as it keeps
+      const r = R * (1 + shown * 0.045) * (1 - 0.03 * light.give);
 
       ctx!.clearRect(0, 0, SIZE, SIZE);
       if (blooming) drawBloom(time, easeOut(unfold), easeInOut(merge));
@@ -265,6 +308,7 @@
       ctx!.stroke();
 
       if (shutter.progress < 1) drawAperture(shutter.progress, r);
+      if (keep.progress < 1) drawKeep(light, r, gap);
       ctx!.globalAlpha = 1;
     }
 
@@ -282,6 +326,8 @@
         eased,
         shutter: shutter.progress,
         shots: shutter.shown,
+        keep: keep.progress,
+        kept: keep.shown,
         spinner,
         spin,
         blooming,
@@ -294,6 +340,8 @@
         eased = motion.eased;
         shutter.progress = motion.shutter;
         shutter.shown = motion.shots;
+        keep.progress = motion.keep;
+        keep.shown = motion.kept;
         spinner = motion.spinner;
         spin = motion.spin;
         blooming = motion.blooming;
@@ -304,6 +352,7 @@
         cancelAnimationFrame(raf);
         raf = 0;
         shutter.shown = null;
+        keep.shown = null;
       },
       wake: () => {
         if (raf) return;

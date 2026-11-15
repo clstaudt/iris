@@ -406,7 +406,11 @@ class VoiceAssistant:
             self.memory = MemoryKeeper(
                 store,
                 chat_json(lambda: self.conversation.host, lambda: self.conversation.model),
-                on_change=lambda: self.event_bus and self.event_bus.emit("memory.updated", {}),
+                # Filing wrote to memory, which the orb shows (written); a
+                # forget updates memory too, and is not written
+                on_change=lambda: (
+                    self.event_bus and self.event_bus.emit("memory.updated", {"written": True})
+                ),
                 # Nor while memory is switched off: nothing is written then
                 busy=lambda: self._conversation_busy() or not self.conversation.remember,
             )

@@ -18,6 +18,7 @@
     "test:bridge": "node --test e2e/bridge.test.mjs",
     "test:wake-hint": "node --test e2e/wakehint.test.mjs",
     "test:shutter": "node --test e2e/shutter.test.mjs",
+    "test:keep": "node --test e2e/keep.test.mjs",
     "test:tour": "node --test e2e/tour.test.mjs",
     "icon": "esbuild scripts/icon/render.ts --bundle --format=iife --outfile=dist-electron/icon-render.js && ELECTRON_RUN_AS_NODE= electron scripts/icon/make-icon.cjs",
     "dist:mac": "bash scripts/package-mac.sh"
