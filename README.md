@@ -36,7 +36,7 @@ Settings > Pipeline: every stage from the microphone to the voice, and how long 
 
 The persona editor: personality, wake word, sleep word and voice, with every voice playable.
 
-<img src="docs/screenshots/persona-editor.png" alt="The persona editor showing HAL with its personality, wake word, sleep word, Kokoro voice, speed and effect">
+<img src="docs/screenshots/persona-editor.png" alt="The persona editor showing Iris with her personality, wake word, sleep word, Kyutai voice and effect">
 
 ## Getting started
 

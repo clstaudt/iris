@@ -5,6 +5,9 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
+from iris import personas
 from iris.assistant import VoiceAssistant
 from iris.audio import AudioPlayer
 from iris.controller import AssistantController, silent_microphone_message
@@ -443,6 +446,18 @@ def test_wake_word_is_set_on_the_assistant(monkeypatch):
         controller.stop()
 
 
+@pytest.fixture
+def kokoro_persona():
+    """A persona of the user's with a Kokoro voice: Iris, the one shipped,
+    speaks with Kyutai."""
+    personas.USER_DIR.mkdir(parents=True, exist_ok=True)
+    (personas.USER_DIR / "test-kokoro.yaml").write_text(
+        'name: "Test Kokoro"\nengine: "kokoro"\nvoice: "bm_lewis"\ndescription: |\n  Calm.\n'
+    )
+    personas.reload_personas()
+    return "test-kokoro"
+
+
 class PersonaAssistant(FakeAssistant):
     """A running assistant whose persona can be switched."""
 
@@ -455,34 +470,34 @@ class PersonaAssistant(FakeAssistant):
         self.player = AudioPlayer()
 
 
-def test_a_voice_that_cannot_speak_the_language_goes_back_to_english():
+def test_a_voice_that_cannot_speak_the_language_goes_back_to_english(kokoro_persona):
     controller = AssistantController(EventBus())
     controller.assistant = PersonaAssistant()
     # Spoken by a plugin's engine, say: neither Kokoro nor Kyutai speaks it
     controller.assistant.conversation_language = "ru"
 
-    controller.set_persona("hal")
+    controller.set_persona(kokoro_persona)
 
     assert controller.assistant.tts_generator.engine == "kokoro"
     assert controller.assistant.conversation_language == "en"
 
 
-def test_a_kokoro_persona_keeps_german_through_kyutai():
+def test_a_kokoro_persona_keeps_german_through_kyutai(kokoro_persona):
     controller = AssistantController(EventBus())
     controller.assistant = PersonaAssistant()
     controller.assistant.conversation_language = "de"
 
-    controller.set_persona("hal")
+    controller.set_persona(kokoro_persona)
 
     assert controller.assistant.conversation_language == "de"
 
 
-def test_switching_to_a_voice_that_speaks_the_language_keeps_it():
+def test_switching_to_a_voice_that_speaks_the_language_keeps_it(kokoro_persona):
     controller = AssistantController(EventBus())
     controller.assistant = PersonaAssistant()
     controller.assistant.conversation_language = "fr"
 
-    controller.set_persona("hal")
+    controller.set_persona(kokoro_persona)
 
     assert controller.assistant.conversation_language == "fr"
 

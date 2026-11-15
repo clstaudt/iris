@@ -239,7 +239,7 @@ def main(argv=None) -> int:
                       help="budgets to use, as voice_pipeline=3.5,barge_in=1 (or IRIS_VOICETEST_BUDGETS)")
 
     pair = commands.add_parser("selftalk", help="two Irises talking to each other")
-    pair.add_argument("--personas", nargs=2, default=["iris", "hal"])
+    pair.add_argument("--personas", nargs=2, default=["iris", "test-kokoro"])
     pair.add_argument("--minutes", type=float, default=5.0)
     pair.add_argument("--replies", type=int, default=12, help="stop after this many replies")
     pair.add_argument("--across-gain", type=float, default=0.6, help="how loud each hears the other")

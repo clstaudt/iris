@@ -61,6 +61,26 @@ const AUDIO_FAULTS = path.join(home, ".e2e-audio.json");
 const coreHome = home;
 /** Iris's memory, in the test's home */
 const MEMORY_DB = path.join(home, "memory.db");
+// Iris alone ships: the steps that need other personas talk with these, a
+// user's own in the test home, with Kokoro voices through an effect
+const TEST_PERSONAS = {
+  "test-kokoro": {
+    name: "Test Kokoro", engine: "kokoro", voice: "bm_lewis", audio_filter: "intercom", speed: 1.1,
+    description: "You are calm, precise and polite, and speak in a measured manner.",
+  },
+  "test-sarah": {
+    name: "Test Sarah", engine: "kokoro", voice: "af_sarah", audio_filter: "intercom", speed: 1.1,
+    description: "You are matter-of-fact and friendly.",
+  },
+};
+const personaFile = (id) => path.join(home, ".iris", "personas", `${id}.yaml`);
+/** A persona's file in the test home, as the persona editor would keep it. */
+function writePersona(id, persona) {
+  fs.mkdirSync(path.dirname(personaFile(id)), { recursive: true });
+  const lines = Object.entries(persona).map(([key, value]) => `${key}: ${JSON.stringify(value)}`);
+  fs.writeFileSync(personaFile(id), lines.join("\n") + "\n");
+}
+for (const [id, persona] of Object.entries(TEST_PERSONAS)) writePersona(id, persona);
 const realHome = os.homedir();
 const python =
   process.env.E2E_PYTHON ??
@@ -661,11 +681,11 @@ try {
   await step("first run: a persona's voice plays before Iris runs", async () => {
     await until("the personas", async () => (await page.locator(".persona").count()) >= 3);
     const since = Date.now();
-    await page.locator('button[aria-label="Play HAL"]').click();
+    await page.locator('button[aria-label="Play Test Kokoro"]').click();
     await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
     await eventAfter("state", since, (data) => data.state === "idle", 60_000);
     check(!events.some((e) => e.at >= since && e.type === "error"), "the preview failed");
-    await checkHeard(since, "HAL's voice");
+    await checkHeard(since, "Test Kokoro's voice");
     await page.locator(".persona", { hasText: "Iris" }).locator("button.pick").click();
     await footerButton("Continue").click();
   });
@@ -873,8 +893,8 @@ try {
   await step("personas: each one opens, and a voice tile plays that voice", async () => {
     await openSettings("Personas");
     await until("the persona list", async () => (await page.locator("button.card").count()) >= 3);
-    await page.locator("button.card", { hasText: "HAL" }).click();
-    await until("HAL's form", async () => (await page.locator("input.title").inputValue()) === "HAL");
+    await page.locator("button.card", { hasText: "Test Kokoro" }).click();
+    await until("Test Kokoro's form", async () => (await page.locator("input.title").inputValue()) === "Test Kokoro");
     check((await page.locator(".voice").count()) > 5, "no voice tiles");
     const since = Date.now();
     await page.locator(".voice .play").first().click();
@@ -899,20 +919,21 @@ try {
   });
 
   await step("personas: an edit is saved, and Cancel reverts one", async () => {
-    await page.locator("button.card", { hasText: "Computer" }).click();
+    await page.locator("button.card", { hasText: "Test Sarah" }).click();
     const text = page.locator("#persona-personality");
-    await until("the form", async () => (await page.locator("input.title").inputValue()) === "Computer");
+    await until("the form", async () => (await page.locator("input.title").inputValue()) === "Test Sarah");
     const original = await text.inputValue();
     await text.fill(original + "\nSpeak like a test.");
     await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
-    await until("the save", async () => (await rpc("persona.get", { id: "computer" })).description.includes("Speak like a test."));
+    await until("the save", async () => (await rpc("persona.get", { id: "test-sarah" })).description.includes("Speak like a test."));
     await until("Save to rest", () => page.locator("button.s-btn.primary").isDisabled());
     await text.fill("Something else entirely");
     await page.locator("button.s-btn", { hasText: "Cancel" }).click();
     await until("the edit to be reverted", async () => (await text.inputValue()).includes("Speak like a test."));
-    await page.locator("button.s-btn.danger", { hasText: "Reset" }).click();
-    await page.locator("button.s-btn.danger", { hasText: "Confirm reset" }).click();
-    await until("the reset", async () => !(await rpc("persona.get", { id: "computer" })).description.includes("Speak like a test."));
+    // As it was again (Iris's own Reset is tried below)
+    await text.fill(original);
+    await page.locator("button.s-btn.primary", { hasText: "Save" }).click();
+    await until("the edit to be undone", async () => !(await rpc("persona.get", { id: "test-sarah" })).description.includes("Speak like a test."));
   });
 
   await step("personas: a new one is created, opens in the editor, and is deleted", async () => {
@@ -2128,12 +2149,12 @@ try {
     await until(`${name} for the new thread`, () => config().persona === name, 60_000);
   }
 
-  /** The first message of HAL's thread, which titles it */
-  const FIRST = "Describe the pod bay doors in three sentences.";
+  /** The first message of Test Kokoro's thread, which titles it */
+  const FIRST = "Describe a lighthouse in three sentences.";
   /** The thread Iris started in: the greeting stored it */
   let firstThread = null;
-  /** A thread with HAL, started in a step below */
-  let halThread = null;
+  /** A thread with Test Kokoro, started in a step below */
+  let kokoroThread = null;
 
   await step("threads: Iris starts in one thread with Iris, quietly named, the threads hidden", async () => {
     await toConversation();
@@ -2179,15 +2200,15 @@ try {
     check((await threads()).open === null, "the new thread is stored before anything is said");
     await shoot("new");
     // A persona's voice plays from its tile
-    await personaTile("HAL").hover();
+    await personaTile("Test Kokoro").hover();
     const since = Date.now();
-    await personaTile("HAL").locator("button.play").click();
+    await personaTile("Test Kokoro").locator("button.play").click();
     await eventAfter("audio.output", since, (data) => data.rms > 0, 90_000);
     await voiceDone();
-    await personaTile("HAL").locator("button.pick").click();
-    await until("HAL for the new thread", () => config().persona === "HAL", 60_000);
-    check(await personaTile("HAL").evaluate((el) => el.classList.contains("active")), "HAL is not marked");
-    check(config().wake_word === "HAL", `HAL is woken by ${config().wake_word}`);
+    await personaTile("Test Kokoro").locator("button.pick").click();
+    await until("Test Kokoro for the new thread", () => config().persona === "Test Kokoro", 60_000);
+    check(await personaTile("Test Kokoro").evaluate((el) => el.classList.contains("active")), "Test Kokoro is not marked");
+    check(config().wake_word === "Test Kokoro", `Test Kokoro is woken by ${config().wake_word}`);
     // The first message starts the thread
     const known = new Set((await threads()).threads.map((t) => t.id));
     const isNew = (call) => call.method === "threads.list" && call.result?.threads?.some((t) => !known.has(t.id));
@@ -2200,28 +2221,28 @@ try {
       const ids = await sidebar.locator(".item").evaluateAll((items) => items.map((i) => Number(i.dataset.thread)));
       return ids.some((id) => !known.has(id));
     }, 10_000);
-    check(done.data.text.trim(), "HAL did not answer");
+    check(done.data.text.trim(), "Test Kokoro did not answer");
     await voiceDone();
     const listed = await stored(firstThread);
-    halThread = listed.open;
-    check(listed.threads.find((t) => t.id === halThread).persona === "hal", "the thread is not HAL's");
+    kokoroThread = listed.open;
+    check(listed.threads.find((t) => t.id === kokoroThread).persona === "test-kokoro", "the thread is not Test Kokoro's");
     // Titled by its first topic once one is filed, never by the message
-    check(listed.threads.find((t) => t.id === halThread).title !== FIRST, "the thread is titled by its first message");
-    await until("HAL's label", async () => (await threadLabel()) === "HAL");
-    await threadItem(halThread).waitFor({ timeout: 5000 });
+    check(listed.threads.find((t) => t.id === kokoroThread).title !== FIRST, "the thread is titled by its first message");
+    await until("Test Kokoro's label", async () => (await threadLabel()) === "Test Kokoro");
+    await threadItem(kokoroThread).waitFor({ timeout: 5000 });
     check(!(await personaTiles.count()), "the personas still show");
     await shoot("second");
   });
 
   await step("threads: switching brings each thread's transcript, memory and voice", async () => {
-    const halVoice = config().tts_voice;
+    const kokoroVoice = config().tts_voice;
     await openThread(firstThread);
     await until("Iris again", () => config().persona === "Iris", 60_000);
-    check(config().tts_voice !== halVoice, "the voice did not follow the thread");
+    check(config().tts_voice !== kokoroVoice, "the voice did not follow the thread");
     check((await threadLabel()) === "Iris", "the label did not follow");
     await until("Iris's transcript", async () => (await page.locator(".bubble.assistant").count()) > 0, 10_000);
     check(!(await page.locator(".bubble.user", { hasText: FIRST }).count()),
-      "HAL's thread shows in Iris's");
+      "Test Kokoro's thread shows in Iris's");
     // The memory panel is the thread's
     await page.locator('button[title="Memory"]').click();
     const memoryPanel = page.locator('aside[aria-label="Memory"]');
@@ -2236,23 +2257,20 @@ try {
     if (sidebarBox) check(sidebarBox.x + sidebarBox.width <= memoryBox.x, "memory is not right of the threads");
     await shoot("memory");
     await page.locator('button[title="Close memory"]').click();
-    // HAL's file, edited while Iris speaks, is taken on as his thread opens
-    const hal = await rpc("persona.get", { id: "hal" });
-    const halFile = path.join(coreHome, ".iris", "personas", "hal.yaml");
+    // Test Kokoro's file, edited while Iris speaks, is taken on as its thread opens
+    const kokoro = TEST_PERSONAS["test-kokoro"];
     const edit = "Speak like a test persona.";
-    fs.mkdirSync(path.dirname(halFile), { recursive: true });
-    fs.writeFileSync(halFile, ["name", "engine", "voice", "speed"].map((key) => `${key}: ${JSON.stringify(hal[key])}`)
-      .concat(`description: ${JSON.stringify(`${hal.description.trim()}\n${edit}`)}`).join("\n") + "\n");
+    writePersona("test-kokoro", { ...kokoro, description: `${kokoro.description}\n${edit}` });
     await quiet(1500);  // the look at the file in use passes it by
-    await openThread(halThread);
-    await until("HAL again", () => config().persona === "HAL" && config().tts_voice === halVoice, 60_000);
-    check((await rpc("e2e.memory")).prompt.includes(edit), "HAL's edited file was not taken on");
-    fs.rmSync(halFile);
-    await until("HAL as shipped again", async () => !(await rpc("e2e.memory")).prompt.includes(edit), 15_000);
+    await openThread(kokoroThread);
+    await until("Test Kokoro again", () => config().persona === "Test Kokoro" && config().tts_voice === kokoroVoice, 60_000);
+    check((await rpc("e2e.memory")).prompt.includes(edit), "Test Kokoro's edited file was not taken on");
+    writePersona("test-kokoro", kokoro);
+    await until("Test Kokoro as before", async () => !(await rpc("e2e.memory")).prompt.includes(edit), 15_000);
     await page.locator(".bubble.user", { hasText: FIRST }).waitFor({ timeout: 10_000 });
     await page.locator('button[title="Memory"]').click();
-    const halTitle = async () => (await threads()).threads.find((t) => t.id === halThread).title || "New thread";
-    await until("HAL's thread in memory", async () => (await title.innerText()) === (await halTitle()), 5000);
+    const kokoroTitle = async () => (await threads()).threads.find((t) => t.id === kokoroThread).title || "New thread";
+    await until("Test Kokoro's thread in memory", async () => (await title.innerText()) === (await kokoroTitle()), 5000);
     const topics = await rpc("memory.topics");
     const listed = await memoryPanel.locator(".min-h-0 > div").count();
     check(listed === topics.topics.length, `the memory panel lists ${listed} topics, the thread has ${topics.topics.length}`);
@@ -2276,7 +2294,7 @@ try {
     check((await state()) === "listening", `Iris is ${await state()} after opening the open thread`);
     await rpc("mic.set", { on: false });
     await rpc("wake.set", { on: true });
-    await openThread(halThread);
+    await openThread(kokoroThread);
   });
 
   await step("threads: switching while Iris replies asks first, and only then stops the reply", async () => {
@@ -2293,7 +2311,7 @@ try {
     // Cancel: nothing happens, and the reply goes on
     await dialog.locator("button", { hasText: "Cancel" }).click();
     await dialog.waitFor({ state: "detached", timeout: 5000 });
-    check((await threads()).open === halThread, "Cancel switched threads");
+    check((await threads()).open === kokoroThread, "Cancel switched threads");
     check(await replying(), `the reply did not go on: Iris is ${await state()}`);
     // Switch: the reply stops, the thread opens, and listening pauses
     await until("Iris to be still replying", replying, 10_000);
@@ -2304,8 +2322,8 @@ try {
     await until("the reply to stop and listening to pause", async () => (await state()) === "paused", 15_000);
     await eventAfter("chat.done", since, () => true, 30_000);
     // Not replying: it switches at once
-    await threadItem(halThread).locator("button.open").click();
-    await until("HAL's thread", async () => (await threads()).open === halThread, 30_000);
+    await threadItem(kokoroThread).locator("button.open").click();
+    await until("Test Kokoro's thread", async () => (await threads()).open === kokoroThread, 30_000);
     check(!(await dialog.count()), "asked while Iris was not replying");
   });
 
@@ -2325,18 +2343,18 @@ try {
     await openStage("Memory");
     await setSwitch("Remember conversations", true, () => config().remember === true);
     await toConversation();
-    // Amnesia in HAL's thread: not in the first, and back with HAL's
+    // Amnesia in Test Kokoro's thread: not in the first, and back with Test Kokoro's
     await amnesiaButton.click();
-    await until("amnesia in HAL's thread", () => config().amnesia === true);
+    await until("amnesia in Test Kokoro's thread", () => config().amnesia === true);
     await openThread(firstThread);
     await until("the first thread remembering", () => config().amnesia === false && config().persona === "Iris", 60_000);
-    await openThread(halThread);
-    await until("amnesia back with HAL's thread", () => config().amnesia === true && config().persona === "HAL", 60_000);
+    await openThread(kokoroThread);
+    await until("amnesia back with Test Kokoro's thread", () => config().amnesia === true && config().persona === "Test Kokoro", 60_000);
     await openSettings();
     check((await stageValue("Memory")) === "Paused", `Memory shows ${await stageValue("Memory")}`);
     await toConversation();
     await amnesiaButton.click();
-    await until("HAL's thread remembering", () => config().amnesia === false);
+    await until("Test Kokoro's thread remembering", () => config().amnesia === false);
   });
 
   await step("threads: the pipeline tags what the persona and the thread govern, and nothing else changes", async () => {
@@ -2349,23 +2367,23 @@ try {
     check(JSON.stringify(labels) === JSON.stringify(expected), `stages: ${labels.join(", ")}`);
     const tagOf = (label) => stage(label).locator(".tag");
     check((await stageValue("Wake word")) === config().wake_word, `the wake word shows ${await stageValue("Wake word")}`);
-    check((await tagOf("Wake word").innerText()).includes("HAL"), "the wake word is not tagged with HAL");
-    check((await tagOf("Voice").innerText()).includes("HAL"), "the voice is not tagged with HAL");
+    check((await tagOf("Wake word").innerText()).includes("Test Kokoro"), "the wake word is not tagged with Test Kokoro");
+    check((await tagOf("Voice").innerText()).includes("Test Kokoro"), "the voice is not tagged with Test Kokoro");
     check(!(await stage("Voice").locator(".meta").count()), "the voice still names the persona beside it");
-    check((await stageValue("Persona")) === "HAL", `the persona shows ${await stageValue("Persona")}`);
-    const halTitle = (await threads()).threads.find((t) => t.id === halThread).title || "New thread";
-    check((await tagOf("Persona").innerText()).includes(halTitle), "the persona is not tagged with the thread");
+    check((await stageValue("Persona")) === "Test Kokoro", `the persona shows ${await stageValue("Persona")}`);
+    const kokoroTitle = (await threads()).threads.find((t) => t.id === kokoroThread).title || "New thread";
+    check((await tagOf("Persona").innerText()).includes(kokoroTitle), "the persona is not tagged with the thread");
     for (const label of ["Microphone", "Turn end", "Recognition", "Language model", "Tools", "Memory", "Output"]) {
       check(!(await tagOf(label).count()), `${label} is tagged`);
     }
     await shoot("pipeline");
     // A tag opens where its value is set: the persona editor, and the thread
     await tagOf("Wake word").click();
-    await until("HAL's editor", async () => (await page.locator("input.title").inputValue().catch(() => "")) === "HAL", 10_000);
+    await until("Test Kokoro's editor", async () => (await page.locator("input.title").inputValue().catch(() => "")) === "Test Kokoro", 10_000);
     check(!(await inspector.locator("h2", { hasText: "Wake word" }).count()), "the tag opened the inspector");
     await openSettings();
     await tagOf("Voice").click();
-    await until("HAL's editor", async () => (await page.locator("input.title").inputValue().catch(() => "")) === "HAL", 10_000);
+    await until("Test Kokoro's editor", async () => (await page.locator("input.title").inputValue().catch(() => "")) === "Test Kokoro", 10_000);
     await openSettings();
     await stage("Persona").click();
     await page.locator("textarea").waitFor({ timeout: 5000 });
@@ -2400,8 +2418,8 @@ try {
     // A ring opens its thread
     await sidebar.locator(`.ring-item[data-thread="${firstThread}"]`).click();
     await until("the first thread", async () => (await threads()).open === firstThread, 30_000);
-    await sidebar.locator(`.ring-item[data-thread="${halThread}"]`).click();
-    await until("HAL's thread", async () => (await threads()).open === halThread, 30_000);
+    await sidebar.locator(`.ring-item[data-thread="${kokoroThread}"]`).click();
+    await until("Test Kokoro's thread", async () => (await threads()).open === kokoroThread, 30_000);
     // Hidden from the title bar, and shown again as it was: a strip
     await page.locator('button[title="Threads"]').click();
     await sidebar.waitFor({ state: "detached", timeout: 5000 });
@@ -2418,13 +2436,13 @@ try {
     await page.reload();
     const started = await until("the app to start Iris", () =>
       calls.find((c) => c.at >= restarted && c.method === "assistant.start"), 30_000);
-    check(started.params.thread === halThread, `Iris was started in thread ${started.params.thread}`);
+    check(started.params.thread === kokoroThread, `Iris was started in thread ${started.params.thread}`);
     await eventAfter("config", restarted, () => true, 180_000);
     await rpc("mic.set", { on: false });
-    await until("HAL", () => config().persona === "HAL", 60_000);
-    check((await threads()).open === halThread, "another thread is open");
+    await until("Test Kokoro", () => config().persona === "Test Kokoro", 60_000);
+    check((await threads()).open === kokoroThread, "another thread is open");
     await page.locator(".bubble.user", { hasText: FIRST }).waitFor({ timeout: 30_000 });
-    await until("HAL's label", async () => (await threadLabel()) === "HAL", 10_000);
+    await until("Test Kokoro's label", async () => (await threadLabel()) === "Test Kokoro", 10_000);
     // The sidebar is as it was left: a strip
     await sidebar.waitFor({ timeout: 5000 });
     check(await sidebar.evaluate((el) => el.classList.contains("strip")), "the strip was not kept");
@@ -2441,31 +2459,31 @@ try {
   await step("threads: forgetting one from its menu, the open one too, leaves no trace", async () => {
     await openThread(firstThread);
     await until("Iris", () => config().persona === "Iris", 60_000);
-    // HAL's thread, from its menu, confirmed in place
+    // Test Kokoro's thread, from its menu, confirmed in place
     await showThreads(true);
-    await threadItem(halThread).hover();
-    await threadItem(halThread).locator("button.more").click();
+    await threadItem(kokoroThread).hover();
+    await threadItem(kokoroThread).locator("button.more").click();
     await shoot("menu");
-    await threadItem(halThread).locator(".menu button", { hasText: "Forget this thread" }).click();
-    await threadItem(halThread).locator(".menu button", { hasText: "Confirm forget" }).click();
-    await threadItem(halThread).waitFor({ state: "detached", timeout: 10_000 });
-    check(!(await threads()).threads.some((t) => t.id === halThread), "HAL's thread is still there");
+    await threadItem(kokoroThread).locator(".menu button", { hasText: "Forget this thread" }).click();
+    await threadItem(kokoroThread).locator(".menu button", { hasText: "Confirm forget" }).click();
+    await threadItem(kokoroThread).waitFor({ state: "detached", timeout: 10_000 });
+    check(!(await threads()).threads.some((t) => t.id === kokoroThread), "Test Kokoro's thread is still there");
     check((await threads()).open === firstThread, "the open thread changed");
-    // A thread with Computer, forgotten while open, from its menu too
-    await newThreadWith("Computer");
+    // A thread with Test Sarah, forgotten while open, from its menu too
+    await newThreadWith("Test Sarah");
     const typed = await ask("Reply with one word: ready.");
     await eventAfter("chat.done", typed, () => true, 180_000);
     await voiceDone();
-    const computer = (await stored(firstThread)).open;
-    await threadItem(computer).hover();
-    await threadItem(computer).locator("button.more").click();
-    await threadItem(computer).locator(".menu button", { hasText: "Forget this thread" }).click();
+    const sarahThread = (await stored(firstThread)).open;
+    await threadItem(sarahThread).hover();
+    await threadItem(sarahThread).locator("button.more").click();
+    await threadItem(sarahThread).locator(".menu button", { hasText: "Forget this thread" }).click();
     await shoot("forget");
-    await threadItem(computer).locator(".menu button", { hasText: "Confirm forget" }).click();
-    await until("the thread to be gone", async () => !(await threads()).threads.some((t) => t.id === computer), 10_000);
+    await threadItem(sarahThread).locator(".menu button", { hasText: "Confirm forget" }).click();
+    await until("the thread to be gone", async () => !(await threads()).threads.some((t) => t.id === sarahThread), 10_000);
     // What is left is a new thread with the same persona, and nothing of it
     check((await threads()).open === null, "a stored thread is open");
-    check(config().persona === "Computer", `the persona is ${config().persona}`);
+    check(config().persona === "Test Sarah", `the persona is ${config().persona}`);
     await until("an empty conversation", async () => !(await page.locator(".bubble.user, .bubble.assistant").count()), 5000);
     // The memory panel shows the thread and its topics, and forgets nothing itself
     await page.locator('button[title="Memory"]').click();
@@ -2485,7 +2503,7 @@ try {
   const chips = page.locator('[role="radiogroup"][aria-label="Role"] .chip');
   const chip = (name) => chips.filter({ hasText: exactly(name) });
   const spaced = (text) => text.replace(/\s+/g, " ").trim();
-  /** A thread with HAL as a language partner, started in a step below */
+  /** A thread with Test Kokoro as a language partner, started in a step below */
   let partnerThread = null;
 
   await step("roles: a new thread is started with a persona and a role from its empty screen", async () => {
@@ -2498,8 +2516,8 @@ try {
     check(await personaTile("Iris").evaluate((el) => el.classList.contains("active")), "Iris is not chosen at first");
     await chip("Language partner").click();
     await until("a language partner for the new thread", () => config().role === "language-partner", 30_000);
-    await personaTile("HAL").locator("button.pick").click();
-    await until("HAL", () => config().persona === "HAL", 60_000);
+    await personaTile("Test Kokoro").locator("button.pick").click();
+    await until("Test Kokoro", () => config().persona === "Test Kokoro", 60_000);
     check(config().role === "language-partner", "choosing the persona dropped the role");
     check(await chip("Language partner").evaluate((el) => el.classList.contains("active")), "Language partner is not marked");
     await shoot("roles-new");
@@ -2510,9 +2528,9 @@ try {
     partnerThread = listed.open;
     const thread = listed.threads.find((t) => t.id === partnerThread);
     check(thread && thread.role === "language-partner" && thread.role_name === "Language partner", `the thread's role is ${thread?.role}`);
-    await until("the label with the role", async () => spaced(await threadLabel()) === "HAL · Language partner", 10_000);
+    await until("the label with the role", async () => spaced(await threadLabel()) === "Test Kokoro · Language partner", 10_000);
     await threadItem(partnerThread).waitFor({ timeout: 5000 });
-    check(spaced(await threadItem(partnerThread).locator(".who").innerText()) === "HAL · Language partner", "the sidebar does not name the role");
+    check(spaced(await threadItem(partnerThread).locator(".who").innerText()) === "Test Kokoro · Language partner", "the sidebar does not name the role");
     await shoot("roles-thread");
   });
 
@@ -2525,13 +2543,13 @@ try {
     await until("Iris without a role", () => config().persona === "Iris" && !config().role, 60_000);
     check(spaced(await threadLabel()) === "Iris", `the label is ${await threadLabel()}`);
     await openThread(partnerThread);
-    await until("HAL as a language partner again", () => config().persona === "HAL" && config().role === "language-partner", 60_000);
-    await until("the label with the role", async () => spaced(await threadLabel()) === "HAL · Language partner", 10_000);
+    await until("Test Kokoro as a language partner again", () => config().persona === "Test Kokoro" && config().role === "language-partner", 60_000);
+    await until("the label with the role", async () => spaced(await threadLabel()) === "Test Kokoro · Language partner", 10_000);
   });
 
   await step("roles: the pipeline's persona names the thread's role", async () => {
     await openSettings();
-    check(spaced(await stageValue("Persona")) === "HAL · Language partner", `the persona shows ${await stageValue("Persona")}`);
+    check(spaced(await stageValue("Persona")) === "Test Kokoro · Language partner", `the persona shows ${await stageValue("Persona")}`);
     const partnerTitle = (await threads()).threads.find((t) => t.id === partnerThread).title || "New thread";
     check((await stage("Persona").locator(".tag").innerText()).includes(partnerTitle),
       "the persona is not tagged with the thread");
@@ -2625,21 +2643,21 @@ try {
     const bargeIn = config().barge_in_available;
     if (bargeIn) await setSwitch("Interrupt by voice", false, () => config().barge_in === false);
     await setSwitch("Speak replies", false, () => config().speak_replies === false);
-    // A thread with HAL, which a restart opens again
+    // A thread with Test Kokoro, which a restart opens again
     const irisThread = (await rpc("threads.list")).open;
     await toConversation();
     await atRest();
     await page.locator('button[title="Threads"]').click();
     await page.locator('aside[aria-label="Threads"] button.new').click();
-    await page.locator('[aria-label="Persona"] .tile', { hasText: "HAL" }).locator("button.pick").click();
-    await until("HAL", () => config().persona === "HAL", 60_000);
+    await page.locator('[aria-label="Persona"] .tile', { hasText: "Test Kokoro" }).locator("button.pick").click();
+    await until("Test Kokoro", () => config().persona === "Test Kokoro", 60_000);
     await page.locator('button[title="Threads"]').click();
-    // HAL's words: his name, and no sleep word
-    check(config().wake_word === "HAL", `HAL is woken by ${config().wake_word}`);
-    check(config().sleep_word === "", `HAL sleeps by ${config().sleep_word}`);
+    // Test Kokoro's words: its name, and no sleep word
+    check(config().wake_word === "Test Kokoro", `Test Kokoro is woken by ${config().wake_word}`);
+    check(config().sleep_word === "", `Test Kokoro sleeps by ${config().sleep_word}`);
     const said = await ask("Reply with one word: yes.");
     await eventAfter("chat.done", said, () => true, 180_000);
-    await until("HAL's thread to be stored", async () => (await rpc("threads.list")).open !== null, 15_000);
+    await until("Test Kokoro's thread to be stored", async () => (await rpc("threads.list")).open !== null, 15_000);
     // Remembered before amnesia: what was typed
     await openStage("Memory");
     await setSwitch("Remember conversations", false, () => config().remember === false);
@@ -2654,14 +2672,14 @@ try {
     await page.evaluate(() => {
       const kept = JSON.parse(localStorage.getItem("iris.settings") ?? "{}");
       delete kept.wake_on;
-      localStorage.setItem("iris.settings", JSON.stringify({ ...kept, wake_word: "HAL" }));
+      localStorage.setItem("iris.settings", JSON.stringify({ ...kept, wake_word: "Test Kokoro" }));
     });
     await page.reload();
     const started = await until("the app to start Iris", () =>
       calls.find((c) => c.at >= restarted && c.method === "assistant.start"), 30_000);
     const options = started.params;
     const expected = {
-      persona: "hal",
+      persona: "test-kokoro",
       llm_model: kept.llm_model,
       ollama_host: kept.ollama_host || undefined,
       speak_replies: false,

@@ -25,6 +25,7 @@ from iris.tts import voice_languages
 from irisdev.voicetest import checks as c
 from irisdev.voicetest.fakesight import color_of
 from irisdev.voicetest.fakeweb import Each
+from irisdev.voicetest.isolation import TEST_PERSONAS
 from irisdev.voicetest.script import (
     At,
     Check,
@@ -2599,16 +2600,16 @@ PERSONAS = [
         "switching persona mid-conversation",
         [
             Turn(["What is the capital of France?"], reply_mentions=["Paris"], checks=[voice_is("kyutai:anna")]),
-            Turn(["And roughly how many people live there?"], actions=[(At.finished(0.0), ("persona", "hal"))],
+            Turn(["And roughly how many people live there?"], actions=[(At.finished(0.0), ("persona", "test-kokoro"))],
                  at=At.event("config", 0.6), reply_mentions=["million"],
-                 checks=[voice_is("kokoro:bm_lewis"), c.request_holds(["HAL 9000", "You are now HAL"])]),
+                 checks=[voice_is("kokoro:bm_lewis"), c.request_holds(["calm, precise and polite", "You are now Test Kokoro"])]),
             Turn(["Explain in detail how a rainbow forms."], listen_through=True, checks=[voice_is("kokoro:bm_lewis")]),
             Turn(["Sorry, stop. What is two plus two?"], at=At.reply_audible(3.0),
                  checks=[voice_is("kokoro:bm_lewis")]),
-            Turn(["Tell me a long story about the sea."], actions=[(At.reply_audible(2.0), ("persona", "computer"))],
+            Turn(["Tell me a long story about the sea."], actions=[(At.reply_audible(2.0), ("persona", "test-sarah"))],
                  checks=[no_clip_after_done()]),
             Turn(["What day comes after Monday?"], reply_mentions=["Tuesday"],
-                 checks=[voice_is("kokoro:af_sarah"), notes_in_order(["You are now HAL", "You are now Computer"])]),
+                 checks=[voice_is("kokoro:af_sarah"), notes_in_order(["You are now Test Kokoro", "You are now Test Sarah"])]),
             Turn(["What was the first thing I asked you?"], actions=[(At.finished(0.0), ("persona", "iris"))],
                  at=At.event("config", 0.6), reply_mentions=["France", "Paris"], checks=[voice_is("kyutai:anna")]),
         ],
@@ -2640,14 +2641,15 @@ def persona_across_languages(persona: str, label: str, languages: list[str]) -> 
     editor tells them; in any other the reply is shown, not spoken by
     another voice, and the user is told so. Then the user goes back to
     English."""
-    shipped = Persona.from_file(BUILTIN_DIR / f"{persona}.yaml")
-    spoken = voice_languages(shipped.engine, shipped.voice)
+    fields = TEST_PERSONAS.get(persona)
+    speaker = Persona(**fields) if fields else Persona.from_file(BUILTIN_DIR / f"{persona}.yaml")
+    spoken = voice_languages(speaker.engine, speaker.voice)
     turns = []
     for language in languages:
         note = asks_for(NAME_OF[language]) if language != "en" else asks_for_nothing()
         heard = heard_as(language) if language in spoken else {"expect": "shown"}
         turns.append(Turn(**SAID_IN[language], reply_language=language, checks=[note, voice_is(
-            f"{shipped.engine}:{shipped.voice}")], **heard))
+            f"{speaker.engine}:{speaker.voice}")], **heard))
     turns.append(Turn(["Thank you. Back to English: what day comes after Monday?"], reply_language="en",
                       checks=[asks_for_english()], spoken_share=SPOKEN_SHARE))
     return Conversation(
@@ -2657,13 +2659,13 @@ def persona_across_languages(persona: str, label: str, languages: list[str]) -> 
     )
 
 
-# HAL and Computer speak with Kokoro, whose voices speak no German or Dutch;
+# The test personas speak with Kokoro, whose voices speak no German or Dutch;
 # Iris speaks with Pocket TTS, which speaks no Hindi, Japanese or Chinese.
 # No other voice speaks for them (Spanish, which needs Pocket TTS's Spanish
 # model, is in "across languages")
 PERSONAS += [
-    persona_across_languages("hal", "Kokoro", ["en", "fr", "pt", "es", "it", "hi", "ja", "zh", "de", "nl"]),
-    persona_across_languages("computer", "Kokoro", ["en", "es", "pt", "hi", "de"]),
+    persona_across_languages("test-kokoro", "Kokoro", ["en", "fr", "pt", "es", "it", "hi", "ja", "zh", "de", "nl"]),
+    persona_across_languages("test-sarah", "Kokoro", ["en", "es", "pt", "hi", "de"]),
     persona_across_languages("iris", "Kyutai", ["en", "fr", "it", "pt", "hi", "ja", "zh", "de", "nl"]),
 ]
 

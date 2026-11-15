@@ -428,6 +428,21 @@ def test_a_thread_whose_persona_is_gone_opens_with_iris(dirs, store):
     assert controller.open_thread(999)["ok"] is False
 
 
+def test_a_user_of_hal_who_kept_no_copy_goes_on_with_iris(store):
+    """HAL and Computer were shipped once. A user without a copy of their
+    own goes on in the thread they talked in last, with Iris."""
+    assert personas.find_persona("hal") is None and personas.get_persona("hal").id == "iris"
+    thread = store.create_thread("hal")
+    _exchange(store, thread, "Open the pod bay doors", "I'm afraid I can't.")
+    controller, _ = _controller(store)
+
+    controller._enter_first_thread(LAST_THREAD)
+    assert controller.assistant.conversation.thread == thread
+    assert controller.assistant.persona.id == "iris"
+    listed = controller.threads_list()["threads"]
+    assert (listed[0]["persona"], listed[0]["persona_name"]) == ("iris", "Iris")
+
+
 def test_iris_starts_in_the_thread_asked_for_else_the_one_talked_in_last(dirs, store):
     iris, hal = _two_threads(store)
     controller, _ = _controller(store)

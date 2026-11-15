@@ -688,7 +688,7 @@ class VoiceAssistant:
 
     def _is_sleep_word(self, text: str) -> bool:
         """Whether this is the sleep word, said on its own or with the wake
-        word or the persona's name ("Goodbye, HAL" for a "Hey HAL")."""
+        word or the persona's name ("Goodbye, Iris" for a "Hey Iris")."""
         if not self.sleep_word:
             return False
         return any(

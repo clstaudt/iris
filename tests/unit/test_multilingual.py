@@ -178,12 +178,19 @@ def test_a_kyutai_voice_stays_itself_in_each_language(voice):
 KOKORO_CODE = {**KOKORO_LANGUAGES}
 POCKET_MODEL = {**POCKET_LANGUAGES}
 SHIPPED = {p.stem: Persona.from_file(p) for p in BUILTIN_DIR.glob("*.yaml")}
+# The personas tried: those shipped (Iris alone), and two of a user's with
+# Kokoro voices, as HAL and Computer had when they were shipped
+TRIED = {
+    **SHIPPED,
+    "test-kokoro": Persona("Test Kokoro", "Calm.", voice="bm_lewis", speed=1.1, engine="kokoro", persona_id="test-kokoro"),
+    "test-sarah": Persona("Test Sarah", "Friendly.", voice="af_sarah", speed=1.1, engine="kokoro", persona_id="test-sarah"),
+}
 
 
 def spoken_with(persona_id: str, language: str):
-    """(engine, voice, code) a shipped persona's reply in this language is to
-    be spoken with, or None when its voice does not speak the language."""
-    persona = SHIPPED[persona_id]
+    """(engine, voice, code) a persona's reply in this language is to be
+    spoken with, or None when its voice does not speak the language."""
+    persona = TRIED[persona_id]
     if language not in voice_languages(persona.engine, persona.voice):
         return None
     if persona.engine == "kyutai":
@@ -194,11 +201,11 @@ def spoken_with(persona_id: str, language: str):
     return "kokoro", persona.voice, code
 
 
-# The languages each shipped persona's voice speaks, pinned
-SHIPPED_SPEAK = {
+# The languages each persona's voice speaks, pinned
+SPEAKS = {
     "iris": ["en", "fr", "it", "de", "es", "pt", "nl"],
-    "hal": ["en", "it", "es", "pt", "zh"],
-    "computer": ["en", "es", "pt", "zh"],
+    "test-kokoro": ["en", "it", "es", "pt", "zh"],
+    "test-sarah": ["en", "es", "pt", "zh"],
 }
 # The language each code of the engines stands for
 CODE_LANGUAGE = {
@@ -215,7 +222,7 @@ def test_the_persona_editor_is_told_irises_languages_and_each_voices():
     assert [language["code"] for language in voices["languages"]] == list(SPOKEN)
     assert voices["languages"][3] == {"code": "de", "name": "German"}
     kyutai = {voice["id"]: voice for voice in voices["engines"]["kyutai"]}
-    assert kyutai["anna"]["languages"] == SHIPPED_SPEAK["iris"]
+    assert kyutai["anna"]["languages"] == SPEAKS["iris"]
     # The language a voice was made for comes first
     assert kyutai["juergen"]["languages"][0] == "de"
 
@@ -238,7 +245,7 @@ def engines_used():
     """Kokoro and Pocket TTS stand-ins, which note the voice and the
     language code they are asked to speak with (no models, no sound).
 
-    Yields spoken_with(persona_id, language) for a shipped persona, and
+    Yields spoken_with(persona_id, language) for a persona tried, and
     spoken_with(engine, language, voice=...) for a persona on that voice;
     preview holds the engine, voice and speed SpeechGenerator.generate is
     given for a voice preview."""
@@ -256,7 +263,7 @@ def engines_used():
             if voice:
                 generator = SpeechGenerator(who, voice)
             else:
-                persona = Persona.from_file(BUILTIN_DIR / f"{who}.yaml")
+                persona = TRIED[who]
                 generator = SpeechGenerator(persona.engine, persona.voice, persona.speed)
             pocket.reset_mock()
             kokoro.reset_mock()
@@ -286,13 +293,13 @@ def engines_used():
         yield spoken_with
 
 
-@pytest.mark.parametrize("persona_id", sorted(SHIPPED))
-def test_each_shipped_persona_speaks_the_languages_pinned(persona_id):
-    persona = SHIPPED[persona_id]
-    assert voice_languages(persona.engine, persona.voice) == SHIPPED_SPEAK[persona_id]
+@pytest.mark.parametrize("persona_id", sorted(TRIED))
+def test_each_persona_speaks_the_languages_pinned(persona_id):
+    persona = TRIED[persona_id]
+    assert voice_languages(persona.engine, persona.voice) == SPEAKS[persona_id]
 
 
-@pytest.mark.parametrize("persona_id", sorted(SHIPPED))
+@pytest.mark.parametrize("persona_id", sorted(TRIED))
 @pytest.mark.parametrize("language", SPOKEN)
 def test_each_language_is_spoken_with_the_personas_engine_and_voice_or_not_at_all(
     engines_used, persona_id, language
@@ -302,7 +309,7 @@ def test_each_language_is_spoken_with_the_personas_engine_and_voice_or_not_at_al
     assert engines_used(persona_id, language) == spoken_with(persona_id, language)
 
 
-@pytest.mark.parametrize("persona_id", sorted(SHIPPED))
+@pytest.mark.parametrize("persona_id", sorted(TRIED))
 @pytest.mark.parametrize("language", SPOKEN)
 def test_no_language_is_spoken_with_the_code_of_another(engines_used, persona_id, language):
     """Italian once came out of the Portuguese model: it sounded Portuguese."""
@@ -310,10 +317,10 @@ def test_no_language_is_spoken_with_the_code_of_another(engines_used, persona_id
     if spoken is not None:
         engine, voice, code = spoken
         assert CODE_LANGUAGE[code] == language
-        assert (engine, voice) == (SHIPPED[persona_id].engine, SHIPPED[persona_id].voice)
+        assert (engine, voice) == (TRIED[persona_id].engine, TRIED[persona_id].voice)
 
 
-@pytest.mark.parametrize("persona_id", sorted(SHIPPED))
+@pytest.mark.parametrize("persona_id", sorted(TRIED))
 def test_a_language_no_voice_speaks_is_not_spoken(engines_used, persona_id):
     assert engines_used(persona_id, "ru") is None
 
