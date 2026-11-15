@@ -1,6 +1,7 @@
 """Unit tests for long-term memory: storage, filing, recall and context."""
 
 import json
+import logging
 import threading
 import time
 from unittest.mock import patch
@@ -176,15 +177,25 @@ def test_a_topic_number_that_does_not_exist_starts_a_new_topic(store):
     assert store.unfiled_exchanges() == []
 
 
-def test_failed_filing_leaves_turns_for_next_time(store):
+def test_failed_filing_leaves_turns_for_next_time(store, monkeypatch, caplog):
     _exchange(store, "Plan a Lisbon trip", "Sure.")
+    _exchange(store, "My sister's birthday is November 3rd", "Noted.")
+    asked = []
 
-    def broken(messages, schema):
+    def broken(messages, schema, abort=lambda: False):
+        asked.append(messages)
         raise ConnectionError("server away")
 
+    clock = [1000.0]
+    monkeypatch.setattr(memory_module.time, "monotonic", lambda: clock[0])
     keeper = MemoryKeeper(store, broken)
-    keeper._file()
-    assert len(store.unfiled_exchanges()) == 1
+    clock[0] += memory_module.QUIET_BEFORE_FILING + 1  # quiet long enough to file
+    with caplog.at_level(logging.WARNING, logger="iris.memory"):
+        keeper._file()
+    # The server is away: the round ends at once, and says why
+    assert len(asked) == 1
+    assert caplog.messages == ["Memory filing failed: server away"]
+    assert len(store.unfiled_exchanges()) == 2
 
 
 # -- tools -------------------------------------------------------------------
@@ -360,6 +371,7 @@ def test_a_call_in_flight_is_cut_off_when_the_conversation_resumes(fake_ollama):
 
 
 LISBON = '{"remember": true, "topic_id": 0, "title": "Lisbon trip"}'
+BIRTHDAY = '{"remember": true, "topic_id": 0, "title": "Sister\'s birthday"}'
 
 
 def _answer(request: httpx.Request) -> httpx.Response:
@@ -410,6 +422,70 @@ def test_filing_asks_the_model_to_answer_without_reasoning_first(monkeypatch, ho
     [(to, body)] = sent
     assert to == path
     assert {key: body.get(key) for key in flag} == flag
+
+
+def test_an_empty_reply_is_asked_again_then_left_for_later_while_the_rest_is_filed(
+    store, fake_ollama, caplog
+):
+    _exchange(store, "Plan a Lisbon trip", "Alfama, Belém, Sintra.")
+    _exchange(store, "My sister's birthday is November 3rd", "Noted.")
+    filer = Filer(store, memory_module.chat_json(lambda: None, lambda: "model"))
+    fake_ollama.replies = [
+        # As from a model that spent the whole budget reasoning, twice
+        "",
+        "",
+        BIRTHDAY,
+        '{"summary": "Birthday on November 3rd.", "gist": "Nov 3"}',
+    ]
+    with caplog.at_level(logging.WARNING, logger="iris.memory"):
+        assert filer.file() is True
+    assert caplog.messages == [
+        "Memory filing left the exchange of turn 1 for later: "
+        "model gave no usable JSON, asked twice: ''"
+    ]
+    assert fake_ollama.calls[1][-1]["content"] == "Reply with only the JSON object, nothing else."
+    assert fake_ollama.replies == []
+    # Not lost: still unfiled, and the next exchange was filed all the same
+    assert [e.text for e in store.unfiled_exchanges()] == [
+        "User: Plan a Lisbon trip\nAssistant: Alfama, Belém, Sintra."
+    ]
+    assert [t.title for t in store.topics()] == ["Sister's birthday"]
+    assert store.pending_summaries() == {}
+
+    # The next quiet spell files it
+    fake_ollama.replies = [LISBON, '{"summary": "Lisbon in late October.", "gist": "Lisbon"}']
+    assert filer.file() is True
+    assert store.unfiled_exchanges() == [] and store.pending_summaries() == {}
+    assert sorted(t.title for t in store.topics()) == ["Lisbon trip", "Sister's birthday"]
+
+
+def test_a_summary_without_a_usable_reply_is_left_for_later_while_the_rest_are_written(
+    store, fake_ollama, caplog
+):
+    _exchange(store, "Plan a Lisbon trip", "Alfama, Belém, Sintra.")
+    _exchange(store, "My sister's birthday is November 3rd", "Noted.")
+    filer = Filer(store, memory_module.chat_json(lambda: None, lambda: "model"))
+    fake_ollama.replies = [
+        LISBON,
+        BIRTHDAY,
+        "",
+        "",
+        '{"summary": "Birthday on November 3rd.", "gist": "Nov 3"}',
+    ]
+    with caplog.at_level(logging.WARNING, logger="iris.memory"):
+        assert filer.file() is True
+    assert caplog.messages == [
+        "Memory filing left topic #1's summary for later: "
+        "model gave no usable JSON, asked twice: ''"
+    ]
+    assert store.unfiled_exchanges() == []
+    assert list(store.pending_summaries()) == [1]
+    assert store.topic(2).summary == "Birthday on November 3rd."
+
+    fake_ollama.replies = ['{"summary": "Lisbon in late October.", "gist": "Lisbon"}']
+    assert filer.file() is True
+    assert store.pending_summaries() == {}
+    assert store.topic(1).summary == "Lisbon in late October."
 
 
 def test_an_interrupted_filing_saves_nothing_half_done(store):
