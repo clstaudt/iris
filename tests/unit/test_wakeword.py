@@ -11,6 +11,7 @@ from iris import assistant as assistant_module
 from iris import wakeword
 from iris.assistant import DEFAULT_WAKE_WINDOW, VoiceAssistant
 from iris.events import EventBus
+from iris.personas import Persona
 from iris.tts import SpeechGenerator
 from iris.wakeword import WakeWordDetector, match_sleep_word, match_wake_word
 
@@ -90,6 +91,7 @@ def _bare_assistant(monkeypatch, detector_result):
     a.awake_until = 0.0
     a.wake_window = DEFAULT_WAKE_WINDOW
     a.sleep_word = "That's all"
+    a.persona = Persona("Iris", "Warm.", voice="alba", sleep_word="That's all")
     a._was_dormant = True
     a._last_window_emit = 0.0
     a.pause_event = threading.Event()

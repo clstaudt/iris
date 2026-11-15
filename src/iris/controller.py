@@ -4,6 +4,7 @@ state stream for external UIs such as the Electron shell."""
 
 import importlib.metadata
 import itertools
+import logging
 import queue
 import sys
 import threading
@@ -22,6 +23,7 @@ from iris.personas import (
     find_persona,
     get_persona,
     list_personas,
+    persona_stamp,
     reload_personas,
     save_persona,
     shipped,
@@ -50,6 +52,8 @@ from iris.tts import (
     list_voices,
     voice_language,
 )
+
+logger = logging.getLogger(__name__)
 
 # What a voice says when previewed, in its own language
 PREVIEW_LINES = {
@@ -82,6 +86,9 @@ FLAG_STATE_PRIORITY = (
 
 # How long "speaking" survives a gap in playback, in seconds.
 SPEAKING_HOLD = 0.6
+# Seconds between looks at the file of the persona in use, which may change
+# on disk while Iris runs
+PERSONA_CHECK = 1.0
 
 # Seconds a voice preview before Iris runs is followed at most: its engine
 # loading, then the line said
@@ -162,6 +169,10 @@ class AssistantController:
         self._last_state = "idle"
         self._speaking_until = 0.0
         self._poller_stop = threading.Event()
+        # The file of the persona in use as it was taken on, and when it
+        # was last looked at
+        self._persona_stamp: tuple | None = None
+        self._persona_checked = 0.0
 
         # Silent-mic watchdog: a real microphone always has a noise floor, so
         # a stream of exact zeros means the OS is denying mic access (on macOS,
@@ -262,7 +273,30 @@ class AssistantController:
                     elif self.assistant.hold_event.is_set():
                         state = "typing"
                 self._publish_state(state)
+                if now - self._persona_checked >= PERSONA_CHECK:
+                    self._persona_checked = now
+                    self._follow_persona_file()
             self._poller_stop.wait(0.1)
+
+    def _follow_persona_file(self):
+        """The file of the persona in use changed on disk while Iris ran
+        (edited by hand, or replaced by the user's own copy): Iris takes it
+        on, voice, personality and words, so it never speaks with another
+        voice than the editor shows. Not while a reply is given: that one
+        is heard to its end in its own voice, and the next takes the new."""
+        assistant = self.assistant
+        try:
+            stamp = persona_stamp(assistant.persona.id)
+            if stamp == self._persona_stamp or assistant.replying:
+                return
+            reload_personas()
+            if find_persona(assistant.persona.id) is None:
+                # Gone without a file to fall back to: Iris goes on as it is
+                self._persona_stamp = stamp
+                return
+            self.set_persona(assistant.persona.id)
+        except Exception:
+            logger.exception("The persona's file could not be taken on")
 
     # ------------------------------------------------------------------
     # Commands
@@ -310,7 +344,13 @@ class AssistantController:
     def _run(self, options: dict):
         kwargs = dict(options)
         kwargs["ollama_host"] = self._ollama_host
-        persona_name = kwargs.pop("persona", "iris")
+        persona = get_persona(kwargs.pop("persona", "iris"))
+        # The wake word is one switch; the words are the persona's. A word
+        # given as it is (a test's) is used as given.
+        wake_on = kwargs.pop("wake_on", None)
+        if wake_on is not None:
+            kwargs["wake_word"] = persona.wake_word if wake_on else None
+        kwargs.setdefault("sleep_word", persona.sleep_word)
         # {plugin id: enabled} chosen in the UI; the others follow their default
         kwargs["tools"] = kwargs.pop("tools", {}) or {}
         amnesia = bool(kwargs.pop("amnesia", False))
@@ -332,8 +372,10 @@ class AssistantController:
             self.bus.emit("error", {"message": f"Could not download the speech models: {e}"})
 
         try:
+            # The persona's file as taken on, before Iris runs to compare it
+            self._persona_stamp = persona_stamp(persona.id)
             self.assistant = VoiceAssistant(
-                persona=get_persona(persona_name),
+                persona=persona,
                 event_bus=self.bus,
                 turn_queue=self._turns,
                 plugins=self.plugins.plugins,
@@ -561,8 +603,15 @@ class AssistantController:
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
 
+    def set_wake(self, on: bool) -> dict:
+        """Switch the wake word on (the persona's) or off."""
+        if self.assistant is None:
+            return {"ok": False, "error": "Assistant not running"}
+        return self.set_wake_word(self.assistant.persona.wake_word if on else "")
+
     def set_wake_options(self, window=None, sleep_word=None) -> dict:
-        """How long Iris stays awake after a turn, and its sleep word."""
+        """How long Iris stays awake after a turn, and a sleep word for now
+        (the persona's is set with set_persona_words)."""
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         self.assistant.set_wake_options(window, sleep_word)
@@ -707,7 +756,8 @@ class AssistantController:
                 whisper_engine=kwargs.get("whisper_engine", "auto"),
                 whisper_device=kwargs.get("whisper_device", "auto"),
                 recognition_engine=kwargs.get("recognition_engine", "whisper"),
-                wake_word=kwargs.get("wake_word"),
+                # A sleep word wakes Iris by the wake word, on or off
+                wake_word=kwargs.get("wake_word") or kwargs.get("sleep_word"),
                 tts_dir=kwargs.get("tts_models_dir"),
             ):
                 try:
@@ -1100,6 +1150,7 @@ class AssistantController:
                 f"You are now {persona.name}. Earlier replies in this conversation "
                 f"were given by {previous}; do not continue {previous}'s name or manner."
             )
+        assistant.set_persona_words(persona.wake_word, persona.sleep_word)
         generator = assistant.tts_generator
         generator.engine = persona.engine
         generator.voice = persona.voice
@@ -1119,6 +1170,7 @@ class AssistantController:
                 self.bus.emit("error", {"message": f"Could not load the voice: {e}"})
 
         threading.Thread(target=prepare, daemon=True).start()
+        self._persona_stamp = persona_stamp(persona.id)
         self.bus.emit("config", assistant.config_info())
         return {"ok": True, "persona": name}
 
@@ -1162,6 +1214,50 @@ class AssistantController:
         if self.assistant is not None and self.assistant.persona.id == persona_id:
             self.set_persona(persona_id)
         return {"ok": True, "id": persona_id, **self.list_personas()}
+
+    def set_persona_words(
+        self,
+        persona_id: str | None = None,
+        wake_word: str | None = None,
+        sleep_word: str | None = None,
+    ) -> dict:
+        """Give a persona (the current one, without an id) its wake word or
+        sleep word, as set beside the wake word switch. None leaves a word
+        as it is; an empty wake word is the persona's name again, an empty
+        sleep word none. Nothing is written when nothing changes, so a
+        persona that ships with Iris is copied only when it is changed."""
+        if not persona_id:
+            persona_id = self.assistant.persona.id if self.assistant else "iris"
+        reload_personas()
+        persona = find_persona(persona_id)
+        if persona is None:
+            return {"ok": False, "error": f"Unknown persona: {persona_id}"}
+        settings = persona.to_dict()
+        if wake_word is not None:
+            settings["wake_word"] = wake_word.strip() or persona.name
+        if sleep_word is not None:
+            settings["sleep_word"] = sleep_word.strip()
+        if settings == persona.to_dict():
+            return {"ok": True, "id": persona.id, **self.list_personas()}
+        return self.persona_save({**settings, "id": persona.id})
+
+    def adopt_wake_words(
+        self, persona_id: str | None, wake_word: str | None, sleep_word: str | None
+    ) -> dict:
+        """Iris kept one wake word and one sleep word for every persona
+        before they became each persona's own. The ones a user set become
+        those of the persona in use, so they go on working; whether the
+        wake word was on (it was when there was one) stays the switch."""
+        wake_word, sleep_word = (wake_word or "").strip(), (sleep_word or "").strip()
+        words = {}
+        if wake_word:
+            words["wake_word"] = wake_word
+        if sleep_word:
+            words["sleep_word"] = sleep_word
+        # A persona gone since is Iris, as Iris starts with it
+        persona = get_persona(persona_id or "iris")
+        result = self.set_persona_words(persona.id, **words) if words else {"ok": True}
+        return {**result, "wake_on": bool(wake_word)}
 
     def persona_delete(self, persona_id: str) -> dict:
         """Delete the user's persona, or reset an edited one that ships with

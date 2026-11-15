@@ -26,7 +26,7 @@ from typing import Callable, Optional
 import numpy as np
 import soundfile as sf
 
-from iris.assistant import DEFAULT_SLEEP_WORD, DEFAULT_WAKE_WINDOW, _sleep_chime, _wake_chime
+from iris.assistant import DEFAULT_WAKE_WINDOW, _sleep_chime, _wake_chime
 from irisdev.voicetest.acoustics import (
     AUDIBLE,
     RATE,
@@ -620,7 +620,7 @@ class ScriptedConversations:
             self._warm_up()
         if conversation.wake_options:
             self._set("wake_options", conversation.wake_options, "wake_options",
-                      {"window": DEFAULT_WAKE_WINDOW, "sleep_word": DEFAULT_SLEEP_WORD})
+                      {"window": DEFAULT_WAKE_WINDOW, "sleep_word": ""})
         if conversation.echo is not None:
             space = self.space
             self._saved["echo"] = (space.echo_gain, space.echo_room, space.echo_drive)

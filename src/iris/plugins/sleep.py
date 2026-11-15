@@ -2,9 +2,9 @@
 as the sleep word would. It says its parting words, then listens only for
 its wake word again.
 
-The tool is offered only while a wake word is set, as the sleep word only
-works with one: without a wake word Iris listens to everything, and nothing
-would wake it.
+The tool is offered only while the wake word is on: whether the model ends
+a conversation is up to it, and it may only where the user chose to wake
+Iris by its wake word. The sleep word, said by the user, always works.
 """
 
 from iris.plugin import Plugin, PluginContext, Tool

@@ -229,7 +229,19 @@ def main():
         "memory.set_amnesia": lambda params: controller.set_amnesia(bool(params.get("on"))),
         "assistant.hold": lambda params: controller.hold_listening(bool(params.get("on"))),
         "mic.set": lambda params: controller.set_mic(bool(params.get("on", True))),
-        "wake.set": lambda params: controller.set_wake_word(params.get("word", "")),
+        # {"on": bool} switches the persona's wake word on or off; {"word"}
+        # listens for a word of its own (a test's)
+        "wake.set": lambda params: (
+            controller.set_wake(bool(params["on"]))
+            if "on" in params
+            else controller.set_wake_word(params.get("word", ""))
+        ),
+        "wake.adopt": lambda params: controller.adopt_wake_words(
+            params.get("persona"), params.get("wake_word"), params.get("sleep_word")
+        ),
+        "persona.words": lambda params: controller.set_persona_words(
+            params.get("id"), params.get("wake_word"), params.get("sleep_word")
+        ),
         "setup.info": lambda params: controller.setup_info(),
         "setup.download": lambda params: controller.setup_download(params),
         "mic.check": lambda params: controller.sound_check(

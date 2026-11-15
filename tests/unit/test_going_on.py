@@ -221,6 +221,7 @@ def test_a_turn_of_the_voices_own_words_is_not_answered(tmp_path):
     assistant.interrupt_event = threading.Event()
     assistant.status_manager = Flags()
     assistant.wake_word = None
+    assistant.sleep_word = None
     answered = []
     assistant.chat = lambda *args, **kwargs: answered.append(args)
     assistant.event_bus = EventBus()
@@ -254,6 +255,7 @@ def test_an_answer_begun_after_the_voice_fell_quiet_is_the_users(tmp_path):
     assistant.interrupt_event = threading.Event()
     assistant.status_manager = Flags()
     assistant.wake_word = None
+    assistant.sleep_word = None
     answered = []
     assistant.chat = lambda *args, **kwargs: answered.append(args)
     assistant.event_bus = EventBus()

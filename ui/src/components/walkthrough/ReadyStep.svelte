@@ -2,7 +2,6 @@
   import { pipelineSection, type PipelineStage } from "../../lib/pipeline";
   import { store } from "../../lib/state.svelte";
   import {
-    DEFAULT_WAKE_WORD,
     engineName,
     serverName,
     voiceName,
@@ -45,7 +44,8 @@
     const tools = w.tools.filter((t) => t.on).map((t) => t.name);
     const recognition = w.downloads.find((m) => m.id === "stt");
     const turn = w.downloads.find((m) => m.id === "turn");
-    const wakeWord = w.wakeWord.trim() || DEFAULT_WAKE_WORD;
+    // A persona's wake word is its name unless it sets another
+    const wakeWord = w.wakeWord.trim() || w.personaName;
     const config = store.config;
     const noModel = w.server === null || !w.model;
     return [

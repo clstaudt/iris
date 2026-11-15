@@ -26,7 +26,8 @@ Event types:
     tool.use     {"tool": str, "detail": str}
     wake         {"word": str}                       the wake word was heard
     wake.window  {"remaining": float}                seconds until it falls asleep;
-                                                     0 once it is asleep
+                                                     0 once it is asleep; not sent
+                                                     while it sleeps only when told
     sleep        {}                                  it fell asleep (window over,
                                                      or the sleep word)
     error        {"message": str, "kind": str}         kind is optional

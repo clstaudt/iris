@@ -21,6 +21,26 @@
       />
       <Switch label="Wake word" checked={w.wakeOn} onchange={(on) => (w.wakeOn = on)} />
     </div>
+    <div class="s-option gap-3">
+      <Icon name="moon" size={15} class="shrink-0 text-ink-3" />
+      <label for="walkthrough-sleep-word" class="name shrink-0 pr-2">Sleep word</label>
+      <input
+        id="walkthrough-sleep-word"
+        bind:value={w.sleepWord}
+        spellcheck="false"
+        class="word min-w-0 flex-1"
+      />
+    </div>
+    <div class="s-option gap-3">
+      <Icon name="clock" size={15} class="shrink-0 text-ink-3" />
+      <span class="name flex-1" class:off={!w.wakeOn}>Sleep when idle</span>
+      <Switch
+        label="Sleep when idle"
+        checked={w.idleSleep}
+        disabled={!w.wakeOn}
+        onchange={(on) => (w.idleSleep = on)}
+      />
+    </div>
   </section>
 
   <section class="flex flex-col gap-2" aria-label="Tools">
@@ -49,7 +69,8 @@
     color: var(--color-ink);
     outline: none;
   }
-  .word:disabled {
+  .word:disabled,
+  .name.off {
     color: var(--color-ink-3);
   }
 </style>

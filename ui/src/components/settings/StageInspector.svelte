@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { store, type TurnDetection } from "../../lib/state.svelte";
+  import {
+    DEFAULT_WAKE_WINDOW,
+    loadSettings,
+    store,
+    type TurnDetection,
+  } from "../../lib/state.svelte";
   import Icon from "../Icon.svelte";
   import Switch from "../Switch.svelte";
 
@@ -43,35 +48,51 @@
 
   const METER_BARS = 24;
 
-  // Wake word: the word stays in the field when switched off, so switching
-  // back on restores it ----------------------------------------------------
+  // Wake word: one switch, and the words of the persona in use, which are
+  // saved to it. Sleeping when idle needs the wake word to wake again ------
 
-  const DEFAULT_WAKE_WORD = "Iris";
-  const DEFAULT_SLEEP_WORD = "That's all";
-  const STAY_AWAKE = [15, 30, 60, 120];
+  const IDLE_TIMES = [15, 30, 60, 120, 300];
   let wakeDraft = $state<string | null>(null);
   let sleepDraft = $state<string | null>(null);
   const wakeOn = $derived(!!config?.wake_word);
-  const wakeValue = $derived(wakeDraft ?? (config?.wake_word || DEFAULT_WAKE_WORD));
-  const sleepValue = $derived(sleepDraft ?? config?.sleep_word ?? DEFAULT_SLEEP_WORD);
+  const wakeValue = $derived(
+    wakeDraft ?? (config?.persona_wake_word || config?.wake_word || config?.persona || "")
+  );
+  const sleepValue = $derived(sleepDraft ?? config?.sleep_word ?? "");
+  const idleOn = $derived((config?.wake_window ?? DEFAULT_WAKE_WINDOW) > 0);
+  // The time is kept while it is off, so switching back on restores it
+  const idleTime = $derived(
+    idleOn
+      ? (config?.wake_window ?? DEFAULT_WAKE_WINDOW)
+      : (loadSettings().wake_window ?? DEFAULT_WAKE_WINDOW)
+  );
+  // A time kept from elsewhere is offered too
+  const idleTimes = $derived(
+    IDLE_TIMES.includes(idleTime) ? IDLE_TIMES : [...IDLE_TIMES, idleTime].sort((a, b) => a - b)
+  );
 
-  function applyWakeWord(on: boolean) {
-    const word = wakeValue.trim() || DEFAULT_WAKE_WORD;
-    // Kept in the field while off, so switching back on restores it
-    if (!on) wakeDraft = word;
-    store.setWakeWord(on ? word : "").catch(fail("wake.set"));
+  /** Save the word typed to the persona, then switch as asked. */
+  async function applyWakeWord(on = wakeOn) {
+    if (wakeDraft !== null) {
+      const word = wakeDraft;
+      wakeDraft = null;
+      await store.setPersonaWords({ wake_word: word }).catch(fail("persona.words"));
+    }
+    if (on !== wakeOn) await store.setWake(on).catch(fail("wake.set"));
   }
 
   function applySleepWord() {
     if (sleepDraft === null) return;
-    store.setWakeOptions({ sleep_word: sleepValue.trim() }).catch(fail("wake.options"));
+    store.setPersonaWords({ sleep_word: sleepDraft }).catch(fail("persona.words"));
     sleepDraft = null;
   }
 
-  function onStayAwake(event: Event) {
+  function onIdleTime(event: Event) {
     const window = Number((event.target as HTMLSelectElement).value);
-    store.setWakeOptions({ window }).catch(fail("wake.options"));
+    store.setIdleSleep(true, window).catch(fail("wake.options"));
   }
+
+  const idleLabel = (seconds: number) => (seconds < 60 ? `${seconds} s` : `${seconds / 60} min`);
 
   // Turn end --------------------------------------------------------------
 
@@ -249,8 +270,8 @@
           <input
             value={wakeValue}
             oninput={(e) => (wakeDraft = (e.target as HTMLInputElement).value)}
-            onkeydown={(e) => e.key === "Enter" && wakeOn && applyWakeWord(true)}
-            onblur={() => wakeOn && wakeDraft !== null && applyWakeWord(true)}
+            onkeydown={(e) => e.key === "Enter" && applyWakeWord()}
+            onblur={() => applyWakeWord()}
             spellcheck="false"
             aria-label="Wake word"
             class="s-field min-w-0 flex-1"
@@ -258,31 +279,39 @@
           <Switch label="Wake word" checked={wakeOn} onchange={(on) => applyWakeWord(on)} />
         </div>
       </section>
+      <section class="sec">
+        <label class="s-section" for="sleep-word">Sleep word</label>
+        <input
+          id="sleep-word"
+          value={sleepValue}
+          oninput={(e) => (sleepDraft = (e.target as HTMLInputElement).value)}
+          onkeydown={(e) => e.key === "Enter" && applySleepWord()}
+          onblur={applySleepWord}
+          spellcheck="false"
+          class="s-field"
+        />
+      </section>
       {#if wakeOn}
         <section class="sec">
-          <label class="s-section" for="sleep-word">Sleep word</label>
-          <input
-            id="sleep-word"
-            value={sleepValue}
-            oninput={(e) => (sleepDraft = (e.target as HTMLInputElement).value)}
-            onkeydown={(e) => e.key === "Enter" && applySleepWord()}
-            onblur={applySleepWord}
-            spellcheck="false"
-            class="s-field"
-          />
-        </section>
-        <section class="sec">
-          <label class="s-section" for="stay-awake">Stay awake</label>
-          <select
-            id="stay-awake"
-            class="s-field"
-            value={config?.wake_window ?? 30}
-            onchange={onStayAwake}
-          >
-            {#each STAY_AWAKE as seconds}
-              <option value={seconds}>{seconds < 60 ? `${seconds} s` : `${seconds / 60} min`}</option>
-            {/each}
-          </select>
+          <label class="s-section" for="stay-awake">Sleep when idle</label>
+          <div class="flex items-center gap-3">
+            <select
+              id="stay-awake"
+              class="s-field min-w-0 flex-1"
+              value={idleTime}
+              disabled={!idleOn}
+              onchange={onIdleTime}
+            >
+              {#each idleTimes as seconds}
+                <option value={seconds}>{idleLabel(seconds)}</option>
+              {/each}
+            </select>
+            <Switch
+              label="Sleep when idle"
+              checked={idleOn}
+              onchange={(on) => store.setIdleSleep(on, idleTime).catch(fail("wake.options"))}
+            />
+          </div>
         </section>
       {/if}
     {:else if stage === "turn"}

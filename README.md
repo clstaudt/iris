@@ -148,7 +148,7 @@ Iris starts listening as soon as the models are loaded. Speaking and typing shar
 - Speak while Iris is talking to interrupt it: the voice pauses as soon as you start, and stops if you go on. Iris keeps what it got to say, as far as you heard it, and answers what you said. An echo canceller takes Iris's own voice out of what the microphone hears; it first learns the room from a few seconds of the voice, and a single short word said over loud speakers may not get through. Should the voice pause too often with your speakers, switch **Interrupt by voice** off under Settings > Pipeline > Output; the microphone then closes while Iris speaks.
 - Typed and spoken messages are answered one at a time, in order. A message sent while Iris is still answering waits as a queued bubble. While you type, the microphone stays closed, and typing anywhere in the window goes to the message box.
 - **Pause** (or a click on the orb) holds the whole conversation: speech stops mid-sentence, the reply stops streaming, the microphone closes, and queued messages wait. **Resume** picks up where it stopped. **Mic** switches listening off while still answering typed messages; **Voice** switches spoken replies off for a text-only chat; **Stop** cancels the current reply.
-- **Wake word** (Settings): Iris sleeps until addressed by name. "Iris, what's the weather?" wakes it and is answered at once; a bare "Iris" plays a soft chime and waits for the request. Follow-ups need no name. Iris stays awake while you talk and for a while after each reply (**Stay awake**, 30 seconds by default); over the last 10 seconds the orb drifts toward its sleeping tone, then Iris goes back to sleep with a soft falling chime. Saying the **sleep word** ("That's all, Iris" by default) sends it to sleep right away. Iris also goes to sleep by itself once you are clearly done, when you say goodbye or ask it to stop listening: it says its goodbye, and falls asleep once the voice has died away, so its own words cannot wake it (the **Going to sleep** tool, offered only while a wake word is set). While asleep, only speech reaches the smallest Whisper model, and the wake word only counts at the start of an utterance, so "tell Iris I said hi" doesn't wake it.
+- **Wake word** (Settings): Iris sleeps until addressed by name. Each persona has its own wake word, its name unless it is given another, and switching persona switches the word; whether the wake word is on is one switch for all of them. "Iris, what's the weather?" wakes it and is answered at once; a bare "Iris" plays a soft chime and waits for the request. Follow-ups need no name. Iris stays awake while you talk and, with **Sleep when idle** on, for a while after each reply (30 seconds by default); over the last 10 seconds the orb drifts toward its sleeping tone, then Iris goes back to sleep with a soft falling chime. With it off, Iris stays awake until told to sleep. A persona can also have a **sleep word**, such as "That's all": said on its own ("That's all, Iris"), it always sends Iris to sleep right away, without asking the model, also with the wake word off; Iris then sleeps until called by the persona's wake word, and listens to everything again once woken. Both words are set beside the wake word switch, in the walkthrough and in the persona editor. Iris may also go to sleep by itself once you are clearly done, when you say goodbye or ask it to stop listening, as the model judges: it says its goodbye, and falls asleep once the voice has died away, so its own words cannot wake it (the **Going to sleep** tool, offered only while the wake word is on). While asleep, only speech reaches the smallest Whisper model, and the wake word only counts at the start of an utterance, so "tell Iris I said hi" doesn't wake it.
 
 ### Presence mode
 
@@ -173,13 +173,13 @@ Iris keeps one continuous conversation that survives restarts and is remembered 
 
 ### Personas
 
-A persona is who Iris is: a name, a personality, and a voice. Iris ships three, chosen under Settings > Personas:
+A persona is who Iris is: a name, a personality, a voice, and the words that wake it and send it to sleep. Iris ships three, chosen under Settings > Personas:
 
 - **Iris** (default): friendly and helpful.
 - **HAL**: inspired by HAL 9000, calm and mission-focused.
 - **Computer**: matter-of-fact, like the USS Enterprise computer.
 
-There you edit a persona or create one: name, personality and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited built-in persona can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`):
+There you edit a persona or create one: name, personality, wake word and sleep word, and voice, with every voice playable, the speech engine, the effect, and the speed where the engine takes one. Edits are saved to `~/.iris/personas`; an edited built-in persona can be reset. Persona files can also be written by hand, in `~/.iris/personas` (or `IRIS_PERSONAS_DIR`); a change to the file of the persona in use is taken on while Iris runs, from its next reply:
 
 ```yaml
 name: "HAL"
@@ -187,6 +187,8 @@ engine: "kokoro"      # or "kyutai"
 voice: "bm_lewis"     # a voice of that engine
 speed: 1.1            # for engines whose voices take a speed (Kokoro)
 audio_filter: "intercom"
+wake_word: "Hey HAL"  # optional; the name when left out
+sleep_word: "Goodbye" # optional; none when left out
 description: |
   You have the personality and speaking style of HAL 9000.
 ```
@@ -302,12 +304,12 @@ Requests are JSON-RPC 2.0; the core's activity arrives as notifications `{"jsonr
 | --- | --- |
 | App and setup | `app.info`, `setup.info`, `setup.download`, `models.check`, `models.set`, `mic.check` |
 | Assistant | `assistant.start`, `assistant.stop`, `assistant.interrupt`, `assistant.pause`, `assistant.resume`, `assistant.hold`, `assistant.greet` |
-| Listening and voice | `mic.set`, `audio.list_inputs`, `audio.set_input`, `wake.set`, `wake.options`, `voice.set_output`, `voice.set_barge_in` |
+| Listening and voice | `mic.set`, `audio.list_inputs`, `audio.set_input`, `wake.set`, `wake.options`, `wake.adopt`, `voice.set_output`, `voice.set_barge_in` |
 | Conversation | `chat.send_text`, `chat.history` |
 | Language model | `llm.list`, `llm.set`, `llm.set_host`, `llm.check_hosts`, `llm.probe`, `llm.find_servers` |
 | Recognition and turn end | `stt.models`, `stt.set`, `turn.set` |
 | Memory | `memory.topics`, `memory.topic`, `memory.forget`, `memory.set_amnesia` |
-| Personas | `persona.list`, `persona.set`, `persona.get`, `persona.voices`, `persona.save`, `persona.delete`, `persona.preview` |
+| Personas | `persona.list`, `persona.set`, `persona.get`, `persona.voices`, `persona.save`, `persona.words`, `persona.delete`, `persona.preview` |
 | Plugins and engines | `tools.set`, `plugins.list`, `engines.list` |
 | Debugging | `debug.emit`, `debug.inject_audio` |
 
