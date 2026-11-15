@@ -27,6 +27,7 @@
 //               several split by "|"; the walkthrough's steps, which start
 //               Iris and choose the model, always run
 //   E2E_HEADED  set to watch the browser
+//   E2E_EVENTS  set to tell the run as events, for the reporter (e2e/report.mjs)
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -37,6 +38,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
 import { PythonBridge } from "../electron/python-bridge.ts";
+import { Report } from "./report.mjs";
 
 const UI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPO = path.resolve(UI, "..");
@@ -50,6 +52,8 @@ if (!fs.existsSync(path.join(DIST, "index.html"))) {
 }
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT, { recursive: true });
+// What the steps did: plain lines, or the reporter's events
+const report = new Report(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------- the core
 
@@ -113,6 +117,7 @@ function startCore(log) {
   bridge.onLog = (line) => {
     coreLog.write(line + "\n");
     logged.push({ line, at: Date.now() });
+    report.log("core", line);
   };
   bridge.onEvent = (type, data) => {
     events.push({ type, data, at: Date.now() });
@@ -332,30 +337,22 @@ pushEvent = (type, data) => {
 
 // ------------------------------------------------------------------ helpers
 
-const results = [];
-
 async function step(name, body) {
-  const only = process.env.E2E_ONLY?.toLowerCase().split("|");
-  const always = ["first run", "the app starts", "language model: the server's models"];
-  if (only && !only.some((part) => name.toLowerCase().includes(part)) && !always.some((s) => name.startsWith(s))) {
-    return;
-  }
-  const started = Date.now();
+  if (!report.selected(name)) return report.skip(name);
+  const started = report.start(name);
   try {
     await body();
-    results.push({ name, ok: true });
-    console.log(`  ok    ${name} (${((Date.now() - started) / 1000).toFixed(1)} s)`);
+    report.pass(name);
   } catch (error) {
-    const shot = path.join(OUT, `${results.length + 1}-${name.replace(/[^a-z0-9]+/gi, "-")}.png`);
+    const shot = path.join(OUT, `${report.results.length + 1}-${name.replace(/[^a-z0-9]+/gi, "-")}.png`);
     await page.screenshot({ path: shot }).catch(() => {});
-    const states = events.filter((e) => e.at >= started && e.type === "state").map((e) => e.data.state);
-    const errors = events.filter((e) => e.at >= started && e.type === "error").map((e) => e.data.message);
-    const detail =
-      ` [states: ${states.join(" > ") || "none"}]` +
-      (errors.length ? ` [errors: ${errors.join(" | ")}]` : "") +
-      (pageErrors.length ? ` [page: ${pageErrors.slice(-3).join(" | ")}]` : "");
-    results.push({ name, ok: false, error: String(error.message ?? error).split("\n")[0] + detail, shot });
-    console.log(`  FAIL  ${name}\n        ${results.at(-1).error}\n        ${shot}`);
+    report.fail(name, {
+      reason: String(error.message ?? error).split("\n")[0],
+      states: events.filter((e) => e.at >= started && e.type === "state").map((e) => e.data.state),
+      errors: events.filter((e) => e.at >= started && e.type === "error").map((e) => e.data.message),
+      page: pageErrors.slice(-3),
+      shot,
+    });
   }
 }
 
@@ -3274,6 +3271,4 @@ try {
   fs.rmSync(home, { recursive: true, force: true });
 }
 
-const failed = results.filter((result) => !result.ok);
-console.log(`\n${results.length - failed.length} passed, ${failed.length} failed`);
-process.exit(failed.length ? 1 : 0);
+report.finish();
