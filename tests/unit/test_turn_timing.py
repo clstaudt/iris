@@ -213,7 +213,7 @@ class Recorder:
 class Transcriber:
     model_name = "large-v3-turbo"
 
-    def transcribe(self, path):
+    def transcribe(self, path, conversation=None, languages=None):
         return "Will it rain?", "en"
 
 

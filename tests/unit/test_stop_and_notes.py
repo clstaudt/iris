@@ -208,6 +208,7 @@ def test_forgetting_everything_stops_the_reply_first_and_waits_for_the_turn():
     assistant.turn_queue = queue.Queue()
     assistant._turn_lock = threading.Lock()
     assistant.conversation_language = "de"
+    assistant._language_known = True
 
     def turn():  # as the run loop takes one
         with assistant._turn_lock:
@@ -230,7 +231,8 @@ def test_forgetting_everything_stops_the_reply_first_and_waits_for_the_turn():
     # The message waiting goes too, and the next one is not stopped
     assert assistant.turn_queue.empty()
     assert not assistant.interrupt_event.is_set()
-    assert assistant.conversation_language == "en"
+    # And what is said next is heard as if nothing had been said before
+    assert assistant.conversation_language == "en" and not assistant._language_known
 
 
 def test_an_error_from_the_model_is_still_shown():

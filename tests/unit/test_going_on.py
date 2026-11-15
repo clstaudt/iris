@@ -239,7 +239,7 @@ def test_a_turn_of_the_voices_own_words_is_not_answered(tmp_path):
         def __init__(self, text):
             self.text = text
 
-        def transcribe(self, path):
+        def transcribe(self, path, conversation=None, languages=None):
             return self.text, "en"
 
     assistant.speech_pipeline = Spoken()
@@ -274,7 +274,7 @@ def test_an_answer_begun_after_the_voice_fell_quiet_is_the_users(tmp_path):
             return "Would you like the red one or the blue one?" if self.ended >= moment else ""
 
     class Transcriber:
-        def transcribe(self, path):
+        def transcribe(self, path, conversation=None, languages=None):
             return "The blue one.", "en"
 
     class Voice:

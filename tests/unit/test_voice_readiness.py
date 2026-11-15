@@ -317,6 +317,20 @@ def test_choosing_a_language_makes_every_personas_voice_ready_for_it(hub, monkey
     assert controller.readier.wait(job["id"], 5)
 
 
+def test_the_languages_chosen_are_the_users_for_whisper(hub, monkeypatch):
+    """Whisper leaves the conversation's language for one of them more
+    readily than for another (iris.transcription.language_heard)."""
+    monkeypatch.setattr(tts.KokoroGenerator, "ready", classmethod(lambda cls, *a, **k: True))
+    controller = AssistantController(EventBus())
+    controller.assistant = SimpleNamespace(tts_generator=SimpleNamespace(models_dir=None))
+
+    result = controller.set_languages(["it"])
+
+    assert controller.assistant.chosen_languages == {"en", "it"}
+    for job in result["jobs"]:
+        controller.readier.wait(job["id"], 5)
+
+
 def test_a_conversation_makes_the_voice_ready_but_leaves_a_failure_to_the_user(hub):
     hub.failures = 1
     controller = AssistantController(EventBus())
