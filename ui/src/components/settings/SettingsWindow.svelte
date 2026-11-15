@@ -44,7 +44,7 @@
     {/each}
     <button onclick={() => walkthrough.open(false)} class="nav back mt-auto">
       <Icon name="play" size={13} />
-      Walkthrough
+      Set up
     </button>
     <button onclick={() => tour.start()} class="nav back">
       <Icon name="compass" size={13} />

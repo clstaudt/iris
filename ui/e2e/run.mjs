@@ -3004,7 +3004,7 @@ try {
   await step("the walkthrough runs again from Settings, skips and keeps, and Iris says hello", async () => {
     const before = config();
     await openSettings();
-    await page.locator('nav[aria-label="Settings"] button', { hasText: "Walkthrough" }).click();
+    await page.locator('nav[aria-label="Settings"] button', { hasText: "Set up" }).click();
     await page.getByText("Welcome to Iris").waitFor({ timeout: 5000 });
     await footerButton("Get started").click();
     const moves = [["server", "Skip"], ["models", "Continue"], ["microphone", "Skip"], ["voice", "Continue"], ["extras", "Continue"]];

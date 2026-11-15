@@ -42,7 +42,7 @@ The first time it opens, Iris walks you through getting ready, a step at a time;
 5. **Wake word and tools**, both optional: whether Iris waits for its name, and whether it may use the camera, the screen and web search.
 6. **Ready.** A summary of the choices, each a click away. Iris starts, the iris bud at the top, which opened as the walkthrough came along, blooms into the orb, and Iris greets you in its persona's words. Downloads still running go on under the orb. **Take the tour** starts Iris the same way, then shows the message box and the orb, Pause and Mic, threads, personas, voices and memory, a sentence each at its control.
 
-Each step can be skipped or gone back to, and everything can be changed later in Settings, where **Walkthrough** runs it again, and **Tour** the tour.
+Each step can be skipped or gone back to, and everything can be changed later in Settings, where **Set up** runs it again, and **Tour** the tour.
 
 ## Using Iris
 
