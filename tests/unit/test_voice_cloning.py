@@ -690,3 +690,134 @@ def test_slow_cloning_requests_do_not_hold_up_the_others():
     slow = ("voice.clone_access", "voice.clone_connect", "voice.clone_fetch", "voice.clone")
     for method in (*slow, "voice.record", "voice.sample"):
         assert method in rpc_server.CONCURRENT
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face that stalls: nothing on the cloning path waits for it for good
+# ---------------------------------------------------------------------------
+
+
+def ends_within(seconds: float, call):
+    """What call() returns or raises, if it ends within seconds; fails the
+    test, rather than hanging it, if it does not."""
+    ended: dict = {}
+
+    def run():
+        try:
+            ended["value"] = call()
+        except BaseException as error:
+            ended["error"] = error
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"still waiting after {seconds} s"
+    if "error" in ended:
+        raise ended["error"]
+    return ended.get("value")
+
+
+@pytest.fixture
+def stalled():
+    """A request Hugging Face never answers, let go at the test's end."""
+    gone = threading.Event()
+    yield lambda *args, **kwargs: gone.wait()
+    gone.set()
+
+
+def test_an_account_check_hugging_face_never_answers_is_given_up(kyutai, stalled, monkeypatch):
+    monkeypatch.setattr(cloning, "ASK_WITHIN", 0.2)
+    kyutai.whoami = stalled
+    result = ends_within(5, access)
+    assert result["state"] == TERMS and "did not answer" in result["error"]
+    # A downloaded model clones still
+    kyutai.files.add(cloning_weights("english"))
+    assert ends_within(5, access)["state"] == READY
+
+
+def test_an_access_check_hugging_face_never_answers_is_given_up(kyutai, stalled, monkeypatch):
+    monkeypatch.setattr(cloning, "ASK_WITHIN", 0.2)
+    kyutai.check_access = stalled
+    assert "did not answer" in ends_within(5, access)["error"]
+
+
+def test_a_login_hugging_face_never_answers_is_given_up(kyutai, stalled, monkeypatch):
+    monkeypatch.setattr(cloning, "ASK_WITHIN", 0.2)
+    kyutai.login = stalled
+    result = ends_within(5, lambda: connect(TOKEN))
+    assert result["state"] == LOGIN and "did not answer" in result["error"]
+    assert TOKEN not in str(result)
+
+
+def test_a_download_that_receives_nothing_is_given_up(stalled, monkeypatch):
+    monkeypatch.setattr(cloning, "STALL_AFTER", 0.3)
+    monkeypatch.setattr(cloning.downloads, "download_hub_files", stalled)
+    with pytest.raises(TimeoutError, match="stalled"):
+        ends_within(
+            5, lambda: cloning.Kyutai().fetch([cloning_weights("english")], lambda d, t: None)
+        )
+
+
+def test_a_download_that_goes_on_is_not_given_up(monkeypatch):
+    monkeypatch.setattr(cloning, "STALL_AFTER", 0.3)
+
+    def slow(files, on_progress, interval=0.5):
+        for step in range(1, 11):
+            time.sleep(0.1)
+            on_progress(step, 10)
+
+    monkeypatch.setattr(cloning.downloads, "download_hub_files", slow)
+    seen = []
+    ends_within(
+        5, lambda: cloning.Kyutai().fetch([cloning_weights("english")], lambda d, t: seen.append(d))
+    )
+    assert seen[-1] == 10
+
+
+def test_the_cloning_model_that_stalls_is_told_and_no_voice_is_left(
+    kyutai, heard_by_energy, stalled, monkeypatch
+):
+    monkeypatch.setattr(cloning, "STALL_AFTER", 0.3)
+    monkeypatch.setattr(cloning.downloads, "download_hub_files", stalled)
+    monkeypatch.setattr(kyutai, "fetch", cloning.Kyutai.fetch.__get__(kyutai))
+    service = Cloning(lambda t, d: None)
+    assert ends_within(5, lambda: service.fetch())["error"].startswith("The download stalled")
+    service.use_file(base64.b64encode(wav(speech(8))).decode())
+    result = ends_within(5, lambda: service.clone("Ada"))
+    assert result["ok"] is False and "stalled" in result["error"]
+    assert cloned_voices() == []
+
+
+def test_a_sample_is_taken_while_a_voice_downloads_its_model(kyutai, heard_by_energy):
+    """Making a voice may download the cloning model first: choosing or
+    recording a sample meanwhile does not wait for it, and a second voice
+    is not made at the same time."""
+    downloading, go_on = threading.Event(), threading.Event()
+    fetch = kyutai.fetch
+
+    def slow(files, on_progress):
+        downloading.set()
+        go_on.wait(5)
+        fetch(files, on_progress)
+
+    kyutai.fetch = slow
+    events = []
+    service = Cloning(lambda t, d: events.append((t, d)))
+    data = base64.b64encode(wav(speech(8))).decode()
+    service.use_file(data)
+    made = {}
+    worker = threading.Thread(target=lambda: made.update(service.clone("Ada")), daemon=True)
+    worker.start()
+    assert downloading.wait(5)
+    try:
+        assert ends_within(2, lambda: service.use_file(data))["ok"]
+        assert (
+            ends_within(2, lambda: service.clone("Bea"))["error"] == "A voice is being made already"
+        )
+    finally:
+        go_on.set()
+    worker.join(5)
+    assert made["voice"]["id"] == "clone:ada"
+    # The download showed its progress, and the sample taken meanwhile is the next voice's
+    assert ("clone.progress", {"done": 200, "total": 200}) in events
+    assert service.clone("Bea")["voice"]["id"] == "clone:bea"
