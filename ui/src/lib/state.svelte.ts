@@ -1145,6 +1145,34 @@ class IrisStore {
     return error;
   }
 
+  /** Play a sample prepared for cloning, as a preview plays: marked
+   *  ("sample:<id>") from the click until it has been heard. Returns an
+   *  error message, or null once it is on its way. */
+  async playSample(sample: string): Promise<string | null> {
+    const playing = `sample:${sample}`;
+    this.previewing = playing;
+    this.previewHeard = false;
+    setTimeout(() => {
+      if (this.previewing === playing && !this.previewHeard) this.previewing = null;
+    }, PREVIEW_TIMEOUT);
+    let error: string | null = null;
+    try {
+      const result = await rpc<{ ok: boolean; error?: string }>("voice.sample_play", { sample });
+      if (!result.ok) error = result.error ?? "The sample could not be played";
+    } catch (err) {
+      error = `The sample could not be played: ${err}`;
+    }
+    if (error && this.previewing === playing) this.previewing = null;
+    return error;
+  }
+
+  /** Stop a sample playing, if one is. */
+  async stopSample() {
+    if (!this.previewing?.startsWith("sample:")) return;
+    this.previewing = null;
+    await rpc("voice.sample_play", { on: false }).catch(() => {});
+  }
+
   /** A preview whose voice downloads first stays marked until it is heard,
    *  or its download fails. */
   private waitForPreview(job: VoiceJob, voice: string) {

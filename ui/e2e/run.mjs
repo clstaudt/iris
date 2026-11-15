@@ -1006,7 +1006,7 @@ try {
   // Iris's voice before she is given a cloned one, to give back at the end
   let shippedVoice = "anna";
 
-  await step("voice cloning: Hugging Face is connected, a sample is cloned, and Iris speaks in the voice", async () => {
+  await step("voice cloning: Hugging Face is connected, a sample is heard and cloned once confirmed, and Iris speaks in the voice", async () => {
     await openSettings("Personas");
     await page.locator("button.card", { hasText: "Iris" }).first().click();
     await until("Iris's form", async () => (await page.locator("input.title").inputValue()) === "Iris");
@@ -1036,12 +1036,55 @@ try {
     check(events.some((e) => e.at >= since && e.type === "clone.progress" && e.data.done === e.data.total),
       "the download showed no progress");
     await page.getByText("Only clone a voice you have permission to use.").waitFor();
-    // A sample from a file: the voice is made, chosen, and says the preview
+    // A sample from a file is prepared, with its length: nothing is cloned yet
     const sample = speechSample();
+    const file = { name: "sample.wav", mimeType: "audio/wav", buffer: sample };
+    const clones = async () => (await rpc("voice.list")).engines.kyutai.filter((v) => v.cloned).map((v) => v.id);
+    const before = await clones();
+    const chose = Date.now();
+    await page.locator('input[aria-label="Audio file"]').setInputFiles(file);
+    await page.locator('.clone[data-step="confirm"]').waitFor({ timeout: 60_000 });
+    const length = await page.locator(".clone .sample .length").innerText();
+    check(/^0:\d\d$/.test(length) && length !== "0:00", `the sample's length shows as ${length}`);
+    // Back drops it, for another
+    await page.getByRole("button", { name: "Back", exact: true }).click();
+    await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 5000 });
+    await until("the sample left behind to be dropped", () => calls.some((c) => c.at >= chose && c.method === "voice.sample_drop" && c.params.sample), 5000);
+    await page.locator('input[aria-label="Audio file"]').setInputFiles(file);
+    await page.locator('.clone[data-step="confirm"]').waitFor({ timeout: 60_000 });
+    // It plays, trimmed and levelled, as the voice would be made of it
+    const listened = Date.now();
+    await page.getByRole("button", { name: "Play the sample" }).click();
+    await checkHeard(listened, "the sample");
+    await page.getByRole("button", { name: "Stop the sample" }).click();
+    await voiceDone();
+    check(!calls.some((c) => c.at >= chose && c.method === "voice.clone"), "the voice was cloned before it was confirmed");
+    check(JSON.stringify(await clones()) === JSON.stringify(before), "a voice was made before it was confirmed");
+    // Iris's languages are picked, English always; German, picked besides,
+    // downloads its cloning model first
+    const languagesFor = page.locator('[aria-label="Languages to make the voice for"]');
+    const offered = await languagesFor.locator("button").evaluateAll((els) => els.map((el) => el.dataset.language));
+    const pressed = await languagesFor.locator('button[aria-pressed="true"]').evaluateAll((els) => els.map((el) => el.dataset.language));
+    const iris = (await rpc("voice.list")).chosen.filter((code) => offered.includes(code));
+    check([...pressed].sort().join() === [...new Set(["en", ...iris])].sort().join(), `${pressed} are picked for Iris's ${iris}`);
+    const english = languagesFor.locator('button[data-language="en"]');
+    check(await english.isDisabled(), "English can be left out");
+    const german = languagesFor.locator('button[data-language="de"]');
+    check((await german.getAttribute("data-download")) !== null, "German is not marked to download its cloning model");
+    check((await english.getAttribute("data-download")) === null, "English is marked to download its cloning model");
+    if ((await german.getAttribute("aria-pressed")) !== "true") await german.click();
+    // Confirmed: the voice is made for both, chosen, and says the preview
     const made = Date.now();
-    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
-    await page.getByRole("button", { name: "Clone again" }).waitFor({ timeout: 120_000 });
+    await page.getByRole("button", { name: "Clone voice", exact: true }).click();
+    await page.getByRole("button", { name: "Clone again" }).waitFor({ timeout: 180_000 });
+    const cloneCall = calls.find((c) => c.at >= made && c.method === "voice.clone");
+    check(cloneCall.params.languages.includes("de") && cloneCall.params.sample, `cloned with ${JSON.stringify(cloneCall.params)}`);
     check(await page.locator(".voice.active", { hasText: "Iris" }).count(), "the cloned voice is not chosen");
+    const voice = (await rpc("voice.list")).engines.kyutai.find((v) => v.id === "clone:iris");
+    check(voice?.cloned.made.includes("en") && voice.cloned.made.includes("de"), `the voice is made for ${voice?.cloned.made}`);
+    check(voice.ready.includes("en") && voice.ready.includes("de"), `the voice is ready for ${voice.ready}`);
+    check(events.some((e) => e.at >= made && e.type === "voice.job" && e.data.voice === "clone:iris" && e.data.language === "de" && e.data.what === "cloning"),
+      "German's cloning model did not download where it shows");
     await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
     await voiceDone();
     await checkHeard(made, "the cloned voice's first words");
@@ -1101,9 +1144,12 @@ try {
     // A voice cloned again is chosen, and is hers once saved
     await page.getByRole("button", { name: "Clone again" }).click();
     await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
-    const made = Date.now();
     await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: speechSample() });
-    await until("the voice cloned again", () => chosen("Iris 2").count(), 120_000);
+    await page.locator('.clone[data-step="confirm"]').waitFor({ timeout: 60_000 });
+    await offered(false, "a sample prepared, not cloned yet");
+    const made = Date.now();
+    await page.getByRole("button", { name: "Clone voice", exact: true }).click();
+    await until("the voice cloned again", () => chosen("Iris 2").count(), 180_000);
     await eventAfter("audio.output", made, (data) => data.rms > 0, 90_000);
     await voiceDone();
     await offered(true, "cloning a voice");
@@ -2631,18 +2677,29 @@ try {
     await voicesPage();
     huggingFace({ token: CLONE_TOKEN, terms: true });
     sample = sample ?? speechSample();
+    const before = (await library()).kyutai.filter((v) => v.cloned).length;
     await page.getByRole("button", { name: "Clone a voice" }).click();
     await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
-    // English, and French picked besides
+    const chose = Date.now();
+    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+    // Prepared, and nothing cloned until it is confirmed
+    await page.locator('.clone[data-step="confirm"]').waitFor({ timeout: 60_000 });
+    check((await library()).kyutai.filter((v) => v.cloned).length === before, "a voice was made before it was confirmed");
+    check(!calls.some((c) => c.at >= chose && c.method === "voice.clone"), "the voice was cloned before it was confirmed");
+    // English, and French picked besides, which downloads its cloning model first
     const languagesFor = page.locator('[aria-label="Languages to make the voice for"]');
     check((await languagesFor.locator("button", { hasText: "English" }).getAttribute("aria-pressed")) === "true", "English is not picked");
-    await languagesFor.locator("button", { hasText: "French" }).click();
+    const french = languagesFor.locator('button[data-language="fr"]');
+    check((await french.getAttribute("data-download")) !== null, "French is not marked to download its cloning model");
+    check((await french.getAttribute("aria-pressed")) === "false", "French is picked unasked");
+    await french.click();
     const since = Date.now();
-    await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+    await page.getByRole("button", { name: "Clone voice", exact: true }).click();
     // Cloned once it is made for every language picked
     await page.getByRole("button", { name: "Clone a voice" }).waitFor({ timeout: 180_000 });
     const made = await until("the voice", () => cloneOf("Cloned voice"), 10_000);
     check(made.cloned.made.includes("en") && made.cloned.made.includes("fr"), `the voice is made for ${made.cloned.made}`);
+    check(made.ready.includes("en") && made.ready.includes("fr"), `the voice is ready for ${made.ready}`);
     check(events.some((e) => e.at >= since && e.type === "voice.job" && e.data.voice === made.id && e.data.language === "fr"), "making it for French was not shown");
     // It says the preview, then its name is to be given
     await heard(since);
@@ -2656,22 +2713,41 @@ try {
     await heard(again);
   });
 
-  await step("voices: a cloned voice is cloned again from a new sample, and keeps its name", async () => {
+  await step("voices: a cloned voice is cloned again from a new sample, and keeps its name; Cancel changes nothing", async () => {
     await voicesPage();
     const before = await cloneOf("Testa");
     check(before, "no voice named Testa");
     const folder = path.join(coreHome, ".iris", "voices", before.id.split(":")[1]);
     const old = fs.statSync(path.join(folder, "sample.wav")).mtimeMs;
+    const file = { name: "again.wav", mimeType: "audio/wav", buffer: sample };
+    // A sample cancelled at the confirmation changes nothing
+    const cancelled = Date.now();
     await card(before.id).getByRole("button", { name: "Clone again" }).click();
     await card(before.id).locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    await card(before.id).locator('input[aria-label="Audio file"]').setInputFiles(file);
+    await card(before.id).locator('.clone[data-step="confirm"]').waitFor({ timeout: 60_000 });
+    await card(before.id).getByRole("button", { name: "Cancel", exact: true }).click();
+    await card(before.id).locator(".clone").waitFor({ state: "detached", timeout: 5000 });
+    check(!calls.some((c) => c.at >= cancelled && c.method === "voice.clone"), "the voice was cloned again on Cancel");
+    await until("the sample cancelled to be dropped", () => calls.some((c) => c.at >= cancelled && c.method === "voice.sample_drop"), 5000);
+    check(fs.statSync(path.join(folder, "sample.wav")).mtimeMs === old, "the sample was replaced on Cancel");
+    // Cloned again, for the languages it is made for already
+    await card(before.id).getByRole("button", { name: "Clone again" }).click();
+    await card(before.id).locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
+    await card(before.id).locator('input[aria-label="Audio file"]').setInputFiles(file);
+    await card(before.id).locator('.clone[data-step="confirm"]').waitFor({ timeout: 60_000 });
+    const picked = await card(before.id).locator('[aria-label="Languages to make the voice for"] button[aria-pressed="true"]')
+      .evaluateAll((els) => els.map((el) => el.dataset.language));
+    check(before.cloned.made.every((code) => picked.includes(code)), `${picked} are picked for a voice made for ${before.cloned.made}`);
     const since = Date.now();
-    await card(before.id).locator('input[aria-label="Audio file"]').setInputFiles({ name: "again.wav", mimeType: "audio/wav", buffer: sample });
+    await card(before.id).getByRole("button", { name: "Clone voice", exact: true }).click();
     await card(before.id).locator(".clone").waitFor({ state: "detached", timeout: 180_000 });
     await heard(since);
     const after = await cloneOf("Testa");
     check(after?.id === before.id, `cloned again, the voice is ${after?.id}`);
     check(fs.statSync(path.join(folder, "sample.wav")).mtimeMs > old, "the sample was not replaced");
-    check(after.cloned.made.includes("en"), `made for ${after.cloned.made}`);
+    check(before.cloned.made.every((code) => after.cloned.made.includes(code) && after.ready.includes(code)),
+      `made for ${after.cloned.made}, ready for ${after.ready}, as it was for ${before.cloned.made}`);
   });
 
   await step("voices: a cloned voice no persona speaks with is deleted", async () => {
@@ -2688,8 +2764,9 @@ try {
     // A voice made of the sample as the cloning steps make one, and Iris
     // speaking with it
     const data = sample.toString("base64");
-    check((await rpc("voice.sample", { data, name: "sample.wav" })).ok, "the sample was refused");
-    const made = await rpc("voice.clone", { name: "Guarded" });
+    const prepared = await rpc("voice.sample", { data, name: "sample.wav" });
+    check(prepared.ok, "the sample was refused");
+    const made = await rpc("voice.clone", { name: "Guarded", sample: prepared.sample });
     check(made.ok, made.error);
     const voice = made.voice.id;
     const iris = await rpc("persona.get", { id: "iris" });
@@ -2729,8 +2806,10 @@ try {
       const before = new Set((await clones()).map((v) => v.id));
       await page.getByRole("button", { name: button }).click();
       await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
-      const since = Date.now();
       await page.locator('input[aria-label="Audio file"]').setInputFiles({ name: "sample.wav", mimeType: "audio/wav", buffer: sample });
+      await page.locator('.clone[data-step="confirm"]').waitFor({ timeout: 60_000 });
+      const since = Date.now();
+      await page.getByRole("button", { name: "Clone voice", exact: true }).click();
       await page.locator(".clone").waitFor({ state: "detached", timeout: 180_000 });
       const made = (await clones()).find((v) => !before.has(v.id));
       check(made, "no voice was cloned");
