@@ -180,7 +180,13 @@ def log_the_voice():
     log.propagate = False
 
 
-def main():
+def main(extra: dict | None = None):
+    """Serve the app on stdin and stdout.
+
+    Args:
+        extra: Methods beside Iris's own, by name, answered in order with
+            the rest (a test's, to look into the core)
+    """
     # Stdout purity: RPC frames get a private copy of the real stdout, and
     # file descriptor 1 is pointed at stderr. That catches native libraries
     # writing to fd 1 as well as Python prints, so nothing splits a frame.
@@ -309,6 +315,8 @@ def main():
         "debug.emit": debug_emit,
         "debug.inject_audio": lambda params: controller.inject_audio(params.get("path", "")),
     }
+
+    methods.update(extra or {})
 
     _start_parent_watchdog()
     serve(sys.stdin.readline, methods, write_frame)

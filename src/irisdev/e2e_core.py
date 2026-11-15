@@ -14,11 +14,30 @@ its download without fetching, and "clones" every sample as one of Pocket
 TTS's own voices, which the open model reads. All the rest of cloning is
 Iris's own: the sample, the voice's folder, the persona that speaks with it.
 
+The test looks into the core through methods of its own:
+
+- e2e.speaker {since, until}: how much sound the virtual speaker played
+  between two moments, so the test knows a voice was heard, not only that
+  the core reported its level;
+- e2e.model: when the model's streamed replies came in, its reasoning
+  included, which the app is never shown: a reasoning model may think for
+  minutes before it writes a word.
+
+Their moments are the test's: milliseconds since the epoch.
+
+How well the model answers does not matter to the test, so every chat
+request asks it to answer without reasoning first: an OpenAI-compatible
+server through its chat template (enable_thinking off), Ollama with think
+off. Iris itself asks for no such thing. A step that needs the model to
+choose a tool lets it reason again while it runs (e2e.reasoning {on}).
+
     python -m irisdev.e2e_core
 """
 
 import json
+import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import httpx
@@ -33,6 +52,14 @@ from irisdev.voicetest.acoustics import Space
 TOKEN = "hf_e2e_test_token"
 STATE = Path.home() / ".e2e-huggingface.json"
 CLONED_AS = "anna"
+# Requests whose reply the model streams: OpenAI-compatible servers', Ollama's
+CHAT_PATHS = ("/chat/completions", "/api/chat")
+# Streamed replies kept, the latest
+STREAMS_KEPT = 50
+
+# The room, and Iris's laptop in it
+SPACE = Space()
+LAPTOP = SPACE.endpoint("Iris")
 
 
 def _refused(status: int, message: str, gated: bool = False):
@@ -107,12 +134,106 @@ class StandInKyutai(cloning.Kyutai):
         return model
 
 
+def _monotonic(moment_ms: float) -> float:
+    """A moment of the test's clock on time.monotonic()'s."""
+    return time.monotonic() - (time.time() - moment_ms / 1000)
+
+
+def speaker(params: dict) -> dict:
+    """How much sound the laptop's speaker played between two moments
+    (since, and until or now): the seconds it was audible, and the clips it
+    was given."""
+    start = _monotonic(float(params.get("since") or 0))
+    end = _monotonic(float(params["until"])) if params.get("until") else time.monotonic()
+    played = LAPTOP.speaker
+    return {
+        "seconds": round(played.sound_heard(start, end), 3),
+        "clips": len(played.clips_between(start, end)),
+    }
+
+
+class ModelWatch:
+    """When the lines of each reply the model streams come in, whatever they
+    hold: words, reasoning or tool calls."""
+
+    def __init__(self):
+        self._streams: deque = deque(maxlen=STREAMS_KEPT)
+        self._lock = threading.Lock()
+
+    def watch(self, response: httpx.Response, lines):
+        """The lines of a response, noted as they pass when it is a reply."""
+        try:
+            chat = response.request.url.path.endswith(CHAT_PATHS)
+        except RuntimeError:  # a response without its request
+            chat = False
+        stream = None
+        for line in lines:
+            if chat and line.strip():
+                now = time.time() * 1000
+                with self._lock:
+                    if stream is None:
+                        stream = {"first": now, "last": now, "lines": 0}
+                        self._streams.append(stream)
+                    stream["last"] = now
+                    stream["lines"] += 1
+            yield line
+
+    def report(self, params: dict) -> dict:
+        """The replies streamed lately: when their first and last lines came
+        (milliseconds since the epoch), and how many lines they had."""
+        with self._lock:
+            return {"streams": [dict(stream) for stream in self._streams]}
+
+
+MODEL = ModelWatch()
+_iter_lines = httpx.Response.iter_lines
+
+
+def _watched_lines(self, *args, **kwargs):
+    return MODEL.watch(self, _iter_lines(self, *args, **kwargs))
+
+
+# Whether chat requests ask the model to answer without reasoning first
+REASONING = {"off": True}
+
+
+def reasoning(params: dict) -> dict:
+    """Let the model reason first again ({"on": true}), or not."""
+    REASONING["off"] = not params.get("on")
+    return {"ok": True, "reasoning": not REASONING["off"]}
+
+
+def without_reasoning(path: str, body: dict) -> dict:
+    """A chat request's body, asking the model to answer at once: for an
+    OpenAI-compatible server (/chat/completions) through its chat template,
+    for Ollama (/api/chat) with think off. Any other request is as it was."""
+    if path.endswith("/chat/completions"):
+        template = {**(body.get("chat_template_kwargs") or {}), "enable_thinking": False}
+        return {**body, "chat_template_kwargs": template}
+    if path.endswith("/api/chat"):
+        return {**body, "think": False}
+    return body
+
+
+_build_request = httpx.Client.build_request
+
+
+def _built_without_reasoning(self, method, url, *args, **kwargs):
+    if REASONING["off"] and isinstance(kwargs.get("json"), dict):
+        kwargs["json"] = without_reasoning(httpx.URL(url).path, kwargs["json"])
+    return _build_request(self, method, url, *args, **kwargs)
+
+
 def main():
     # The microphone and the speaker are taken from here when the assistant
     # is built, after the app has asked for it
-    audio.SYSTEM = Space().endpoint("Iris")
+    audio.SYSTEM = LAPTOP
     cloning.KYUTAI = StandInKyutai()
-    rpc_server.main()
+    # Both Ollama's client and Iris's own for other servers read a streamed
+    # reply line by line, and build each request through httpx
+    httpx.Response.iter_lines = _watched_lines
+    httpx.Client.build_request = _built_without_reasoning
+    rpc_server.main({"e2e.speaker": speaker, "e2e.model": MODEL.report, "e2e.reasoning": reasoning})
 
 
 if __name__ == "__main__":

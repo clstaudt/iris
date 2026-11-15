@@ -727,6 +727,13 @@ class IrisStore {
     this.voices = await rpc<VoiceOptions>("persona.voices");
   }
 
+  /** Drop a cloned voice made in the persona editor and not kept (the core
+   *  keeps one a persona speaks with), and stop offering it. */
+  async forgetVoice(voice: string) {
+    const result = await rpc<{ ok: boolean; forgotten?: boolean }>("voice.forget", { voice });
+    if (result.forgotten) await this.loadVoices();
+  }
+
   /** Save a persona; a new one becomes the current persona. Returns an error
    *  message, or null once saved. */
   async savePersona(settings: PersonaSettings): Promise<string | null> {
@@ -741,6 +748,8 @@ class IrisStore {
     this.personas = result.personas;
     this.personaNames = result.names;
     if (!settings.id) await this.setPersona(result.id);
+    // A voice cloned again replaces the one cloned before, which goes
+    if (this.voices) await this.loadVoices();
     return null;
   }
 
