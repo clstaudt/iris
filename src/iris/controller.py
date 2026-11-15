@@ -12,7 +12,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from iris import downloads, engines, servers, speech_models
+from iris import cloning, downloads, engines, servers, speech_models
 from iris.assistant import VoiceAssistant
 from iris.attachments import AttachmentError, prepare_all
 from iris.audio import AUDIO_FILTERS, AudioPlayer, AudioRecorder, SoundCheck, get_filter
@@ -27,6 +27,7 @@ from iris.personas import (
     reload_personas,
     save_persona,
     shipped,
+    voice_in_use,
 )
 from iris.llm_client import is_openai, resolve_host
 from iris.plugins import load as load_plugins
@@ -197,6 +198,11 @@ class AssistantController:
         self._sound_check: SoundCheck | None = None
         self._preview: SpeechPipeline | None = None
         self._preview_lock = threading.Lock()
+        # Voices cloned in the persona editor; a sample is recorded from
+        # Iris's microphone, while it does not listen
+        self.cloning = cloning.Cloning(
+            bus.emit, lambda: self.assistant, self.interrupt, voice_in_use
+        )
 
         bus.subscribe(self._on_bus_event)
 
@@ -1210,7 +1216,11 @@ class AssistantController:
             return {"ok": False, "error": "The persona needs a name"}
         if settings.get("engine") not in engines.speech_engines() or not settings.get("voice"):
             return {"ok": False, "error": "The persona needs a voice"}
+        before = find_persona(settings.get("id") or "")
         persona_id = save_persona(settings, settings.get("id") or None)
+        # A voice cloned again replaces the one cloned before
+        if before is not None:
+            self.cloning.replaced(before.voice, settings["voice"])
         if self.assistant is not None and self.assistant.persona.id == persona_id:
             self.set_persona(persona_id)
         return {"ok": True, "id": persona_id, **self.list_personas()}

@@ -7,6 +7,7 @@
     type VoiceInfo,
   } from "../../lib/state.svelte";
   import Icon from "../Icon.svelte";
+  import VoiceClone from "./VoiceClone.svelte";
 
   // A persona is who Iris is: a name, a personality, the words that wake it
   // and send it to sleep, and a voice. Models, tools, turn-taking and
@@ -257,6 +258,7 @@
           </div>
         </div>
       {/each}
+      <VoiceClone {draft} onchoose={(voice) => (draft!.voice = voice)} />
     </section>
 
     <div class="grid grid-cols-2 gap-6">

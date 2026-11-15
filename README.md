@@ -10,7 +10,7 @@ Iris is a modular voice and vision assistant, used through its desktop app. You 
 
 - **Talks with you by voice**, or by text in the same conversation. It answers as soon as you have finished speaking, not after a fixed silence, and starts with the first sentence of its reply.
 - **Can be interrupted.** Speak while it talks and it pauses, then stops if you go on. An echo canceller keeps its own voice out of the microphone.
-- **Wake word and personas.** Iris can sleep until called by name. Each persona has its own personality, voice, wake word and sleep word.
+- **Wake word and personas.** Iris can sleep until called by name. Each persona has its own personality, voice (a Kyutai voice can be cloned from a sample), wake word and sleep word.
 - **Sees** through the camera and the screen, and reads the images, PDFs and text files you hand it.
 - **Searches the web** and reads pages.
 - **Remembers** earlier conversations by topic.
