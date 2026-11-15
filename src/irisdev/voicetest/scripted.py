@@ -107,6 +107,12 @@ ASIDE_WATCH = 4.0
 HOLD_FOLLOW = 1.2
 # The part of a resumed clip looked for in the clip it resumes
 HOLD_PROBE = 0.3
+# How far back in what a clip was heard playing a later clip's start is
+# looked for, to find sound played twice
+REPLAY_LOOKBACK = 3.0
+# A resumed clip that goes on this much before where its clip was cut, or
+# more, repeats what was heard (seconds)
+REPEAT_SLACK = 0.05
 # What a merged turn may have said of an answer to its first part
 EITHER_ANSWER = 1.0
 # Sentences run together in a reply: "up.In"
@@ -175,6 +181,40 @@ def holds(clips: list[Clip]) -> list[Hold]:
             continue
         found.append(Hold(a.stopped, round(b.started - a.stopped, 3), round((cut - (lo + offset)) / RATE, 3)))
     return found
+
+
+def replayed(earlier: Clip, clip: Clip) -> Optional[float]:
+    """Seconds of sound a clip plays again that an earlier clip was heard
+    playing, when it goes on with the earlier one's audio from before where
+    that was cut (its first HOLD_PROBE found in the earlier one's audio,
+    within REPLAY_LOOKBACK of where it was last heard). None if it plays
+    nothing again: a new clip, or one going on where its clip was cut."""
+    probe = clip.audio[: int(HOLD_PROBE * RATE)]
+    if len(probe) < RATE // 10 or float(np.abs(probe).max()) < AUDIBLE:
+        return None
+    heard = len(earlier.heard())
+    lo = max(0, heard - int(REPLAY_LOOKBACK * RATE))
+    segment = earlier.audio[lo : heard + RATE // 2 + len(probe)]
+    if len(segment) < len(probe):
+        return None
+    offset = _locate(segment, probe)
+    if offset is None:
+        return None
+    again = (heard - (lo + offset)) / RATE
+    return round(again, 3) if again > REPEAT_SLACK else None
+
+
+def voice_holds(lines: list) -> dict:
+    """What Iris's voice log (iris.voice: (at, message) lines) says of the
+    holds: how many, how many were judged its own echo and the user's, and
+    how often the voice went on after being cut."""
+    messages = [message for _, message in lines]
+    return {
+        "held": sum(m.startswith("held") for m in messages),
+        "echo": sum(m.startswith("echo") for m in messages),
+        "user": sum(m.startswith("user") for m in messages),
+        "resumed": sum(m.startswith("resumes") for m in messages),
+    }
 
 
 def _locate(segment: np.ndarray, probe: np.ndarray, threshold: float = 0.9) -> Optional[int]:
@@ -285,6 +325,9 @@ class TurnResult:
     deaf_spans: list = field(default_factory=list)
     verdicts: list = field(default_factory=list)  # (at, probability)
     holds: list = field(default_factory=list)  # (at, silence, rewind)
+    # What Iris's voice log said in the turn (each hold, what it was judged
+    # to be, where the voice went on)
+    voice: list = field(default_factory=list)  # (at, message)
     chimes: list = field(default_factory=list)  # (at, rising or falling)
     busy_silence: Optional[float] = None
     glued: bool = False
@@ -328,6 +371,12 @@ class TurnResult:
             parts.append(f"silent {self.stop:.2f} s after Stop")
         if self.tool_uses:
             parts.append("used " + ", ".join(f"{tool} ({detail})" for _, tool, detail in self.tool_uses))
+        counts = voice_holds(self.voice)
+        if counts["held"] or counts["resumed"]:
+            repeated = [rewind for _, _, rewind in self.holds if rewind is not None and rewind > REPEAT_SLACK]
+            parts.append(f"held {counts['held']} ({counts['echo']} echo, {counts['user']} user), "
+                         f"resumed {counts['resumed']}"
+                         + (f", repeating {', '.join(f'{r:.2f}' for r in repeated)} s" if repeated else ""))
         lines = [f"\n         {f}" for f in self.failures]
         lines += [f"\n         expected failure: {f}" for f in self.expected]
         lines += [f"\n         now passes: {f}" for f in self.now_passes]
@@ -1253,6 +1302,7 @@ class ScriptedConversations:
         result.verdicts = [(rel(at), d.get("probability")) for at, _, d in log.since(start, "turn.verdict", end)]
         clips = speaker.clips_between(start, end)
         result.holds = [(rel(h.at), h.silence, h.rewind) for h in holds([c for c in clips if not chime_of(c)])]
+        result.voice = [(rel(at), d.get("message", "")) for at, _, d in log.since(start, "voice", end)]
         result.chimes = [(rel(c.started), chime_of(c)) for c in clips if chime_of(c)]
         reply_sounds = self._reply_sounds(ref, end)
         result.busy_silence = longest_busy_silence(timeline, reply_sounds, ref, end)
@@ -1586,6 +1636,9 @@ def summarize(results: list[TurnResult]) -> dict:
         "now_passes": sorted({f"{r.conversation}: {e}" for r in held for e in r.now_passes}),
         "skipped": sorted({f"{r.conversation}: {r.skipped}" for r in results if r.skipped}),
         "taken_early": sum(r.taken_early for r in held),
+        # The voice held, and what the holds were judged to be (iris.voice)
+        "holds": {key: sum(voice_holds(r.voice)[key] for r in held) for key in ("held", "echo", "user", "resumed")},
+        "repeated": sum(1 for r in held for _, _, rewind in r.holds if rewind is not None and rewind > REPEAT_SLACK),
         **block(held),
     }
     tags = sorted({tag for r in held for tag in r.tags})

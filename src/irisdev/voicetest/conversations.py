@@ -58,6 +58,29 @@ __all__ = ["CONVERSATIONS", "Conversation", "GROUPS", "Turn", "all_conversations
 
 # The everyday conversations ----------------------------------------------------------
 
+# Questions answered in a few sentences each, for replies listened to in silence
+QUIET_REPLIES = [
+    ("How do tides work?",
+     "Tides are the slow rise and fall of the sea. The moon pulls the oceans towards it as the earth turns "
+     "beneath them. The sun adds a weaker pull of its own. Most coasts see two high tides every day."),
+    ("Why do cats purr?",
+     "Cats purr when they are content, and sometimes when they are hurt. The sound comes from muscles in "
+     "the voice box that twitch many times a second. Purring may even help their bones heal. Kittens "
+     "start to purr when they are a few days old."),
+    ("What makes bread rise?",
+     "Bread rises because of yeast. The yeast eats the sugars in the dough and gives off carbon dioxide. "
+     "The gas is trapped in a web of gluten, which stretches like a balloon. Baking then sets the bubbles "
+     "in place."),
+    ("Why is the sea salty?",
+     "Rain wears tiny amounts of salt out of the rocks on land. Rivers carry it down to the sea, where it "
+     "stays. The sun takes the water away again, but leaves the salt behind. Over millions of years the "
+     "sea has become salty."),
+    ("How do bees make honey?",
+     "Bees gather nectar from flowers and carry it home in a second stomach. In the hive they pass it "
+     "from bee to bee, and it slowly thickens. They store it in wax cells and fan it with their wings to "
+     "dry it. Then they seal each cell with a lid of wax."),
+]
+
 CONVERSATIONS = [
     Conversation(
         "a question and a follow-up",
@@ -114,6 +137,28 @@ CONVERSATIONS = [
         [
             Turn(["Explain in detail how a rainbow forms."], listen_through=True),
         ],
+    ),
+    # Replies listened to in silence, one after another. The speaker's sound
+    # comes out with a delay of its own each time it starts after a silence,
+    # so the echo canceller lets the start of each reply through while it
+    # finds the voice again: Iris must not take that for the user, hold its
+    # voice and say the first words twice
+    Conversation(
+        "replies listened to in silence",
+        [Turn([question], listen_through=True, checks=[c.played_once()]) for question, _ in QUIET_REPLIES],
+        stub_rules=[Rule(re.escape(question[:-1]), reply) for question, reply in QUIET_REPLIES],
+        # A new Iris: its canceller learns the room in the first reply
+        fresh=True,
+        tags=["echo", "listen through"],
+    ),
+    # The same with a laptop's small speakers driven hard in a room that rings
+    Conversation(
+        "replies listened to in silence, laptop speakers",
+        [Turn([question], listen_through=True, checks=[c.played_once()]) for question, _ in QUIET_REPLIES],
+        stub_rules=[Rule(re.escape(question[:-1]), reply) for question, reply in QUIET_REPLIES],
+        echo=Echo(gain=0.3, room=0.4, drive=2.0),
+        fresh=True,
+        tags=["echo", "listen through", "loud speakers"],
     ),
     Conversation(
         "the stop button",
