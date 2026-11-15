@@ -286,6 +286,9 @@ export interface VoiceInfo {
   ready?: string[];
   /** The personas that speak with it */
   personas?: { id: string; name: string }[];
+  /** A voice cloned here: where its files are, and the languages made of
+   *  its sample so far */
+  cloned?: { folder: string; made: string[] };
 }
 
 /** Making a voice ready to speak a language: a download, then for a cloned
@@ -334,6 +337,8 @@ export interface VoiceOptions {
   chosen?: string[];
   /** The jobs making voices ready */
   jobs?: VoiceJob[];
+  /** The voice a persona speaks with once its cloned voice is deleted */
+  fallback?: string;
 }
 
 /** User choices remembered across launches. */
@@ -459,7 +464,7 @@ class IrisStore {
   presence = $state(window.iris?.presence ?? false);
   /** The persona open in the persona editor; "" for a new one */
   editingPersona = $state(loadSettings().persona ?? "iris");
-  /** Each speech engine's voices, for the persona editor and Iris's languages */
+  /** Each speech engine's voices, for the persona editor and the Voices page */
   voices = $state<VoiceOptions | null>(null);
   /** Iris's languages, as chosen; English always */
   languages = $state<string[]>(loadSettings().languages ?? ["en"]);
@@ -865,9 +870,32 @@ class IrisStore {
     if (this.voices) this.voices.chosen = result.languages;
   }
 
+  /** Make a voice ready for languages (Iris's own without any). */
+  async makeReady(engine: SpeechEngine, voice: string, languages?: string[]) {
+    const result = await rpc<{ jobs: VoiceJob[] }>("voice.ready", { engine, voice, languages });
+    for (const job of result.jobs ?? []) this.takeJob(job, false);
+  }
+
   async retryJob(id: string) {
     const result = await rpc<{ job: VoiceJob | null }>("voice.retry", { id });
     if (result.job) this.takeJob(result.job, false);
+  }
+
+  /** Rename a cloned voice. Returns an error message, or null once renamed. */
+  async renameVoice(voice: string, name: string): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string }>("voice.rename", { voice, name });
+    if (!result.ok) return result.error ?? "The voice could not be renamed";
+    await this.loadVoices();
+    return null;
+  }
+
+  /** Delete a cloned voice; reassign gives the personas that speak with it
+   *  Kyutai's default voice. Returns an error message, or null once deleted. */
+  async deleteVoice(voice: string, reassign = false): Promise<string | null> {
+    const result = await rpc<{ ok: boolean; error?: string }>("voice.delete", { voice, reassign });
+    await this.loadVoices();
+    if (!result.ok) return result.error ?? "The voice could not be deleted";
+    return null;
   }
 
   /** Drop a cloned voice made in the persona editor and not kept (the core

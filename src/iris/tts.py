@@ -757,6 +757,13 @@ class PocketGenerator(SpeechEngine):
             on_step(Step("download", "model" if weights & set(missing) else "voice"))
             cloning.KYUTAI.fetch(missing, on_progress)
 
+    def voice_changed(self, voice: str):
+        """A cloned voice made again: what was loaded of it goes."""
+        folder = voice_folder(voice)
+        key = str(folder) if folder is not None else voice
+        for loaded in [k for k in self._voice_states if k[1] == key]:
+            del self._voice_states[loaded]
+
     def __init__(self, voice: str = "anna", models_dir: str | Path | None = None):
         """
         Args:
@@ -923,6 +930,14 @@ class SpeechGenerator:
         """Whether the persona's voice is ready to speak this language now:
         nothing to download or make first (voice_ready)."""
         return voice_ready(self.engine, self.voice, language, self.models_dir)
+
+    def voice_changed(self, voice: str):
+        """A voice made again from a new sample: what each engine keeps
+        loaded of it goes, and it is prepared afresh."""
+        with self._lock:
+            for engine in self._engines.values():
+                engine.voice_changed(voice)
+            self._prepared = {key for key in self._prepared if key[1] != voice}
 
     def languages(self) -> frozenset[str]:
         """The languages a reply may be in, as Whisper codes: all Iris talks

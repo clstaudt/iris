@@ -14,10 +14,16 @@
   // with it (each language's cloning model downloaded first): the voice is
   // cloned once it is made for all of them. The voice made is one of the
   // engine's voices from then on, listed with the others; this offers to
-  // make one.
+  // make one. In the voice library (keep), the voices made are kept, and a
+  // cloned voice cloned again is made again in place, keeping its name and
+  // its personas; for a persona, a voice made and not saved with it goes
+  // when the editor closes, and cloning again makes another.
 
-  let { draft, onchoose }: { draft: PersonaSettings; onchoose: (voice: string) => void } =
-    $props();
+  let {
+    draft,
+    onchoose,
+    keep = false,
+  }: { draft: PersonaSettings; onchoose: (voice: string) => void; keep?: boolean } = $props();
 
   const MODEL_PAGE = "https://huggingface.co/kyutai/pocket-tts";
   const PREFIX = "clone:";
@@ -191,13 +197,14 @@
   /** Make the voice of the sample, for English and each language picked,
    *  then choose it, and say the preview in it. */
   async function make() {
+    const replace = keep && cloned ? draft.voice : "";
     const result = await rpc<{
       ok: boolean;
       error?: string;
       access?: boolean;
       voice?: VoiceInfo;
       jobs?: VoiceJob[];
-    }>("voice.clone", { name: draft.name.trim(), languages: picked });
+    }>("voice.clone", { name: draft.name.trim(), replace, languages: picked });
     if (!result.ok || !result.voice) {
       if (result.access) {
         await open();
@@ -206,7 +213,7 @@
       return;
     }
     const voice = result.voice.id;
-    made.push(voice);
+    if (!keep) made.push(voice);
     madeVoice = voice;
     making = result.jobs ?? [];
     if (!making.length) await finish();
@@ -225,12 +232,13 @@
     madeVoice = "";
     making = [];
     // Cloned again before saving: the voice made before is not kept
-    const replaced = made.includes(draft.voice) ? draft.voice : null;
+    const replaced = !keep && made.includes(draft.voice) && draft.voice !== voice ? draft.voice : null;
     await store.loadVoices();
     onchoose(voice);
     step = "closed";
     if (replaced) store.forgetVoice(replaced).catch(() => {});
-    await store.previewVoice({ ...$state.snapshot(draft), voice });
+    const named = store.voices?.engines.kyutai?.find((v) => v.id === voice)?.name ?? "";
+    await store.previewVoice({ ...$state.snapshot(draft), name: draft.name.trim() || named, voice });
   }
 
   function back(message?: string) {
