@@ -239,6 +239,9 @@ def main(extra: dict | None = None):
         "llm.list": lambda params: controller.list_models(),
         "llm.set": lambda params: controller.set_model(params.get("name", "")),
         "llm.set_host": lambda params: controller.set_ollama_host(params.get("url", "")),
+        "llm.set_key": lambda params: controller.set_key(
+            params.get("url", ""), params.get("key", "")
+        ),
         "llm.check_hosts": lambda params: controller.check_servers(params.get("urls", [])),
         "llm.find_servers": lambda params: controller.find_servers(),
         "llm.probe": lambda params: controller.probe_server(params.get("url", "")),

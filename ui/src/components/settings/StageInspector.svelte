@@ -156,6 +156,7 @@
   const SERVER_CHECK_MS = 20_000;
   let adding = $state(false);
   let newServer = $state("");
+  let newKey = $state("");
   let serverError = $state("");
   let connecting = $state<string | null>(null);
   const activeServer = $derived(config?.ollama_host ?? "");
@@ -201,9 +202,19 @@
 
   function addServer() {
     if (!newServer.trim()) return;
-    store.addServer(newServer);
+    store.addServer(newServer, newKey).catch(fail("llm.set_key"));
     newServer = "";
+    newKey = "";
     adding = false;
+  }
+
+  function addingKeys(e: KeyboardEvent) {
+    if (e.key === "Enter") addServer();
+    if (e.key === "Escape") {
+      // The key typed is not kept here, added or not
+      newKey = "";
+      adding = false;
+    }
   }
 
   function focus(node: HTMLInputElement) {
@@ -437,17 +448,24 @@
           </div>
         {/each}
         {#if adding}
+          <input
+            use:focus
+            bind:value={newServer}
+            onkeydown={addingKeys}
+            placeholder="http://host:11434"
+            spellcheck="false"
+            aria-label="Server address"
+            class="s-field min-w-0"
+          />
           <div class="flex gap-1.5">
             <input
-              use:focus
-              bind:value={newServer}
-              onkeydown={(e) => {
-                if (e.key === "Enter") addServer();
-                if (e.key === "Escape") adding = false;
-              }}
-              placeholder="http://host:11434"
+              type="password"
+              bind:value={newKey}
+              onkeydown={addingKeys}
+              placeholder="API key"
+              autocomplete="off"
               spellcheck="false"
-              aria-label="Server address"
+              aria-label="Server key"
               class="s-field min-w-0 flex-1"
             />
             <button class="s-btn h-9" disabled={!newServer.trim()} onclick={addServer}>Add</button>

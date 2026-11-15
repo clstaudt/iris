@@ -14,7 +14,7 @@
 // nothing sounds on the speakers. Its camera is a stand-in as well. Iris sleeps until a wake word nobody says.
 // The app is restarted with a new core near the end. Beside the model server
 // it is given, the test runs a small one of its own, with fixed replies, to
-// switch servers to.
+// switch servers to, and a stand-in for an MTPLX server, which wants a key.
 //
 //   npm run build && npm run e2e
 //
@@ -199,6 +199,76 @@ const stub = http.createServer((request, response) => {
 });
 await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
 const stubUrl = `http://127.0.0.1:${stub.address().port}/v1`;
+
+// A stand-in for an MTPLX server, answering as MTPLX's own does
+// (mtplx/server/openai.py): every route wants the key it was started with,
+// and a page from another origin is refused before that. /v1/models lists
+// the one model it has loaded, as its own, with whether it sees; a chat is
+// answered by that model whatever model it names, after a keep-alive, with
+// its reasoning apart unless switched off.
+const MTPLX_KEY = "sk-e2e-mtplx";
+const MTPLX_MODEL = "loaded-model";
+const MTPLX_REPLY = "Hello from the loaded model.";
+/** The chat requests the MTPLX stand-in was sent, and the key each request
+ *  to it carried (null for none) */
+const mtplxRequests = [];
+const mtplxKeys = [];
+const mtplx = http.createServer((request, response) => {
+  let body = "";
+  request.on("data", (part) => (body += part));
+  request.on("end", () => {
+    const route = request.url.split("?")[0];
+    const send = (status, payload, headers = {}) => {
+      response.writeHead(status, { "Content-Type": "application/json", ...headers });
+      response.end(JSON.stringify(payload));
+    };
+    const error = (status, message, type, headers) =>
+      send(status, { error: { message, type, code: String(status), param: null } }, headers);
+    const origin = request.headers.origin;
+    if (origin !== undefined && origin !== `http://${request.headers.host}`) {
+      return error(403, "cross-origin request refused", "origin_error");
+    }
+    const [scheme, token] = (request.headers.authorization ?? "").split(" ");
+    const given = scheme?.toLowerCase() === "bearer" && token ? token : request.headers["x-api-key"];
+    mtplxKeys.push(given ?? null);
+    if (given !== MTPLX_KEY) {
+      return error(401, "missing or invalid API key", "authentication_error", { "WWW-Authenticate": "Bearer" });
+    }
+    if (request.method === "GET" && route === "/v1/models") {
+      const window = 32768;
+      return send(200, {
+        object: "list",
+        data: [{
+          id: MTPLX_MODEL, object: "model", created: Math.floor(Date.now() / 1000), owned_by: "mtplx",
+          capability: "chat", supports_vision: true, modalities: { input: ["text", "image"], output: ["text"] },
+          context_length: window, max_context_length: window, max_model_len: window,
+        }],
+      });
+    }
+    if (request.method === "POST" && route === "/v1/chat/completions") {
+      const payload = JSON.parse(body || "{}");
+      mtplxRequests.push(payload);
+      const thinking = payload.enable_thinking ?? payload.chat_template_kwargs?.enable_thinking ?? true;
+      const envelope = { id: "chatcmpl-e2e", object: "chat.completion.chunk", model: MTPLX_MODEL };
+      if (!payload.stream) {
+        const message = { role: "assistant", content: MTPLX_REPLY };
+        return send(200, { ...envelope, object: "chat.completion", choices: [{ index: 0, message }] });
+      }
+      const chunk = (delta, finish = null) =>
+        `data: ${JSON.stringify({ ...envelope, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write(": keep-alive\n\n");
+      response.write(chunk({ role: "assistant" }));
+      if (thinking) response.write(chunk({ reasoning_content: "The user greets me." }));
+      for (const piece of MTPLX_REPLY.match(/\S+\s*/g)) response.write(chunk({ content: piece }));
+      response.write(chunk({}, "stop"));
+      return response.end("data: [DONE]\n\n");
+    }
+    error(404, "Not Found", "invalid_request_error");
+  });
+});
+await new Promise((resolve) => mtplx.listen(0, "127.0.0.1", resolve));
+const mtplxUrl = `http://127.0.0.1:${mtplx.address().port}/v1`;
 
 // ------------------------------------------------------------- the browser
 
@@ -1147,6 +1217,67 @@ try {
       await stand.locator('button[title="Remove"]').click().catch(() => {});
       await until("the stand-in to be gone", async () => (await servers.count()) === before).catch(() => {});
     }
+  });
+
+  await step("servers: an MTPLX server is added with its key, the model it has loaded is in use, and it answers", async () => {
+    await openStage("Language model");
+    const host = config().ollama_host;
+    const back = servers.filter({ hasText: host ? new URL(host).host : "This computer" });
+    const before = await servers.count();
+    const keys = path.join(coreHome, ".iris", "server-keys.json");
+    // As a user types it, without /v1, with the key it wants
+    await inspector.locator("button.s-btn", { hasText: "Add server" }).click();
+    await inspector.locator('input[aria-label="Server address"]').fill(mtplxUrl.replace(/\/v1$/, ""));
+    await inspector.locator('input[aria-label="Server key"]').fill(MTPLX_KEY);
+    await page.screenshot({ path: path.join(OUT, "server-with-key.png") });
+    await inspector.locator("button.s-btn", { hasText: /^Add$/ }).click();
+    const row = servers.filter({ hasText: new URL(mtplxUrl).host });
+    await row.waitFor({ timeout: 5000 });
+    try {
+      await row.locator(".dot.ok").waitFor({ timeout: 15_000 });
+      await row.locator("button.pick").click();
+      await until("the MTPLX server to be in use", () => config().ollama_host === mtplxUrl, 30_000);
+      // The model it has loaded, the one it answers with, is the one in use,
+      // and nothing else is offered
+      await until("its loaded model", () => config().llm_model === MTPLX_MODEL, 30_000);
+      const offered = inspector.locator("button.s-option");
+      await until("its model on offer", () => offered.count(), 30_000);
+      check((await offered.count()) === 1, `${await offered.count()} models are offered`);
+      await inspector.locator(".s-option.active", { hasText: MTPLX_MODEL }).waitFor({ timeout: 5000 });
+      check(!(await inspector.getByText("Not installed").count()), "a model not loaded is shown");
+      check(await offered.locator(".s-chip", { hasText: "vision" }).count(), "the loaded model's sight is not shown");
+      await page.screenshot({ path: path.join(OUT, "server-mtplx.png") });
+      // Its replies come from it, in Amnesia mode (see amnesia())
+      await amnesia(true);
+      const since = await ask("Hello there.");
+      const done = await eventAfter("chat.done", since, () => true, 60_000);
+      check(done.data.text.includes(MTPLX_REPLY), `the reply came from elsewhere: ${done.data.text}`);
+      check(!done.data.text.includes("The user greets me"), "the reasoning is part of the reply");
+      check(mtplxRequests.at(-1)?.model === MTPLX_MODEL, `the server was asked for ${mtplxRequests.at(-1)?.model}`);
+      check(mtplxKeys.every((key) => key === MTPLX_KEY), `a request went without the key: ${mtplxKeys.filter((k) => k !== MTPLX_KEY).length}`);
+      await voiceDone();
+      await amnesia(false);
+      // The key is the core's alone, readable by this computer's user alone:
+      // not in the window's storage, nor told or logged
+      check((fs.statSync(keys).mode & 0o777) === 0o600, "the key is kept readable by others");
+      const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+      check(!stored.includes(MTPLX_KEY), "the window keeps the key");
+      check(!JSON.stringify(events).includes(MTPLX_KEY), "an event told the key");
+      check(!logged.some((entry) => entry.line.includes(MTPLX_KEY)), "the key was logged");
+    } finally {
+      // Whatever failed, the steps after this one talk to the test's server
+      await openStage("Language model").catch(() => {});
+      if (config().ollama_host !== host) {
+        await back.locator("button.pick").click().catch(() => {});
+        await until("the test's server again", () => config().ollama_host === host, 30_000).catch(() => {});
+      }
+      await row.locator('button[title="Remove"]').click().catch(() => {});
+      await until("the stand-in to be gone", async () => (await servers.count()) === before).catch(() => {});
+    }
+    // Back on its own server, its model is in use again; removed, the
+    // stand-in no longer has a key here
+    await until(`${model} to be in use again`, () => config().llm_model === model, 30_000);
+    await until("its key to be forgotten", () => !fs.readFileSync(keys, "utf8").includes(MTPLX_KEY), 5000);
   });
 
   await step("turn end: silence, and back to Smart Turn", async () => {
@@ -3778,6 +3909,7 @@ try {
   await closeBrowser();
   server.close();
   stub.close();
+  mtplx.close();
   await rpc("assistant.stop").catch(() => {});
   bridge.kill();
   fs.rmSync(home, { recursive: true, force: true });

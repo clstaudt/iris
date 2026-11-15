@@ -438,13 +438,19 @@ class ConversationManager:
 
     def _get_model_context_length(self) -> int:
         """
-        Get the model's context length from Ollama.
+        Get the model's context length from the server.
         Uses 80% of the actual context length as a safety margin.
+
+        A server that answers with the model it has loaded, whatever a
+        request names (MTPLX), has the conversation held by that model: it
+        becomes the conversation's model first.
 
         Returns:
             Maximum context tokens to use (80% of model's limit)
         """
         try:
+            if is_openai(self.host):
+                self.model = self.client.loaded() or self.model
             model_info = self.client.show(self.model)
             # What it can do comes with it (see _takes_tools)
             capabilities = set(model_info.capabilities or [])

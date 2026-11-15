@@ -7,12 +7,12 @@ The walkthrough also looks for servers on this computer at the ports they
 usually take.
 """
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
 from iris.llm import effective_host
+from iris.llm_client import auth_headers
 
 # Seconds a server gets to answer before it counts as unreachable
 PROBE_TIMEOUT = 3.0
@@ -37,9 +37,7 @@ def reachable(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
     if "://" not in base:
         base = f"http://{base}"
     root = base[: -len("/v1")].rstrip("/") if base.endswith("/v1") else base
-    headers = {}
-    if key := os.environ.get("IRIS_LLM_API_KEY"):
-        headers["Authorization"] = f"Bearer {key}"
+    headers = auth_headers(root)
     for probe in (f"{root}/api/version", f"{root}/v1/models"):
         try:
             if httpx.get(probe, timeout=timeout, headers=headers).status_code in ANSWERS:
@@ -51,9 +49,12 @@ def reachable(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
 
 def model_server(url: str, timeout: float = DISCOVER_TIMEOUT) -> bool:
     """Whether a server with the OpenAI-compatible API answers at this URL
-    (.../v1) with a list of models, not merely something on that port."""
+    (.../v1) with a list of models, not merely something on that port. One
+    that wants a key is found once it has one."""
     try:
-        response = httpx.get(f"{url.rstrip('/')}/models", timeout=timeout)
+        response = httpx.get(
+            f"{url.rstrip('/')}/models", timeout=timeout, headers=auth_headers(url)
+        )
         return response.status_code == 200 and isinstance(response.json().get("data"), list)
     except Exception:
         return False

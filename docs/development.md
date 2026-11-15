@@ -28,7 +28,7 @@ The test starts with empty settings and goes through the walkthrough (a server t
 
 In a terminal, `npm run e2e` shows the steps under their areas as they end, the one running with its time and about how long the rest will take, each failure with its reason and screenshot, and at the end the slowest steps and an `E2E_ONLY` that runs the failures again (`src/irisdev/e2e_report.py`). Piped to a file, it writes the same as plain lines. `npm run e2e -- --verbose` adds the core's own log lines; `npm run e2e:plain` runs the test without the reporter.
 
-Other environment variables: `OLLAMA_HOST` (the model server when none is set in the app), `IRIS_LLM_API_KEY` (a key for servers that need one), `IRIS_MEMORY_DB`, `IRIS_PERSONAS_DIR`, `IRIS_PLUGINS_DIR`, and `IRIS_MODELS_DIR` (where Kokoro's files are looked for).
+Other environment variables: `OLLAMA_HOST` (the model server when none is set in the app), `IRIS_LLM_API_KEY` (a key for servers that need one and were added without their own), `IRIS_MEMORY_DB`, `IRIS_PERSONAS_DIR`, `IRIS_PLUGINS_DIR`, and `IRIS_MODELS_DIR` (where Kokoro's files are looked for).
 
 The app icon is the fully open iris of the startup animation, drawn by the same code (`ui/src/lib/iris.ts`); `npm run icon` re-renders `ui/build/icon.png` and, on macOS, `icon.icns`. `iris-benchmark` compares kokoro-onnx with the kokoro-tts command line.
 
