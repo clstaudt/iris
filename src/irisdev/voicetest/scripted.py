@@ -26,7 +26,7 @@ from typing import Callable, Optional
 import numpy as np
 import soundfile as sf
 
-from iris.assistant import DEFAULT_WAKE_WINDOW, _sleep_chime, _thinking_tone, _wake_chime
+from iris.assistant import DEFAULT_WAKE_WINDOW, _sleep_chime, _thinking_drone, _wake_chime
 from irisdev.voicetest.acoustics import (
     AUDIBLE,
     RATE,
@@ -117,12 +117,12 @@ REPEAT_SLACK = 0.05
 EITHER_ANSWER = 1.0
 # Sentences run together in a reply: "up.In"
 GLUED = re.compile(r"[.!?][A-Za-z]")
-# The chimes Iris plays when it wakes and falls asleep, and the tone it sounds
+# The chimes Iris plays when it wakes and falls asleep, and the drone it sounds
 # while a reply is long in coming, as a speaker records them
 CHIMES = {
     "rising": to_rate(_wake_chime(), 24000),
     "falling": to_rate(_sleep_chime(), 24000),
-    "thinking": to_rate(_thinking_tone(), 24000),
+    "thinking": to_rate(_thinking_drone(), 24000),
 }
 
 

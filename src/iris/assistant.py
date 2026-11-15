@@ -90,14 +90,21 @@ NO_VISION = (
 )
 
 # While Iris thinks and nothing is heard of it (the model is slow to begin,
-# a tool runs), a soft tone now and then says it has not dropped out: the
-# first after this many seconds of silence, then one every
-# THINKING_TONE_EVERY seconds while the wait goes on. A reply that comes
-# quickly has none.
-THINKING_TONE_AFTER = 4.0
-THINKING_TONE_EVERY = 6.0
+# a tool runs), a soft drone says it has not dropped out: it fades in once
+# the silence has lasted this many seconds, and holds, barely audible, until
+# the voice starts. A reply that comes quickly has none.
+THINKING_DRONE_AFTER = 4.0
 # Seconds between looks at the wait
-THINKING_TONE_STEP = 0.1
+THINKING_DRONE_STEP = 0.1
+# The drone: how loud it is at its fullest, the seconds it takes to fade in
+# (and out, at the end of a clip), and how long a clip lasts. A wait longer
+# than a clip has the next one start as the last fades out
+DRONE_LEVEL = 0.01
+DRONE_FADE = 2.0
+DRONE_SECONDS = 40.0
+# Seconds into a clip at which the next one takes over: by then the clip has
+# faded out nearly all the way, even when it is heard later than played
+DRONE_RENEW = DRONE_SECONDS - 0.25
 
 
 def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
@@ -133,79 +140,115 @@ def _thread_chime() -> np.ndarray:
     return _chime_tones((784.0, 784.0))
 
 
-def _thinking_tone() -> np.ndarray:
-    """One tone, far softer than the chimes, that swells in and dies away:
-    "still thinking". Its pitch is the wake chime's lower one: a lower tone
-    comes closer to a voice, and the speech detector would hear more of it."""
+def _thinking_drone() -> np.ndarray:
+    """A soft, warm drone, far quieter than the chimes: C5 with a faint
+    octave above it, swelling in over DRONE_FADE seconds and held, then
+    fading out at the end of the clip. Not lower: a lower drone comes closer
+    to a voice, and the speech detector would hear more of it. So soft, it
+    ends at a low level wherever it is cut: the speaker plays one clip at a
+    time, and cannot fade one out."""
     rate = 24000
-    t = np.arange(int(rate * 0.45)) / rate
-    # At its loudest 50 ms in, then fading out: no edge to click
-    envelope = (t / 0.05) * np.exp(1 - t / 0.05)
-    return (0.04 * envelope * np.sin(2 * np.pi * 659.25 * t)).astype(np.float32)
+    t = np.arange(int(rate * DRONE_SECONDS)) / rate
+    sound = np.sin(2 * np.pi * 523.25 * t) + 0.3 * np.sin(2 * np.pi * 1046.5 * t)
+    swell = np.minimum(1.0, np.minimum(t, DRONE_SECONDS - t) / DRONE_FADE)
+    envelope = np.sin(0.5 * np.pi * swell) ** 2
+    return (DRONE_LEVEL * envelope * sound / np.abs(sound).max()).astype(np.float32)
 
 
-class ThinkingTones:
-    """A soft tone now and then while Iris thinks and is not heard (see
-    THINKING_TONE_AFTER).
+class ThinkingDrone:
+    """A soft drone while Iris thinks and is not heard (see
+    THINKING_DRONE_AFTER).
 
     heard() tells whether Iris's voice is heard, or about to be: the silence
-    is counted from when it last was. may_sound() tells whether a tone due
-    may sound; when it may not (the reply was stopped, the conversation
-    paused, Iris goes to sleep), the silence is counted anew. Once stop()
-    has returned, no tone starts. The clock is given, so a test can move it
-    on and call tick() itself.
+    is counted from when it last was, and the voice starting ends the drone
+    on the speaker. may_sound() tells whether the drone may sound; when it
+    may not (the reply was stopped, the conversation paused, Iris goes to
+    sleep), hush() stops it on the speaker, and the silence is counted
+    anew. play() starts a clip of it. Once stop() has returned it is silent,
+    and no clip starts. The clock is given, so a test can move it on and
+    call tick() itself.
     """
 
     def __init__(
         self,
         play: Callable[[], None],
+        hush: Callable[[], None],
         heard: Callable[[], bool],
         may_sound: Callable[[], bool],
         clock: Callable[[], float] = time.monotonic,
     ):
         self._play = play
+        self._hush = hush
         self._heard = heard
         self._may_sound = may_sound
         self._clock = clock
         self._lock = threading.Lock()
         self._over = threading.Event()
-        self._due = clock() + THINKING_TONE_AFTER
+        self._due = clock() + THINKING_DRONE_AFTER
+        # When the clip sounding now started; None while none does
+        self._since: Optional[float] = None
+        # A clip was played and not hushed: the speaker may still have it
+        self._played = False
 
-    def start(self) -> "ThinkingTones":
+    def start(self) -> "ThinkingDrone":
         """Look at the wait, on a thread of its own, until stop()."""
-        threading.Thread(target=self._run, name="thinking-tones", daemon=True).start()
+        threading.Thread(target=self._run, name="thinking-drone", daemon=True).start()
         return self
 
     def _run(self):
-        # Nothing that goes wrong here may touch the reply: the tones end
+        # Nothing that goes wrong here may touch the reply: the drone ends
         try:
-            while not self._over.wait(THINKING_TONE_STEP):
+            while not self._over.wait(THINKING_DRONE_STEP):
                 self.tick()
         except Exception:
-            logger.warning("The thinking tones stopped", exc_info=True)
+            logger.warning("The thinking drone stopped", exc_info=True)
 
     def tick(self) -> bool:
-        """Sound a tone if one is due now; whether one was."""
+        """Start, renew or end the drone, as the wait has it now; whether
+        it sounds."""
         with self._lock:
             if self._over.is_set():
                 return False
             now = self._clock()
             if self._heard():
-                self._due = now + THINKING_TONE_AFTER
+                # The voice takes the speaker, which ends the drone; it is
+                # never stopped here, as that could stop the voice
+                self._since = None
+                self._due = now + THINKING_DRONE_AFTER
                 return False
+            if self._since is not None:
+                if not self._may_sound():
+                    self._silence()
+                    self._due = now + THINKING_DRONE_AFTER
+                    return False
+                if now - self._since >= DRONE_RENEW:
+                    self._sound(now)
+                return True
             if now < self._due:
                 return False
             if not self._may_sound():
-                self._due = now + THINKING_TONE_AFTER
+                self._due = now + THINKING_DRONE_AFTER
                 return False
-            self._due = now + THINKING_TONE_EVERY
-            self._play()
+            self._sound(now)
             return True
 
+    def _sound(self, now: float):
+        self._play()
+        self._since = now
+        self._played = True
+
+    def _silence(self):
+        self._since = None
+        self._played = False
+        self._hush()
+
     def stop(self):
-        """No tone from now on."""
+        """Silent from now on. A clip the speaker may still have is stopped,
+        unless the voice has the speaker, or is about to."""
         with self._lock:
             self._over.set()
+            if self._played and not self._heard():
+                self._silence()
 
 
 def _echo_canceller() -> Optional[EchoCanceller]:
@@ -870,21 +913,29 @@ class VoiceAssistant:
         if self.speak_replies:
             self._play_chime(_thread_chime())
 
-    def _thinking_tones(self) -> ThinkingTones:
-        """Soft tones while the reply is thought out and nothing is heard of
-        Iris. Like the chimes they are not the voice: the echo canceller is
-        not told of them, and to the speech detector a tone this soft and
+    def _drone_while_thinking(self) -> ThinkingDrone:
+        """A soft drone while the reply is thought out and nothing is heard
+        of Iris. Like the chimes it is not the voice: the echo canceller is
+        not told of it, and to the speech detector a drone this soft and
         pure is nobody speaking, so it neither starts a turn nor interrupts
-        one. A tone still playing ends as the voice starts: the speaker
-        plays one clip at a time."""
-        return ThinkingTones(
-            lambda: self._play_chime(_thinking_tone()),
+        one."""
+        return ThinkingDrone(
+            lambda: self._play_chime(_thinking_drone()),
+            hush=self._hush_drone,
             heard=lambda: self.speech_pipeline.is_active,
             may_sound=self._may_think_aloud,
         ).start()
 
+    def _hush_drone(self):
+        """Stop the thinking drone on the speaker, which nothing else plays
+        on meanwhile."""
+        try:
+            self.player.audio.stop()
+        except Exception:
+            logger.warning("The drone could not be stopped", exc_info=True)
+
     def _may_think_aloud(self) -> bool:
-        """Whether a thinking tone may sound now: the voice is on, the reply
+        """Whether the thinking drone may sound now: the voice is on, the reply
         neither stopped nor paused, and Iris neither shutting down nor going
         to sleep (by the sleep tool, or a wake word set meanwhile)."""
         asleep = self._ending or self._asleep_until_called or (
@@ -1438,8 +1489,8 @@ class VoiceAssistant:
                     self.event_bus.emit("error", {"message": NO_VISION, "kind": "no_vision"})
 
             interrupted = False
-            # A soft tone now and then while the reply is long in coming
-            tones = self._thinking_tones()
+            # A soft drone while the reply is long in coming
+            drone = self._drone_while_thinking()
             try:
                 stream = self.conversation.chat_stream(
                     prompt,
@@ -1477,9 +1528,9 @@ class VoiceAssistant:
                         self._reply_piece()
                         self._speak(piece)
 
-                # The thinking is over. The tones end before a stop is taken
-                # in: they keep quiet only while it is there
-                tones.stop()
+                # The thinking is over. The drone ends before a stop is taken
+                # in: it keeps quiet only while it is there
+                drone.stop()
                 # Stopped, as a piece came or while nothing was arriving
                 if self.interrupt_event.is_set():
                     interrupted = True
@@ -1511,7 +1562,7 @@ class VoiceAssistant:
                     )
                 raise
             finally:
-                tones.stop()
+                drone.stop()
                 # Clear thinking status if still set
                 with self.status_manager.status_lock:
                     self.status_manager.status_thinking = False
@@ -1524,6 +1575,9 @@ class VoiceAssistant:
 
             # Wait for all speech to complete
             self.speech_pipeline.wait_for_speech()
+            # A drone the voice never took over from (a piece of the reply
+            # that could not be spoken) ends now
+            drone.stop()
 
             # Stopped while streaming, or while speaking after the stream
             cut = interrupted or self.interrupt_event.is_set()

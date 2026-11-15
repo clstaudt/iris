@@ -2316,10 +2316,10 @@ try {
     }
   });
 
-  await step("thinking: a soft tone sounds now and then while a reply is long in coming, and stops as Iris speaks", async () => {
+  await step("thinking: a soft drone fades in while a reply is long in coming, and ends as Iris speaks", async () => {
     // The model is asked only 13 s after the message (irisdev/e2e_core.py),
-    // as one that thinks long before its first word: a tone about 4 s into
-    // the silence, then one about every 6 s
+    // as one that thinks long before its first word: the drone fades in
+    // about 4 s into the silence and holds until the voice starts
     const question = "Reply with exactly: here I am.";
     await rpc("e2e.slow_reply", { to: question, seconds: 13 });
     const since = await ask(question);
@@ -2328,11 +2328,11 @@ try {
     await until("the reply's voice at the speaker", async () => (await rpc("e2e.speaker", { since })).voice, 60_000);
     await voiceDone();
     const played = await rpc("e2e.speaker", { since });
-    const waiting = played.tones.filter((at) => at < played.voice);
-    check(waiting.length >= 2, `${waiting.length} tones while the reply was long in coming`);
-    check(waiting[0] - since >= 3500, `the first tone came ${waiting[0] - since} ms after the message`);
-    check(waiting[1] - waiting[0] >= 5000, `the tones came ${waiting[1] - waiting[0]} ms apart`);
-    check(played.tones.length === waiting.length, `${played.tones.length - waiting.length} tones once Iris spoke`);
+    check(played.drone.length === 1, `the drone was played ${played.drone.length} times`);
+    const [[from, to]] = played.drone;
+    check(from - since >= 3500, `the drone began ${from - since} ms after the message`);
+    check(to - from >= 5000, `the drone lasted ${to - from} ms of a wait of 13 s and more`);
+    check(to <= played.voice, `the drone went on ${to - played.voice} ms into the voice`);
   });
 
   await step("a speaker that cannot be opened is told once, and Iris goes on: Pause, Resume and a preview work after", async () => {
