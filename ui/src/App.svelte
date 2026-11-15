@@ -82,7 +82,7 @@
         title="Settings"
         data-tour="settings"
       >
-        <Icon name="sliders" size={15} />
+        <Icon name="settings" size={15} />
       </button>
     </div>
   </header>
