@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build Iris.dmg for Apple Silicon Macs: the frozen Python core, the UI, and
-# the app around them; see README "macOS app".
+# the app around them; see docs/building-the-macos-app.md.
 #
 #   cd ui && npm run dist:mac      ->  ui/release/Iris-<version>-macOS-arm64.dmg
 #
