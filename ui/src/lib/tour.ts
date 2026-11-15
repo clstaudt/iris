@@ -51,7 +51,7 @@ export const TOUR: TourStep[] = [
   },
   {
     id: "personas",
-    text: "A persona is who Iris is: its personality, wake word and voice.",
+    text: "A persona is who Iris is: its personality, wake word and voice, to export or import as a file.",
     places: [
       { targets: ["settings"], click: true },
       { targets: ["settings-personas", "personas"], settings: "personas" },

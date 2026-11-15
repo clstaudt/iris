@@ -24,6 +24,8 @@ let quitting = false;
 
 // The iris icon, rendered by `npm run icon` (scripts/icon) into ui/build
 const ICON_PATH = path.join(__dirname, "../build/icon.png");
+// A persona's file (iris.persona_files in the core)
+const PERSONA_EXTENSION = "irispersona";
 let pythonBridge: PythonBridge | null = null;
 
 // The full window, and presence: Iris as only its orb, a round window of
@@ -496,6 +498,28 @@ app.whenReady().then(async () => {
       ? await dialog.showOpenDialog(mainWindow, options)
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0];
+  });
+  // A persona to a file of its own, named for it, and one from such a file
+  const personaFiles = [{ name: "Iris persona", extensions: [PERSONA_EXTENSION] }];
+  ipcMain.handle("save-persona-file", async (_event, name: string) => {
+    const fileName = String(name).replace(/[\\/:*?"<>|\x00-\x1f]/g, "").trim() || "Persona";
+    const options = {
+      defaultPath: path.join(app.getPath("documents"), `${fileName}.${PERSONA_EXTENSION}`),
+      filters: personaFiles,
+    };
+    const result = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, options)
+      : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return null;
+    const chosen = result.filePath;
+    return chosen.endsWith(`.${PERSONA_EXTENSION}`) ? chosen : `${chosen}.${PERSONA_EXTENSION}`;
+  });
+  ipcMain.handle("open-persona-file", async () => {
+    const options = { properties: ["openFile" as const], filters: personaFiles };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, options)
+      : await dialog.showOpenDialog(options);
+    return result.canceled ? null : (result.filePaths[0] ?? null);
   });
 
   createWindow();

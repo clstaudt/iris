@@ -1198,6 +1198,37 @@ class IrisStore {
     }
   }
 
+  /** Write a persona, as saved, to a file the user chooses, with its cloned
+   *  voice. Returns an error message, or null once written (or cancelled). */
+  async exportPersona(id: string, name: string): Promise<string | null> {
+    const path = await window.iris.savePersonaFile(name);
+    if (!path) return null;
+    const result = await rpc<{ ok: boolean; error?: string }>("persona.export", { id, path });
+    return result.ok ? null : (result.error ?? "The persona could not be exported");
+  }
+
+  /** Add a persona from a file the user chooses, with its cloned voice; it
+   *  opens in the editor. Returns an error message, or null once added (or
+   *  cancelled). */
+  async importPersona(): Promise<string | null> {
+    const path = await window.iris.openPersonaFile();
+    if (!path) return null;
+    const result = await rpc<{
+      ok: boolean;
+      error?: string;
+      id: string;
+      personas: string[];
+      names: Record<string, string>;
+    }>("persona.import", { path });
+    if (!result.ok) return result.error ?? "The persona could not be imported";
+    this.personas = result.personas;
+    this.personaNames = result.names;
+    this.editingPersona = result.id;
+    // Its cloned voice, in the library now
+    if (this.voices) await this.loadVoices();
+    return null;
+  }
+
   /** Say a line in a voice as it is being edited. Returns an error message,
    *  or null once the line is on its way. */
   async previewVoice(settings: PersonaSettings): Promise<string | null> {

@@ -322,7 +322,8 @@ def test_a_microphone_that_delivers_nothing_is_given_up(computer, monkeypatch):
     give_up = time.monotonic() + 10
 
     def unplug_soon():
-        time.sleep(0.3)
+        # Once Iris listens to the AirPods
+        assert _wait_for(lambda: any(s.open for s in computer.streams))
         computer.unplug(AIRPODS, default_input=MICROPHONE, default_output=SPEAKERS)
 
     threading.Thread(target=unplug_soon, daemon=True).start()

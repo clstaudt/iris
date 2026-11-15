@@ -92,11 +92,13 @@ def test_a_start_that_fails_is_reported_and_iris_can_be_started_again(monkeypatc
     assert _wait_for(lambda: not controller.info()["running"])
     assert seen.of("state")[-1] == {"state": "idle"}
 
-    # Nothing is left half started: starting again works
+    # Nothing is left half started: starting again works. Its thread runs
+    # at once; the assistant is built, and its loop runs, a moment later
     again = controller.start({})
     assert again["ok"] and "already_running" not in again
-    assert _wait_for(lambda: controller.info()["running"])
-    assert len(attempts) == 2
+    assert _wait_for(lambda: controller._looping)
+    assert len(attempts) == 2 and controller.info()["running"]
+    assert len(seen.of("error")) == 1
     controller.stop()
 
 
@@ -130,8 +132,8 @@ def test_a_core_started_again_does_not_show_the_conversation_twice(monkeypatch):
 
         again, seen_again = _controller(monkeypatch)
         again.start({"restore_thread": False})
-        assert _wait_for(lambda: again.info()["running"])
-        time.sleep(0.2)
+        # Its loop runs once the thread would have been restored
+        assert _wait_for(lambda: again._looping)
         assert not seen_again.of("chat.user") and not seen_again.of("chat.done")
         # The option is the controller's, not the assistant's
         assert "restore_thread" not in again.assistant.kwargs

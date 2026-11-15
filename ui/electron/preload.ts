@@ -33,6 +33,14 @@ contextBridge.exposeInMainWorld("iris", {
   /** The system's folder picker; resolves to the chosen path, or null */
   chooseFolder: (title: string) => ipcRenderer.invoke("choose-folder", title),
 
+  /** The system's save dialog for a persona's file, named for the persona;
+   *  resolves to the chosen path, or null */
+  savePersonaFile: (name: string) => ipcRenderer.invoke("save-persona-file", name),
+
+  /** The system's open dialog for a persona's file; resolves to the chosen
+   *  path, or null */
+  openPersonaFile: () => ipcRenderer.invoke("open-persona-file"),
+
   /** Whether Iris opened as presence (only the orb) */
   presence: ipcRenderer.sendSync("get-presence") as boolean,
 
