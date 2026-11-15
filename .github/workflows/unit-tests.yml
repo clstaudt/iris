@@ -6,7 +6,15 @@ on:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS as the app is built on (pack-electron.yml), for its own code
+        # paths: MLX, CoreAudio, the platform branches. Its minutes count ten
+        # times, so it runs on main and when started by hand, not on every
+        # branch pushed
+        os: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest", "macos-15"]') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       # The unit tests call no model and download none: offline, with empty
@@ -20,8 +28,11 @@ jobs:
 
     # PortAudio for sounddevice, which the core imports. Its PulseAudio
     # backend will not initialize without a sound server, so one runs with a
-    # null output; the unit tests open no audio device
+    # null output; the unit tests open no audio device. On macOS sounddevice
+    # brings its own PortAudio, which starts on CoreAudio with no device and
+    # no server, so nothing is set up there
     - name: Install PortAudio and a sound server
+      if: runner.os == 'Linux'
       run: |
         sudo apt-get update
         sudo apt-get install -y libportaudio2 pulseaudio
@@ -41,3 +52,21 @@ jobs:
       run: |
         mkdir -p "$HF_HOME" "$IRIS_MODELS_DIR"
         uv run --frozen pytest tests/unit -q
+
+  # The app's bridge to the core, with a stand-in core (ui/e2e/fake-core.mjs):
+  # a core that crashes is reported and started again. It needs only Node,
+  # which runs the bridge's TypeScript as it is
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: "22"
+
+    - name: Run the bridge tests
+      run: npm run test:bridge
+      working-directory: ui

@@ -6,6 +6,23 @@ on:
       - "main"
     tags:
       - "v*"
+  # A pull request that changes how the app is built builds it too, as main
+  # is built (signed ad hoc, not notarized), and smoke tests the core in it;
+  # it uploads nothing. Other pull requests do not: macOS minutes count ten
+  # times, and the unit tests find an import the bundle lacks on Linux
+  # (tests/unit/test_bundle_imports.py). By hand, any branch can be built
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "ui/package.json"
+      - "ui/package-lock.json"
+      - "ui/electron/**"
+      - "ui/electron-builder*"
+      - "ui/build/**"
+      - "ui/scripts/package-mac.sh"
+      - ".github/workflows/pack-electron.yml"
   workflow_dispatch:
     inputs:
       keep:
@@ -63,12 +80,20 @@ jobs:
         APPLE_ID: ${{ secrets.APPLE_ID }}
         APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    # main, pull requests and manual runs: no certificate, no notarization
     - name: Package the app (signed ad hoc)
       if: "!startsWith(github.ref, 'refs/tags/')"
       run: npm run dist:mac
       working-directory: ui
       env:
         CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    # The core in the app, signed, started as the app starts it: it must
+    # answer the app's first requests and find every engine, before the disk
+    # image goes anywhere. Offline, in an empty home, with no models
+    - name: Smoke test the core in the app
+      timeout-minutes: 15
+      run: uv run --no-project --python 3.13 packaging/smoke_core.py ui/release/mac-arm64/Iris.app
 
     # A tag's disk image goes straight to its release (a draft is made if
     # there is none): release assets do not count against the account's
