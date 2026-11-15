@@ -9,7 +9,7 @@ from scipy.signal import fftconvolve
 from iris import audio as audio_module
 from iris.audio import AudioPlayer
 from iris.echo import HAS_ECHO_CANCELLATION, RATE, STEP, EchoCanceller
-from iris.turns import HOLD_STANDS_OUT
+from iris.turns import HOLD_CANCELLED, HOLD_OUT_OF_RESIDUE, HOLD_RESIDUAL, HOLD_STANDS_OUT, HOLD_WITHIN_ECHO
 
 pytestmark = pytest.mark.skipif(not HAS_ECHO_CANCELLATION, reason="no echo canceller here")
 
@@ -253,14 +253,19 @@ def test_from_a_replys_first_word_its_echo_does_not_stand_out():
     """From the start of each reply, on a cold canceller too (its first 3 s,
     before it has learned the room) and once its sound comes out later than
     before (the canceller lets it through while it finds it again): the
-    voice's echo is never heard standing out above what it could be, so it
-    cannot hold the voice."""
+    voice's echo is never heard standing out above what it could be, nor
+    out of what the canceller left of it just before, so it cannot hold the
+    voice."""
     weighed = _replies_with_a_new_delay()
     known = [levels for _, levels, _, _ in weighed if levels is not None]
     # Known from the first quarter second of voice on, cold or not
     assert len(known) > 0.9 * len(weighed)
     assert any(levels is not None for _, levels, _, settled in weighed if not settled)
     assert max(levels.heard for levels in known) < HOLD_STANDS_OUT
+    cancelled = [levels for levels in known if levels.before is not None and levels.before <= -HOLD_CANCELLED]
+    assert cancelled
+    assert not [levels for levels in cancelled if levels.left - levels.before >= HOLD_OUT_OF_RESIDUE
+                and (levels.left <= HOLD_RESIDUAL or levels.heard <= HOLD_WITHIN_ECHO)]
 
 
 def test_a_user_louder_than_the_voice_stands_out_at_once():
@@ -268,3 +273,4 @@ def test_a_user_louder_than_the_voice_stands_out_at_once():
         weighed = _replies_with_a_new_delay(user_at=(reply, into))
         over = [levels.heard for _, levels, speaking, _ in weighed if speaking and levels is not None]
         assert over and max(over[:4]) >= HOLD_STANDS_OUT
+

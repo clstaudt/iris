@@ -558,6 +558,96 @@ class TestOverTheVoice:
         assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
         assert abs(voice.held_in[0] - frames(1.0) - frames(HOLD_TRIGGER_NEAR_ECHO)) <= 1
 
+    # Loud speakers: the user's voice reaches the microphone quieter than the
+    # voice's echo. It does not stand out above the echo, but the canceller,
+    # which left 45 dB less than the echo of the voice alone, leaves it
+
+    def test_a_short_word_quieter_than_loud_speakers_holds_the_voice_and_is_the_users(self, monkeypatch):
+        # "Stop" said once, 0.3 s, sure to be speech but not certain
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.3),
+                                    np.zeros(SAMPLE_RATE * 4)])
+        echo = Weighed(lambda t: (-3.0, -12.0, -45.0) if np.abs(_at(recording, t)).max() > 0.2
+                       else (-20.0, -45.0, -45.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, echo=echo)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+        assert voice.held_in[0] - frames(1.0) <= frames(HOLD_TRIGGER) + 1
+
+    def test_a_word_as_loud_as_a_quiet_moment_of_the_voice_holds_it_and_is_the_users(self, monkeypatch):
+        # "Wait" said where the voice is quiet: about as loud as its echo
+        # could be, and far above what the canceller left before
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.3),
+                                    np.zeros(SAMPLE_RATE * 4)])
+        echo = Weighed(lambda t: (-3.0, -4.0, -45.0) if np.abs(_at(recording, t)).max() > 0.2
+                       else (-20.0, -45.0, -45.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, echo=echo)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+        assert voice.held_in[0] - frames(1.0) <= frames(HOLD_TRIGGER) + 1
+
+    def test_a_word_out_of_the_cancellers_residue_holds_the_voice_after_a_hold_for_echo(self, monkeypatch):
+        # A burst that stands out above the echo holds the voice, and stops
+        # as it is held: echo, after which speech must go on longer to hold
+        # the voice. Then the user says "Wait": held at once all the same
+        before_word = [np.zeros(32 * FRAME), np.full(frames(HOLD_TRIGGER) * FRAME, 0.8), np.zeros(SAMPLE_RATE)]
+        word_at = sum(len(piece) for piece in before_word) / SAMPLE_RATE
+        recording = np.concatenate(before_word + [np.full(SAMPLE_RATE * 3 // 10, 0.3), np.zeros(SAMPLE_RATE * 4)])
+
+        def levels(t):
+            frame = np.abs(_at(recording, t)).max()
+            if frame > 0.5:
+                return 10.0, 9.0  # how much the canceller left before is not known
+            return (-3.0, -12.0, -45.0) if frame > 0.2 else (-20.0, -45.0, -45.0)
+
+        path, voice, spoke = self._listen(monkeypatch, recording, echo=Weighed(levels))
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, voice.rewound, spoke) == (2, 1, [False], [True])
+        assert voice.held_in[1] - frames(word_at) <= frames(HOLD_TRIGGER) + 1
+
+    def test_the_voice_let_through_at_the_start_of_a_reply_is_not_held(self, monkeypatch):
+        # The canceller finds the voice again and lets it through, about as
+        # loud as its echo, and left as much just before: nothing stands out
+        burst = np.full(SAMPLE_RATE // 2, 0.8)
+        gap = np.zeros(SAMPLE_RATE * 7 // 10)
+        recording = np.concatenate([np.zeros(SAMPLE_RATE)] + [burst, gap] * 4 + [np.zeros(SAMPLE_RATE * 2)])
+        echo = Weighed(lambda t: (3.0, 1.5, -1.0) if np.abs(_at(recording, t)).max() > 0.2 else (-2.0, -3.0, -1.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(6.5), echo=echo)
+        assert path is None and spoke == []
+        assert (voice.holds, voice.releases) == (0, 0)
+
+    def test_what_the_canceller_leaves_later_in_a_reply_holds_nothing(self, monkeypatch):
+        # Faint and sure to be speech, no more than the canceller left of the
+        # voice before it
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.3), np.zeros(SAMPLE_RATE * 2)])
+        echo = Weighed(lambda t: (-2.0, -36.0, -45.0) if np.abs(_at(recording, t)).max() > 0.2
+                       else (-20.0, -45.0, -45.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(4.5), echo=echo)
+        assert path is None and spoke == []
+        assert (voice.holds, voice.releases) == (0, 0)
+
+    def test_the_voice_let_through_for_a_moment_later_in_a_reply_is_not_held(self, monkeypatch):
+        # The canceller, which was cancelling, lets the voice through for a
+        # moment, about as loud as its echo: far above what it left before,
+        # but the voice, not the user
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.8),
+                                    np.zeros(SAMPLE_RATE * 2)])
+        echo = Weighed(lambda t: (3.0, 0.0, -45.0) if np.abs(_at(recording, t)).max() > 0.2
+                       else (-20.0, -45.0, -45.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, answered_after=frames(2.5), echo=echo)
+        assert path is None and spoke == []
+        assert (voice.holds, voice.releases) == (0, 0)
+
+    def test_a_short_word_over_the_echo_is_the_users_though_it_ends_before_the_echo_dies_away(self, monkeypatch):
+        # "Stop" said once, louder than the voice's echo could be: over
+        # before the voice has died away in the hold, and the user's all the
+        # same
+        recording = np.concatenate([np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 3 // 10, 0.3),
+                                    np.zeros(SAMPLE_RATE * 4)])
+        echo = Weighed(lambda t: (12.0, 11.0) if np.abs(_at(recording, t)).max() > 0.2 else (-20.0, -40.0))
+        path, voice, spoke = self._listen(monkeypatch, recording, echo=echo)
+        Path(path).unlink()
+        assert (voice.holds, voice.releases, spoke) == (1, 0, [True])
+
     def test_not_listened_to_until_the_canceller_has_learned_the_room(self, monkeypatch):
         recording = np.concatenate(
             [np.zeros(SAMPLE_RATE), np.full(SAMPLE_RATE * 2, 0.8), np.zeros(SAMPLE_RATE)]
@@ -592,7 +682,8 @@ class PassThrough:
 class Weighed(PassThrough):
     """A settled canceller that tells how loud what was heard is against the
     voice's echo: levels(t) gives (heard, left) in dB at t seconds into the
-    recording."""
+    recording, or (heard, left, before) with what it left of the voice just
+    before."""
 
     def __init__(self, levels):
         super().__init__(settled=True, cancelling=True)
@@ -605,5 +696,4 @@ class Weighed(PassThrough):
         return audio
 
     def against_echo(self, start, end):
-        heard, left = self.levels((end - FRAME / SAMPLE_RATE) - self._first)
-        return EchoLevels(heard, left)
+        return EchoLevels(*self.levels((end - FRAME / SAMPLE_RATE) - self._first))
