@@ -199,7 +199,7 @@
       access?: boolean;
       voice?: VoiceInfo;
       jobs?: VoiceJob[];
-    }>("voice.clone", { name: draft.name.trim(), replace, languages: picked });
+    }>("voice.clone", { name: draft.name.trim(), replace, languages: $state.snapshot(picked) });
     if (!result.ok || !result.voice) {
       if (result.access) {
         await open();

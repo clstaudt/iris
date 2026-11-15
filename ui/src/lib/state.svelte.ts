@@ -1054,7 +1054,11 @@ class IrisStore {
 
   /** Make a voice ready for languages (Iris's own without any). */
   async makeReady(engine: SpeechEngine, voice: string, languages?: string[]) {
-    const result = await rpc<{ jobs: VoiceJob[] }>("voice.ready", { engine, voice, languages });
+    const result = await rpc<{ jobs: VoiceJob[] }>("voice.ready", {
+      engine,
+      voice,
+      languages: languages ? [...languages] : undefined,
+    });
     for (const job of result.jobs ?? []) this.takeJob(job, false);
   }
 
