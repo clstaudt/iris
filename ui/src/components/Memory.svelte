@@ -4,18 +4,6 @@
 
   let openId = $state<number | null>(null);
   let detail = $state<MemoryTopicDetail | null>(null);
-  /** Forget everything was clicked: asked to confirm */
-  let confirming = $state(false);
-  let forgetting = $state(false);
-
-  // Something to forget: topics, turns kept but not filed yet, or the
-  // conversation shown
-  const remembers = $derived(
-    store.memoryTopics.length > 0 ||
-      store.memoryTurns > 0 ||
-      store.pending.length > 0 ||
-      store.messages.some((m) => m.role === "user" || m.role === "assistant")
-  );
 
   function relativeDay(ts: number): string {
     const days = Math.floor((Date.now() / 1000 - ts) / 86400);
@@ -39,18 +27,6 @@
     openId = null;
     detail = null;
     await store.forgetTopic(id);
-  }
-
-  async function forgetEverything() {
-    forgetting = true;
-    try {
-      await store.forgetEverything();
-    } finally {
-      forgetting = false;
-      confirming = false;
-      openId = null;
-      detail = null;
-    }
   }
 </script>
 
@@ -124,88 +100,4 @@
       </div>
     {/each}
   </div>
-
-  {#if remembers && confirming}
-    <div class="confirm">
-      <p>Forget everything Iris remembers? This cannot be undone.</p>
-      <div class="actions">
-        <button class="btn" onclick={() => (confirming = false)} disabled={forgetting}>Cancel</button>
-        <button class="btn solid-danger" onclick={forgetEverything} disabled={forgetting}>
-          Forget everything
-        </button>
-      </div>
-    </div>
-  {:else if remembers}
-    <div class="foot">
-      <button class="btn danger" onclick={() => (confirming = true)}>Forget everything</button>
-    </div>
-  {/if}
 </aside>
-
-<style>
-  /* Forgetting everything, at the foot of the panel */
-  .foot {
-    display: flex;
-    flex-shrink: 0;
-    gap: 0.5rem;
-    padding: 0.75rem 0.875rem;
-    border-top: 1px solid var(--color-line);
-  }
-  .confirm {
-    display: flex;
-    flex-shrink: 0;
-    flex-direction: column;
-    gap: 0.75rem;
-    padding: 0.875rem 1rem;
-    border-top: 1px solid color-mix(in srgb, var(--color-danger) 25%, transparent);
-    background: color-mix(in srgb, var(--color-danger) 5%, transparent);
-  }
-  .confirm p {
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--color-ink);
-  }
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-  }
-  .btn {
-    display: inline-flex;
-    height: 2rem;
-    align-items: center;
-    padding: 0 0.75rem;
-    border-radius: 0.5rem;
-    border: 1px solid var(--color-line-strong);
-    font-size: 12.5px;
-    color: var(--color-ink-2);
-    transition:
-      background-color 150ms,
-      color 150ms;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--color-hover);
-    color: var(--color-ink);
-  }
-  .btn:disabled {
-    opacity: 0.5;
-  }
-  /* Quiet: the color of danger without its weight */
-  .btn.danger {
-    border-color: color-mix(in srgb, var(--color-danger) 35%, transparent);
-    color: var(--color-danger);
-  }
-  .btn.danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
-    color: var(--color-danger);
-  }
-  .btn.solid-danger {
-    border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
-    background: color-mix(in srgb, var(--color-danger) 16%, transparent);
-    color: color-mix(in srgb, var(--color-danger) 55%, var(--color-ink));
-  }
-  .btn.solid-danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-danger) 24%, transparent);
-    color: color-mix(in srgb, var(--color-danger) 55%, var(--color-ink));
-  }
-</style>

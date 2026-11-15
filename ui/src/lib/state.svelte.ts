@@ -441,6 +441,23 @@ class IrisStore {
     return this.config?.amnesia ?? false;
   }
 
+  /** Whether there is anything to forget: topics, turns kept but not filed
+   *  yet, or the conversation shown */
+  get remembersAnything() {
+    return (
+      this.memoryTopics.length > 0 ||
+      this.memoryTurns > 0 ||
+      this.pending.length > 0 ||
+      this.messages.some((m) => m.role === "user" || m.role === "assistant")
+    );
+  }
+
+  /** Whether what is remembered is shown: in the memory panel, or in the
+   *  settings' Memory stage */
+  private get showsMemory() {
+    return this.panel === "memory" || (!!this.settingsPage && this.stage === "memory");
+  }
+
   /** What needs the user while only the orb shows: the latest message, when
    *  it is an error nothing has followed */
   get presenceError(): string | null {
@@ -582,7 +599,7 @@ class IrisStore {
         break;
 
       case "memory.updated":
-        if (this.panel === "memory") this.loadMemory();
+        if (this.showsMemory) this.loadMemory();
         break;
 
       case "memory.forgotten":
@@ -625,7 +642,7 @@ class IrisStore {
     this.restoredCount = 0;
     this.memoryTopics = [];
     this.memoryTurns = 0;
-    if (this.panel === "memory") this.loadMemory();
+    if (this.showsMemory) this.loadMemory();
   }
 
   /** A turn of the conversation before this launch, as memory kept it: it
