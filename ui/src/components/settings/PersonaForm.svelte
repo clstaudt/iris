@@ -21,11 +21,11 @@
     { id: "kyutai", label: "Kyutai" },
     { id: "kokoro", label: "Kokoro" },
   ];
-  const DEFAULT_VOICE: Record<SpeechEngine, string> = { kyutai: "anna", kokoro: "af_heart" };
+  const DEFAULT_VOICE: Record<SpeechEngine, string> = { kyutai: "eve", kokoro: "af_heart" };
   const NEW_PERSONA: PersonaSettings = {
     name: "",
     engine: "kyutai",
-    voice: "anna",
+    voice: "eve",
     speed: 1.0,
     audio_filter: "",
     description: "",

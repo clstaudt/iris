@@ -129,7 +129,7 @@ def test_the_voices_come_first_and_folders_leave_their_models_out(tmp_path):
 def test_pocket_tts_is_fetched_with_the_voices_of_the_personas():
     model = speech_models.kyutai(["alba", "jean"])
     assert model.size_mb == speech_models.KYUTAI_MB + 2 * speech_models.KYUTAI_VOICE_MB
-    assert "anna" in speech_models.kyutai_voices()
+    assert "eve" in speech_models.kyutai_voices()
 
 
 def test_a_failure_is_said_in_a_few_words():

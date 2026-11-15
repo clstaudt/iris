@@ -650,7 +650,7 @@ def pocket_sentences(text: str) -> list[str]:
     return sentences
 
 
-def pocket_files(voices=("anna",), language: str = "english") -> list[str]:
+def pocket_files(voices=("eve",), language: str = "english") -> list[str]:
     """The files Pocket TTS loads for a language and these voices of it, as
     hf:// paths, so they can be fetched with progress before it loads them.
 
@@ -764,7 +764,7 @@ class PocketGenerator(SpeechEngine):
         for loaded in [k for k in self._voice_states if k[1] == key]:
             del self._voice_states[loaded]
 
-    def __init__(self, voice: str = "anna", models_dir: str | Path | None = None):
+    def __init__(self, voice: str = "eve", models_dir: str | Path | None = None):
         """
         Args:
             voice: A Pocket TTS voice, an audio file of a voice to clone, or
@@ -891,7 +891,7 @@ class SpeechGenerator:
     def __init__(
         self,
         engine: str = "kyutai",
-        voice: str = "anna",
+        voice: str = "eve",
         speed: float = 1.0,
         models_dir: str | Path | None = None,
         prepare: bool = True,
