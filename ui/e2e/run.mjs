@@ -18,6 +18,9 @@
 //
 //   npm run build && npm run e2e
 //
+// `npm run e2e` shows the run through src/irisdev/e2e_report.py: live in a
+// terminal, plain lines in a log. `npm run e2e:plain` runs this alone.
+//
 // Environment:
 //   E2E_MODEL   language model to talk to (default: the first the server lists
 //               with tools)
