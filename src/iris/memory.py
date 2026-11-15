@@ -65,9 +65,6 @@ ABORT_CHECK_SECONDS = 0.05
 # A recalled topic's summary stays in context for this many user turns
 PIN_TURNS = 6
 
-# A thread's title, from its first words until memory has filed a topic
-TITLE_LENGTH = 48
-
 SCHEMA = """
 -- A thread's id is never given again, so nothing that names a forgotten
 -- thread (filing that read it, say) can reach another
@@ -114,15 +111,6 @@ END;
 
 def estimate_tokens(text: str) -> int:
     return len(text) // 4
-
-
-def shortened(text: str, length: int = TITLE_LENGTH) -> str:
-    """The text on one line, cut at a word within this length."""
-    text = " ".join(text.split())
-    if len(text) <= length:
-        return text
-    cut = text[:length].rsplit(" ", 1)[0] or text[:length]
-    return cut.rstrip(" ,.;:!?-") + "…"
 
 
 def relative_day(ts: float, now: Optional[float] = None) -> str:
@@ -254,24 +242,20 @@ class MemoryStore:
         threads = self._query(self._THREADS + " ORDER BY th.updated DESC, th.id DESC LIMIT 1")
         return self._titled(threads[0]) if threads else None
 
-    # A thread with what its title is made of: its earliest topic, else the
-    # user's first words. Nothing of Iris's own: neither its replies nor an
-    # opening it made itself, such as its greeting
+    # A thread with its title: its earliest topic's, once memory has filed one
     _THREADS = """
         SELECT th.*,
             (SELECT title FROM topics WHERE thread_id = th.id ORDER BY created, id LIMIT 1)
-                AS topic,
-            (SELECT text FROM turns WHERE thread_id = th.id AND role = 'user'
-                ORDER BY id LIMIT 1) AS asked
+                AS title
         FROM threads th
     """
 
     @staticmethod
     def _titled(row: sqlite3.Row) -> dict:
-        """The thread with its title, "" until the user has said anything."""
+        """The thread with its title, "" until a topic is filed (the app calls
+        it a new thread)."""
         thread = dict(row)
-        topic, asked = thread.pop("topic"), thread.pop("asked")
-        thread["title"] = topic or shortened(asked or "")
+        thread["title"] = thread["title"] or ""
         return thread
 
     def forget_thread(self, thread_id: int):
@@ -285,17 +269,35 @@ class MemoryStore:
 
     # -- turns --------------------------------------------------------------
 
-    def add_turn(self, thread: int, role: str, text: str, source: Optional[str] = None) -> int:
-        """Store one turn of a thread: "user", "assistant", or "system" for notes."""
+    def add_turn(
+        self, thread: int, role: str, text: str, source: Optional[str] = None
+    ) -> Optional[int]:
+        """Store one turn of a thread: "user", "assistant", or "system" for
+        notes. Its id, or None when the thread was forgotten meanwhile."""
         now = time.time()
         with self._lock:
             cursor = self._db.execute(
-                "INSERT INTO turns (ts, role, text, source, thread_id) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO turns (ts, role, text, source, thread_id) "
+                "SELECT ?, ?, ?, ?, id FROM threads WHERE id = ?",
                 (now, role, text, source, thread),
             )
             self._db.execute("UPDATE threads SET updated = ? WHERE id = ?", (now, thread))
             self._db.commit()
-            return cursor.lastrowid
+            return cursor.lastrowid if cursor.rowcount else None
+
+    def drop_turn(self, thread: int, turn: int) -> bool:
+        """Take back a turn of the thread, and the thread with it when that
+        leaves it empty. Returns whether the thread went too."""
+        with self._lock:
+            self._db.execute("DELETE FROM turns WHERE id = ? AND thread_id = ?", (turn, thread))
+            cursor = self._db.execute(
+                "DELETE FROM threads WHERE id = ? "
+                "AND NOT EXISTS (SELECT 1 FROM turns WHERE thread_id = threads.id) "
+                "AND NOT EXISTS (SELECT 1 FROM topics WHERE thread_id = threads.id)",
+                (thread,),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
 
     def turn_count(self) -> int:
         """How many turns are stored, in every thread, filed or not."""

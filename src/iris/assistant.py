@@ -117,6 +117,11 @@ def _sleep_chime() -> np.ndarray:
     return _chime_tones((990.0, 660.0))
 
 
+def _thread_chime() -> np.ndarray:
+    """One soft tone twice, neither rising nor falling: "another thread"."""
+    return _chime_tones((784.0, 784.0))
+
+
 def _echo_canceller() -> Optional[EchoCanceller]:
     """The echo canceller, or None where it cannot run."""
     if not HAS_ECHO_CANCELLATION:
@@ -194,6 +199,9 @@ class VoiceAssistant:
     _ending = False
     # Until then the microphone stays closed after parting words
     _quiet_until = 0.0
+    # Listening paused, as on opening another thread: shown as paused, the
+    # microphone closed until resumed, typed turns still answered
+    listening_paused = False
     # Told (engine, voice, language) when a reply comes to a language the
     # persona's voice speaks but is not ready for: the app makes it ready,
     # where the user sees it (iris.readiness)
@@ -527,7 +535,7 @@ class VoiceAssistant:
             # The persona's wake word, shown while the wake word is off
             "persona_wake_word": self.persona.wake_word,
             "mic_on": not self.pause_event.is_set(),
-            "paused": self.suspend_event.is_set(),
+            "paused": self.suspend_event.is_set() or self.listening_paused,
             "tools": self.tools.states(),
             "engines": engines.describe(
                 speech=self.tts_generator.engine,
@@ -759,6 +767,11 @@ class VoiceAssistant:
         if self.speak_replies:
             self._play_chime(_wake_chime())
 
+    def thread_chime(self):
+        """Mark going on in another thread, or a new one."""
+        if self.speak_replies:
+            self._play_chime(_thread_chime())
+
     def _play_chime(self, sound: np.ndarray):
         """Play a chime. A speaker that cannot be opened leaves it unheard:
         the next reply tries it again, and says so if it fails too."""
@@ -796,6 +809,7 @@ class VoiceAssistant:
         return (
             self.pause_event.is_set()
             or self.suspend_event.is_set()
+            or self.listening_paused
             or self.hold_event.is_set()
             or self.stop_event.is_set()
         )
@@ -1223,7 +1237,7 @@ class VoiceAssistant:
         """Keep the exchange in the conversation as the user took it in: a
         reply cut short only as far as it was said, or shown, with the voice
         off or in a language it does not speak. Of a reply stopped before
-        anything was said, nothing is kept."""
+        anything was said, nothing is kept, not even the turn it answered."""
         if not cut:
             self.conversation.keep(prompt, self.conversation.reply or "", source)
             return
@@ -1233,6 +1247,8 @@ class VoiceAssistant:
             kept = self.conversation.clean_markdown(answer)
         if kept.strip():
             self.conversation.keep(prompt, kept, source)
+        else:
+            self.conversation.forgo()
 
     def chat(
         self,
@@ -1393,6 +1409,8 @@ class VoiceAssistant:
             # Clear all statuses on error
             with self.status_manager.status_lock:
                 self.status_manager.status_thinking = False
+            # Nothing of a reply that failed is kept, nor the turn it answered
+            self.conversation.forgo()
 
             conversation = self.conversation
             error_msg = failure_message(e, conversation.host, getattr(conversation, "asked", None))
@@ -1559,7 +1577,11 @@ class VoiceAssistant:
         # Paused, the user is typing, or nothing to recognize speech
         # with: keep the microphone closed (models stay loaded) and
         # keep watching for typed turns
-        closed = self.pause_event.is_set() or self.hold_event.is_set()
+        closed = (
+            self.pause_event.is_set()
+            or self.hold_event.is_set()
+            or self.listening_paused
+        )
         if closed or self.transcriber is None:
             self.recorder.close_microphone()
             with self.status_manager.status_lock:
@@ -1599,6 +1621,7 @@ class VoiceAssistant:
                 on_level=on_audio_level,
                 should_stop=lambda: self.pause_event.is_set()
                 or self.suspend_event.is_set()
+                or self.listening_paused
                 or self.hold_event.is_set()
                 or self.stop_event.is_set()
                 or not self.turn_queue.empty()

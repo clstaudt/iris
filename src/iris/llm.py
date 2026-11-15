@@ -250,6 +250,9 @@ def _noted(notes: list[str]) -> str:
 class ConversationManager:
     """Manages LLM conversations with context and summarization."""
 
+    # The turn being answered, stored as its reply began: (thread, turn)
+    _asked: Optional[tuple[int, int]] = None
+
     def __init__(
         self,
         model: str = "qwen3:1.7b",
@@ -288,7 +291,8 @@ class ConversationManager:
         # The thread the conversation is in, or None for a new one, which is
         # stored with its first turn (see open_thread)
         self.thread: Optional[int] = None
-        # Told after an exchange was stored, a new thread with it
+        # Told when a turn was stored or taken back: a new thread is listed
+        # with its first turn, as its reply begins
         self.on_stored: Optional[Callable[[], None]] = None
         # Recalled topics stay in context for a few turns: {topic_id: turns left}
         self.pinned: dict[int, int] = {}
@@ -592,12 +596,42 @@ class ConversationManager:
         self.shared = []
         self.conversation_history = []
 
-    def _store(self, role: str, text: str, source: Optional[str] = None):
+    def _store(self, role: str, text: str, source: Optional[str] = None) -> Optional[int]:
         """Store a turn in the thread, which a new thread's first turn creates."""
         store = self.memory.store
         if self.thread is None:
             self.thread = store.create_thread(self.persona.id)
-        store.add_turn(self.thread, role, text, source)
+        return store.add_turn(self.thread, role, text, source)
+
+    def _store_asked(self, prompt: str, source: Optional[str]):
+        """Store the turn being answered as its reply begins, so a new thread
+        is listed at once, titled by it; its reply follows once it has been
+        heard (_record), or the turn is taken back (forgo). Nothing is stored
+        in amnesia mode."""
+        with self._keeping:
+            self._asked = None
+            if self.memory is None or self.amnesia:
+                return
+            role = "system" if source == OPENING else "user"
+            turn = self._store(role, prompt, None if role == "system" else source)
+            if turn is not None:
+                self._asked = (self.thread, turn)
+        if self.on_stored:
+            self.on_stored()
+
+    def forgo(self):
+        """Nothing of the reply is kept (stopped before a word of it was
+        heard, or failed): the turn stored as it began is taken back, and a
+        new thread it started goes with it, so no thread is left empty."""
+        with self._keeping:
+            asked, self._asked = self._asked, None
+            if asked is None:
+                return
+            thread, turn = asked
+            if self.memory.store.drop_turn(thread, turn) and self.thread == thread:
+                self.thread = None
+        if self.on_stored:
+            self.on_stored()
 
     def forget(self):
         """Start the conversation over, as if nothing had been said, in a
@@ -609,6 +643,7 @@ class ConversationManager:
         with self._keeping:
             self._forgotten += 1
             self.thread = None
+            self._asked = None
             self.conversation_history = []
             self.unremembered = []
             self.pinned = {}
@@ -623,19 +658,25 @@ class ConversationManager:
         # history, would be imitated in later replies
         answer = strip_markup(answer)
         with self._keeping:
+            asked, self._asked = self._asked, None
             if self._reply_began != self._forgotten:
                 return  # everything was forgotten while it was being given
             role = "system" if source == OPENING else "user"
-            if self.memory is not None and self.amnesia:
+            if asked is not None:
+                # Stored as the reply began, in the thread it began in: the
+                # reply joins it
+                self.memory.store.add_turn(asked[0], "assistant", answer)
+            elif self.memory is not None and self.amnesia:
                 self.unremembered.append({"role": role, "content": prompt})
                 self.unremembered.append({"role": "assistant", "content": answer})
                 return
-            if self.memory is None:
+            elif self.memory is None:
                 self.conversation_history.append({"role": role, "content": prompt})
                 self.conversation_history.append({"role": "assistant", "content": answer})
                 return
-            self._store(role, prompt, None if role == "system" else source)
-            self._store("assistant", answer)
+            else:
+                self._store(role, prompt, None if role == "system" else source)
+                self._store("assistant", answer)
         self.memory.note_turn()
         if self.on_stored:
             self.on_stored()
@@ -780,6 +821,8 @@ class ConversationManager:
         # A reply cut off (cancel()) never completed: there is nothing to keep
         if keep and self.reply is not None:
             self._record(recorded_text(prompt, attachments or []), self.reply, source)
+        elif keep:
+            self.forgo()
 
     def cancel(self):
         """Stop the reply being streamed, from another thread: the request
@@ -887,6 +930,8 @@ class ConversationManager:
 
         # Get managed conversation context
         messages = self.manage_context(with_tools=use_tools)
+        # The turn is stored now that the context is made without it
+        self._store_asked(recorded_text(prompt, attachments), source)
 
         # Inject a language instruction so the LLM replies in the right
         # language: any but English, and English when the user goes back to

@@ -322,7 +322,9 @@ class AssistantController:
                 # A closed mic only explains an otherwise idle assistant: typed
                 # turns are still answered with the mic off, and that work shows
                 if state == "idle":
-                    if self.assistant.pause_event.is_set():
+                    if self._listening_paused():
+                        state = "paused"
+                    elif self.assistant.pause_event.is_set():
                         state = "muted"
                     elif self.assistant.hold_event.is_set():
                         state = "typing"
@@ -594,10 +596,19 @@ class AssistantController:
         if self.assistant is None:
             return {"ok": False, "error": "Assistant not running"}
         self.assistant.suspend_event.clear()
+        self._resume_listening()
         self.assistant.speech_pipeline.resume()
         self._revive()
         self.bus.emit("config", self.assistant.config_info())
         return {"ok": True}
+
+    def _listening_paused(self) -> bool:
+        """Listening is paused, as on opening another thread."""
+        return bool(getattr(self.assistant, "listening_paused", False))
+
+    def _resume_listening(self):
+        if hasattr(self.assistant, "listening_paused"):
+            self.assistant.listening_paused = False
 
     def set_mic(self, on: bool) -> dict:
         """Switch the microphone. Off still answers typed messages. Without
@@ -612,6 +623,8 @@ class AssistantController:
             return {"ok": True}
         if on:
             self.assistant.pause_event.clear()
+            # Switched on, it listens: also where opening a thread paused it
+            self._resume_listening()
         else:
             self.assistant.pause_event.set()
         self._revive()
@@ -856,7 +869,10 @@ class AssistantController:
         thread = memory.store.thread(int(thread_id))
         if thread is None:
             return {"ok": False, "error": f"No thread {thread_id}"}
+        if thread["id"] == self.assistant.conversation.thread:
+            return {"ok": True, "id": thread["id"]}  # open already: nothing changes
         self._go_to_thread(thread["id"], self._thread_persona(thread))
+        self._switched()
         return {"ok": True, "id": thread["id"]}
 
     def new_thread(self, persona: str) -> dict:
@@ -866,7 +882,11 @@ class AssistantController:
             return {"ok": False, "error": "Assistant not running"}
         if persona not in list_personas():
             return {"ok": False, "error": f"Unknown persona: {persona}"}
+        # Leaving a thread for a new one is heard; choosing another persona
+        # for the new one, before anything is said in it, is not
+        leaving = self.assistant.conversation.thread is not None
         self._go_to_thread(None, persona)
+        self._switched(chime=leaving)
         return {"ok": True}
 
     def forget_thread(self, thread_id) -> dict:
@@ -905,6 +925,19 @@ class AssistantController:
         self._restore_thread()
         self.bus.emit("config", assistant.config_info())
         self.bus.emit("threads.changed", {})
+
+    def _switched(self, chime: bool = True):
+        """Another thread was opened, or a new one: a soft chime says so, and
+        listening pauses, shown as Pause shows it, until Resume, so Iris does
+        not take what is said around it for the thread. Typed messages are
+        still answered."""
+        if chime and hasattr(self.assistant, "thread_chime"):
+            self.assistant.thread_chime()
+        if not hasattr(self.assistant, "listening_paused"):
+            return
+        self.assistant.listening_paused = True
+        self._show("paused")
+        self.bus.emit("config", self.assistant.config_info())
 
     def _drop_waiting_turns(self):
         """Typed messages not answered yet belong to the thread left."""
