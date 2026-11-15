@@ -6,7 +6,13 @@ on:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS as the app is built on (pack-electron.yml), for its own code
+        # paths: MLX, CoreAudio, the platform branches
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       # The unit tests call no model and download none: offline, with empty
@@ -20,8 +26,11 @@ jobs:
 
     # PortAudio for sounddevice, which the core imports. Its PulseAudio
     # backend will not initialize without a sound server, so one runs with a
-    # null output; the unit tests open no audio device
+    # null output; the unit tests open no audio device. On macOS sounddevice
+    # brings its own PortAudio, which starts on CoreAudio with no device and
+    # no server, so nothing is set up there
     - name: Install PortAudio and a sound server
+      if: runner.os == 'Linux'
       run: |
         sudo apt-get update
         sudo apt-get install -y libportaudio2 pulseaudio
