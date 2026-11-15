@@ -203,7 +203,7 @@
         {#if store.config?.memory}
           <button
             onclick={() => store.toggleAmnesia()}
-            disabled={store.state === "starting"}
+            disabled={store.state === "starting" || !store.memoryOn}
             class="toggle {store.amnesia ? 'resume' : ''}"
             title={store.amnesia
               ? "Amnesia mode is on: nothing is remembered"

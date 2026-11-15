@@ -188,6 +188,8 @@ export interface AssistantConfig {
   paused?: boolean;
   memory?: boolean;
   amnesia?: boolean;
+  /** Memory switched on, for every thread */
+  remember?: boolean;
   /** The thread Iris is in; null for a new one, stored with its first turn */
   thread?: number | null;
   tools?: Record<string, ToolState>;
@@ -373,6 +375,10 @@ export interface SavedSettings {
   barge_in?: boolean;
   tools?: Record<string, boolean>;
   ollama_host?: string;
+  /** Memory switched on, for every thread; on unless switched off */
+  remember?: boolean;
+  /** Before amnesia was each thread's own: one switch for all, which goes
+   *  to the thread Iris starts in */
   amnesia?: boolean;
   /** The wake word switch; the words are each persona's own */
   wake_on?: boolean;
@@ -546,8 +552,14 @@ class IrisStore {
     return this.state === "paused";
   }
 
+  /** The open thread is in amnesia mode: nothing of it is written */
   get amnesia() {
     return this.config?.amnesia ?? false;
+  }
+
+  /** Memory is switched on, for every thread */
+  get memoryOn() {
+    return this.config?.remember ?? true;
   }
 
   /** Whether there is anything to forget: topics, turns kept but not filed
@@ -865,11 +877,16 @@ class IrisStore {
     await rpc("mic.set", { on: !this.micOn });
   }
 
-  /** While on, nothing of the conversation is written to memory. */
+  /** While on, nothing of the open thread is written to memory; it stays
+   *  with the thread. */
   async toggleAmnesia() {
-    const on = !this.amnesia;
-    saveSettings({ amnesia: on });
-    await rpc("memory.set_amnesia", { on });
+    await rpc("memory.set_amnesia", { on: !this.amnesia });
+  }
+
+  /** Switch memory on or off, for every thread. */
+  async setRemember(on: boolean) {
+    saveSettings({ remember: on });
+    await rpc("memory.set_remember", { on });
   }
 
   /** Pause or resume the whole conversation: listening, reply and speech. */
@@ -1704,6 +1721,7 @@ class IrisStore {
     if (saved.barge_in !== undefined) options.barge_in = saved.barge_in;
     if (saved.tools) options.tools = saved.tools;
     if (saved.ollama_host) options.ollama_host = saved.ollama_host;
+    if (saved.remember === false) options.remember = false;
     if (saved.amnesia) options.amnesia = true;
     if (saved.wake_on) options.wake_on = true;
     if (saved.idle_sleep === false) options.wake_window = 0;
@@ -1715,6 +1733,8 @@ class IrisStore {
     if (saved.languages) options.languages = saved.languages;
     this.speakReplies = saved.speak_replies ?? true;
     await rpc("assistant.start", options);
+    // The old switch went to the thread Iris started in, once
+    if (saved.amnesia !== undefined) saveSettings({ amnesia: undefined });
   }
 
   /** The wake word and sleep word kept for all personas before each had

@@ -529,9 +529,9 @@
           <span class="text-[12.5px] text-ink">Remember conversations</span>
           <Switch
             label="Remember conversations"
-            checked={!!config?.memory && !store.amnesia}
+            checked={!!config?.memory && store.memoryOn}
             disabled={!config?.memory}
-            onchange={() => store.toggleAmnesia().catch(fail("memory.set_amnesia"))}
+            onchange={(on) => store.setRemember(on).catch(fail("memory.set_remember"))}
           />
         </div>
         {#if config?.memory && store.remembersAnything}
