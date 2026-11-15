@@ -45,6 +45,7 @@
   "build": {
     "appId": "dev.iris.assistant",
     "productName": "Iris",
+    "copyright": "Copyright © 2025–2026 Christian Staudt",
     "directories": {
       "output": "release",
       "buildResources": "build"
