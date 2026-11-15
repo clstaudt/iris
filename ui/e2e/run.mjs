@@ -494,41 +494,71 @@ const tourButton = (text) => tourDialog.locator("button", { hasText: text });
 /** The settings page shown, by its name in the tour (settings-pipeline), or null */
 const settingsPageShown = () =>
   page.evaluate(() => document.querySelector('nav[aria-label="Settings"] [aria-current="page"]')?.dataset.tour ?? null);
-// What the tour may ask of the core: lists, and which servers answer, for
-// the pages it shows and goes back to
-const LOOKING = new Set([
-  "persona.list", "persona.get", "voice.list", "threads.list", "roles.list", "memory.topics",
-  "llm.list", "llm.check_hosts", "audio.list_inputs", "stt.models", "app.info",
+// What the tour must never ask of the core: to send, to play, to download
+const NEVER = new Set([
+  "chat.send_text", "assistant.greet", "persona.preview", "voice.sample_play", "voice.record",
+  "voice.ready", "voice.retry", "setup.download", "models.set",
 ]);
+// The app's default window, and a smaller one
+const WINDOW = { width: 1280, height: 800 };
+const SMALL = { width: 1100, height: 750 };
 
-/** The tour at this step, its sentence saying this, lit on these controls
- *  alone: what shows of each (inside what clips it, a page that scrolls)
- *  in a hole of the light, and no other hole. */
-async function tourAt(number, words, names) {
-  await tourDialog.locator(".count", { hasText: `${number} of 6` }).waitFor({ timeout: 5000 });
-  const text = await tourDialog.locator("p").innerText();
-  check(text.includes(words), `step ${number} says "${text}"`);
-  await until(`the light on ${names.join(" and ")}`, () =>
-    page.evaluate((names) => {
-      const holes = [...document.querySelectorAll("[data-hole]")];
-      if (holes.length !== names.length) return false;
-      return names.every((name) => {
-        const control = document.querySelector(`[data-tour="${name}"]`);
-        const hole = holes.find((h) => h.dataset.hole === name);
-        if (!control || !hole) return false;
-        let { left, top, right, bottom } = control.getBoundingClientRect();
-        for (let outer = control.parentElement; outer; outer = outer.parentElement) {
-          if (getComputedStyle(outer).overflow === "visible") continue;
-          const clip = outer.getBoundingClientRect();
-          [left, top, right, bottom] = [Math.max(left, clip.left), Math.max(top, clip.top),
-            Math.min(right, clip.right), Math.min(bottom, clip.bottom)];
-        }
-        [right, bottom] = [Math.min(right, innerWidth), Math.min(bottom, innerHeight)];
-        const [x, y, w, h] = ["x", "y", "width", "height"].map((a) => Number(hole.getAttribute(a)));
-        return right > left && bottom > top && x <= left && y <= top && x + w >= right && y + h >= bottom;
-      });
-    }, names)
-  );
+/** The light on these controls alone, what shows of each (inside what clips
+ *  it, a page that scrolls) in a hole of it, and the callout clear of them. */
+const litOn = (names) =>
+  page.evaluate((names) => {
+    const holes = [...document.querySelectorAll("[data-hole]")];
+    if (holes.length !== names.length) return false;
+    const box = (hole) => {
+      const [x, y, w, h] = ["x", "y", "width", "height"].map((a) => Number(hole.getAttribute(a)));
+      return { left: x, top: y, right: x + w, bottom: y + h };
+    };
+    const lit = names.every((name) => {
+      const control = document.querySelector(`[data-tour="${name}"]`);
+      const hole = holes.find((h) => h.dataset.hole === name);
+      if (!control || !hole) return false;
+      let { left, top, right, bottom } = control.getBoundingClientRect();
+      for (let outer = control.parentElement; outer; outer = outer.parentElement) {
+        if (getComputedStyle(outer).overflow === "visible") continue;
+        const clip = outer.getBoundingClientRect();
+        [left, top, right, bottom] = [Math.max(left, clip.left), Math.max(top, clip.top),
+          Math.min(right, clip.right), Math.min(bottom, clip.bottom)];
+      }
+      [right, bottom] = [Math.min(right, innerWidth), Math.min(bottom, innerHeight)];
+      const b = box(hole);
+      return right > left && bottom > top && b.left <= left && b.top <= top && b.right >= right && b.bottom >= bottom;
+    });
+    const callout = document.querySelector('[aria-label="Tour"] .callout')?.getBoundingClientRect();
+    const clear = callout && callout.left >= 0 && callout.top >= 0 && callout.right <= innerWidth &&
+      callout.bottom <= innerHeight && holes.map(box).every((b) =>
+        callout.right <= b.left || b.right <= callout.left || callout.bottom <= b.top || b.bottom <= callout.top);
+    return lit && clear;
+  }, names);
+
+/** Until the tour's light and callout have stopped moving and fading, and
+ *  the page is drawn at its size. */
+const settled = () =>
+  page.evaluate(() => new Promise((resolve) => {
+    const tour = document.querySelector('[aria-label="Tour"]');
+    const wait = () => tour?.getAnimations({ subtree: true }).length
+      ? requestAnimationFrame(wait)
+      : requestAnimationFrame(() => requestAnimationFrame(resolve));
+    wait();
+  }));
+
+/** The tour at this step, of its chapter, lit on these controls alone, the
+ *  callout beside them and clear of them, in a smaller window and the app's
+ *  own; pictures of both, if named. */
+async function tourAt(number, names, shot) {
+  await tourDialog.locator(".count", { hasText: `· ${number} of 10` }).waitFor({ timeout: 5000 });
+  for (const size of [SMALL, WINDOW]) {
+    await page.setViewportSize(size);
+    await until(`step ${number} lit on ${names.join(" and ")} at ${size.width}x${size.height}`, () => litOn(names), 5000);
+    await settled();
+    check(await litOn(names), `step ${number} moved at ${size.width}x${size.height}`);
+    const small = size === SMALL ? "-small" : "";
+    if (shot) await page.screenshot({ path: path.join(OUT, `tour-${number}-${shot}${small}.png`) });
+  }
 }
 
 /** A click where a lit control is, as the user's: on the light, not the control. */
@@ -545,13 +575,13 @@ const silentFor = (ms) =>
     return !sound || Date.now() - sound.at > ms;
   }, 60_000);
 
-/** That the tour since a moment asked the core for nothing but lists, and
- *  that the speaker played nothing. */
+/** That since a moment nothing was sent, played or downloaded. */
 async function checkTourQuiet(since) {
-  const asked = calls.filter((c) => c.at >= since && !LOOKING.has(c.method)).map((c) => c.method);
+  const asked = calls.filter((c) => c.at >= since && NEVER.has(c.method)).map((c) => c.method);
   check(!asked.length, `the tour asked the core for ${asked.join(", ")}`);
   check(!events.some((e) => e.at >= since && e.type === "audio.output" && e.data.rms > 0), "the tour played a sound");
-  check(!events.some((e) => e.at >= since && e.type.startsWith("chat.")), "the conversation changed during the tour");
+  const said = events.filter((e) => e.at >= since && ["chat.user", "chat.chunk", "chat.done"].includes(e.type));
+  check(!said.length, `the conversation changed during the tour: ${said.map((e) => e.type).join(", ")}`);
 }
 
 /** Back to the conversation from the settings or the memory panel. */
@@ -822,7 +852,8 @@ try {
     if (serverHost) check(saved.ollama_host === serverHost, `the server is kept as ${saved.ollama_host}`);
   });
 
-  await step("first run: the tour lights each feature at its control, opens what it shows, and leaves the app as it was", async () => {
+  await step("first run: the tour goes through ten steps, each control lit doing what it does and going on", async () => {
+    const pipelineShown = async () => (await settingsPageShown()) === "settings-pipeline";
     try {
       // The greeting is spoken once its voice is ready, which can be after
       // its text: what the tour plays, if anything, is told from its end
@@ -833,44 +864,79 @@ try {
       await voiceDone();
       await silentFor(3000);
       const since = Date.now();
-      await tourAt(1, "orb", ["composer", "orb"]);
-      await page.screenshot({ path: path.join(OUT, "tour-talking.png") });
-      await tourButton("Next").click();
-      await tourAt(2, "Mic", ["pause", "mic"]);
-      await tourButton("Next").click();
-      await tourAt(3, "thread", ["threads"]);
-      // A click on the lit control opens the threads, and the tour goes on
-      await clickLit("threads");
-      await page.locator('aside[aria-label="Threads"]').waitFor({ timeout: 5000 });
-      await tourAt(3, "thread", ["new-thread"]);
-      await page.screenshot({ path: path.join(OUT, "tour-threads.png") });
-      await tourButton("Next").click();
-      await tourAt(4, "persona", ["settings"]);
-      check(!(await page.locator('aside[aria-label="Threads"]').count()), "the threads stay open after their step");
-      // Next opens the settings on the page the step is about
-      await tourButton("Next").click();
-      await tourAt(4, "persona", ["settings-personas", "personas"]);
+      // Talking: the orb pauses, and Pause resumes
+      await tourAt(1, ["composer", "orb"], "conversation");
+      let at = Date.now();
+      await clickLit("orb");
+      await eventAfter("state", at, (data) => data.state === "paused", 5000);
+      await tourAt(2, ["pause", "mic"], "pause");
+      at = Date.now();
+      await clickLit("pause");
+      await eventAfter("state", at, (data) => data.state !== "paused", 5000);
+      // Compact mode: the tour waits until the user is back through the mark
+      await tourAt(3, ["presence"], "compact");
+      await openPresence();
+      await clickLit("presence");
+      await until("presence", () => presence.at(-1) === true, 5000);
+      await quiet(500);
+      check((await tourDialog.locator(".count").innerText()).includes("3 of 10"), "the tour went on in presence");
+      await presencePage.mouse.move(146, 74);
+      await presencePage.mouse.click(146, 74);
+      await until("the conversation", () => presence.at(-1) === false, 5000);
+      // Your assistant: Settings, then each tab by its entry
+      await tourAt(4, ["settings"]);
+      await clickLit("settings");
+      await until("the settings", pipelineShown, 5000);
+      await tourAt(4, ["settings-personas"]);
+      await clickLit("settings-personas");
+      await tourAt(4, ["settings-personas", "personas"], "persona");
       check((await settingsPageShown()) === "settings-personas", `the settings show ${await settingsPageShown()}`);
-      await page.screenshot({ path: path.join(OUT, "tour-personas.png") });
-      await tourButton("Next").click();
-      await tourAt(5, "voice", ["settings-voices", "voices"]);
+      await clickLit("new-persona");
+      await until("a new persona's form", async () =>
+        (await page.locator('input[placeholder="Name"]').inputValue().catch(() => null)) === "", 5000);
+      await tourAt(5, ["settings-voices"]);
+      await clickLit("settings-voices");
+      await tourAt(5, ["settings-voices", "voices"], "voices");
       check((await settingsPageShown()) === "settings-voices", `the settings show ${await settingsPageShown()}`);
       await tourButton("Next").click();
-      await tourAt(6, "remembers", ["memory"]);
-      check(!(await page.locator('nav[aria-label="Settings"]').count()), "the settings stay open after their steps");
-      await tourButton("Done").click();
+      await tourAt(6, ["settings-roles"]);
+      await clickLit("settings-roles");
+      await tourAt(6, ["settings-roles", "roles"], "role");
+      await tourButton("Next").click();
+      // Conversations: the tour shows the conversation, and opens the threads for Next
+      await tourAt(7, ["threads"]);
+      check(!(await page.locator('nav[aria-label="Settings"]').count()), "the settings stay over the conversation");
+      await tourButton("Next").click();
+      await tourAt(7, ["new-thread"], "thread");
+      await tourButton("Next").click();
+      await tourAt(8, ["memory"], "memory");
+      await clickLit("memory");
+      await page.locator('aside[aria-label="Memory"]').waitFor({ timeout: 5000 });
+      // How Iris works: Settings' button opens the pipeline
+      await tourAt(9, ["settings"]);
+      await clickLit("settings");
+      await until("the pipeline", pipelineShown, 5000);
+      await tourAt(9, ["settings-pipeline", "pipeline"], "pipeline");
+      await tourButton("Next").click();
+      await tourAt(10, ["stage-llm"], "stages");
+      check(await tourButton("Done").count(), "the last step's button does not read Done");
+      await clickLit("stage-llm");
+      await page.locator('[data-tour="stage-llm"][aria-expanded="true"]').waitFor({ timeout: 5000 });
       await tourDialog.waitFor({ state: "detached", timeout: 5000 });
-      // As it was: the conversation, without the threads or the memory panel
-      await page.locator("textarea").waitFor({ timeout: 5000 });
-      check(!(await page.locator('aside[aria-label="Threads"]').count()), "the threads are open");
-      check(!(await page.locator('aside[aria-label="Memory"]').count()), "the memory panel is open");
+      // What the user opened stays; the threads the tour opened are closed
+      await quiet(300);
+      check(await pipelineShown(), `the settings show ${await settingsPageShown()}`);
+      check(await page.locator('[data-tour="stage-llm"][aria-expanded="true"]').count(), "the language model's inspector closed");
       const saved = await settings();
       check(saved.tour === "done", `the tour is kept as ${saved.tour}`);
-      check(saved.sidebar === false, "the threads are kept open");
+      check(saved.sidebar === false, "the threads the tour opened are kept open");
+      check((await rpc("app.info")).state !== "paused", "Iris is paused");
       await checkTourQuiet(since);
     } finally {
       // The steps after need the app, should this one fail midway
       if (await tourDialog.count()) await page.keyboard.press("Escape");
+      await leavePresence().catch(() => {});
+      await page.setViewportSize({ width: 1400, height: 900 });
     }
   });
 
@@ -3410,38 +3476,63 @@ try {
     await card(imported.id).locator(".user", { hasText: "Noam" }).waitFor({ timeout: 5000 });
   });
 
-  await step("tour: run again from Settings, a skip midway leaves the app as it was, and a restart does not start it", async () => {
+  await step("tour: run again from Settings, a skip midway puts back what the tour changed and keeps what the user did, and a restart does not start it", async () => {
     try {
       await openSettings("Pipeline");
-      const sidebar = (await settings()).sidebar;
       await silentFor(3000);
+      const mic = config().mic_on;
       const since = Date.now();
       await page.locator('nav[aria-label="Settings"] button', { hasText: "Tour" }).click();
       // The conversation, to show what is in it
-      await tourAt(1, "orb", ["composer", "orb"]);
+      await tourAt(1, ["composer", "orb"]);
       check(!(await page.locator('nav[aria-label="Settings"]').count()), "the settings stay over the conversation");
       // Enter goes on
       await page.keyboard.press("Enter");
-      await tourAt(2, "Mic", ["pause", "mic"]);
+      await tourAt(2, ["pause", "mic"]);
+      await clickLit("mic");
+      await until("the microphone switched", () => config().mic_on === !mic, 5000);
+      // Next skips compact mode, and opens the settings on the step's tab
+      await tourAt(3, ["presence"]);
       await tourButton("Next").click();
-      await tourAt(3, "thread", ["threads"]);
+      await tourAt(4, ["settings"]);
+      await tourButton("Next").click();
+      await tourAt(4, ["settings-personas", "personas"]);
+      for (const [number, tab] of [[5, "voices"], [6, "roles"]]) {
+        await tourButton("Next").click();
+        await tourAt(number, [`settings-${tab}`]);
+        await tourButton("Next").click();
+        await tourAt(number, [`settings-${tab}`, tab]);
+        check((await settingsPageShown()) === `settings-${tab}`, `the settings show ${await settingsPageShown()}`);
+      }
+      await tourButton("Next").click();
+      // The threads, opened by the user, and a new thread started
+      await tourAt(7, ["threads"]);
       await clickLit("threads");
-      await tourAt(3, "thread", ["new-thread"]);
+      await page.locator('aside[aria-label="Threads"]').waitFor({ timeout: 5000 });
+      await tourAt(7, ["new-thread"]);
+      await clickLit("new-thread");
+      await page.locator('[role="radiogroup"][aria-label="Persona"]').waitFor({ timeout: 5000 });
+      await tourAt(8, ["memory"]);
       await tourButton("Skip tour").click();
       await tourDialog.waitFor({ state: "detached", timeout: 5000 });
+      // The settings the tour closed are back; the threads and the microphone are as the user left them
       check((await settingsPageShown()) === "settings-pipeline", `the settings show ${await settingsPageShown()}`);
-      check((await settings()).sidebar === sidebar, "the threads are not as they were");
+      check((await settings()).sidebar === true, "the threads the user opened were closed");
+      check(config().mic_on === !mic, "the microphone was switched back");
       // Escape leaves it too
       await page.locator('nav[aria-label="Settings"] button', { hasText: "Tour" }).click();
-      await tourAt(1, "orb", ["composer", "orb"]);
+      await tourAt(1, ["composer", "orb"]);
       await page.keyboard.press("Escape");
       await tourDialog.waitFor({ state: "detached", timeout: 5000 });
       check((await settingsPageShown()) === "settings-pipeline", `the settings show ${await settingsPageShown()}`);
       await checkTourQuiet(since);
     } finally {
       if (await tourDialog.count()) await page.keyboard.press("Escape");
+      await page.setViewportSize({ width: 1400, height: 900 });
     }
+    await rpc("mic.set", { on: false });
     await toConversation();
+    if ((await settings()).sidebar) await page.locator('button[title="Threads"]').click();
     const restarted = Date.now();
     await restartCore("core-3.log");
     await page.reload();

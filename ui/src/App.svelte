@@ -60,6 +60,7 @@
         onclick={() => store.setPresence(true)}
         class="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-hover hover:text-ink"
         title="Presence"
+        data-tour="presence"
       >
         <Icon name="shrink" size={15} />
       </button>

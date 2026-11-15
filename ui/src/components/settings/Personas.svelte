@@ -43,6 +43,7 @@
     <button
       onclick={() => (store.editingPersona = "")}
       class="s-btn mt-1 {store.editingPersona === '' ? 'text-ink' : ''}"
+      data-tour="new-persona"
     >
       <Icon name="plus" size={13} />
       New persona

@@ -201,5 +201,7 @@
 {#if !config}
   <p class="s-status">Loading models</p>
 {:else}
-  <PipelineChain sections={timed} timings active={store.stage} onselect={open} />
+  <div data-tour="pipeline">
+    <PipelineChain sections={timed} timings active={store.stage} onselect={open} />
+  </div>
 {/if}

@@ -1,9 +1,13 @@
-// The feature tour: a few steps, each one sentence at the real control it is
-// about, with everything else dimmed. Taken at the end of the first
-// walkthrough, or from Settings. It opens what a step needs (the threads,
-// a settings page) and leaves the app as it found it, finished or skipped.
-// It changes nothing in the conversation: a click on a control it lights
-// goes on with the tour, and never reaches the control.
+// The feature tour: ten steps in four chapters, each a sentence at the real
+// controls it is about, with everything else dimmed. Taken at the end of the
+// first walkthrough, or from Settings.
+//
+// The lit controls work as ever, and using one goes on with the tour; Next
+// goes on for those who only read, doing what the control would have done.
+// What the tour opens or closes so that a step can show its controls
+// (Settings, the threads), it puts back at the end, unless the user has
+// changed it since; what the user does with the controls stays. The tour
+// itself never sends a message, plays a sound or downloads anything.
 
 import type { SettingsPage } from "./state.svelte";
 
@@ -14,58 +18,131 @@ export interface TourView {
   panel: "memory" | null;
 }
 
+/** What a place needs shown, or what using its control opens: a settings
+ *  page, "open" for any, or null for the conversation; the threads. */
+export interface TourWant {
+  settings?: SettingsPage | "open" | null;
+  sidebar?: boolean;
+}
+
 /** Where a step's sentence stands: the controls lit, by their data-tour
- *  names, and what the app shows beside the conversation. */
+ *  names, and which of them go on when used. */
 export interface TourPlace {
   targets: string[];
-  /** A click on the lit control goes on, as it opens what comes next */
-  click?: boolean;
-  /** The threads shown */
-  sidebar?: boolean;
-  /** A settings page, instead of the conversation */
-  settings?: SettingsPage;
+  go?: string[];
+  needs?: TourWant;
+  /** What its control opens: Next opens it too, and the place is passed
+   *  over while it shows */
+  opens?: TourWant;
+  /** Its control takes the user away (presence): the tour goes on once
+   *  they are back */
+  away?: boolean;
 }
 
 export interface TourStep {
   id: string;
+  chapter: string;
   text: string;
-  /** One place, or a control and then what it opens */
   places: TourPlace[];
 }
 
+const CONVERSATION: TourWant = { settings: null };
+
+/** A step in Settings: the tab's entry, which opens it, then the tab. */
+function tab(page: SettingsPage, content: string, go: string[] = []): TourPlace[] {
+  const entry = `settings-${page}`;
+  return [
+    { targets: [entry], go: [entry], needs: { settings: "open" }, opens: { settings: page } },
+    { targets: [entry, content], go, needs: { settings: page } },
+  ];
+}
+
+/** Settings' own button, for a step whose tab is opened from there. */
+const SETTINGS: TourPlace = { targets: ["settings"], go: ["settings"], opens: { settings: "open" } };
+
 export const TOUR: TourStep[] = [
   {
-    id: "talking",
-    text: "Speak or type to talk; the orb shows what Iris is doing.",
-    places: [{ targets: ["composer", "orb"] }],
+    id: "conversation",
+    chapter: "Talking",
+    text:
+      "This is your conversation with Iris. Speak or type, and Iris answers aloud; the orb shows " +
+      "what it is doing: listening, thinking, looking or speaking.",
+    places: [{ targets: ["composer", "orb"], go: ["orb", "send"], needs: CONVERSATION }],
   },
   {
     id: "pause",
-    text: "Pause holds the conversation, and Mic turns the microphone off and on.",
-    places: [{ targets: ["pause", "mic"] }],
+    chapter: "Talking",
+    text:
+      "Try Pause: Iris stops listening and speaking until you resume. Mic turns the microphone " +
+      "off and on.",
+    places: [{ targets: ["pause", "mic"], go: ["pause", "mic"], needs: CONVERSATION }],
   },
   {
-    id: "threads",
-    text: "Start a new thread to talk with another persona, or in a role.",
-    places: [{ targets: ["threads"], click: true }, { targets: ["new-thread"], sidebar: true }],
+    id: "compact",
+    chapter: "Talking",
+    text:
+      "Try compact mode: Iris shrinks to its orb, floating above your other windows. The mark on " +
+      "the orb brings you back, and the tour goes on.",
+    places: [{ targets: ["presence"], go: ["presence"], away: true }],
   },
   {
-    id: "personas",
-    text: "A persona shapes your assistant's character and style: its personality, voice and wake word. Make your own here.",
-    places: [
-      { targets: ["settings"], click: true },
-      { targets: ["settings-personas", "personas"], settings: "personas" },
-    ],
+    id: "persona",
+    chapter: "Your assistant",
+    text:
+      "A persona sets your assistant's personality, voice and wake word, the name you say to " +
+      "wake it. Iris is the default persona; the Personas tab is where you create others.",
+    places: [SETTINGS, ...tab("personas", "personas", ["new-persona"])],
   },
   {
     id: "voices",
-    text: "Every voice and the languages it speaks; clone your own here.",
-    places: [{ targets: ["settings-voices", "voices"], settings: "voices" }],
+    chapter: "Your assistant",
+    text:
+      "The Voices tab lists every voice and the languages it speaks. Each persona speaks with " +
+      "one of these voices, and you can clone your own from a recording.",
+    places: tab("voices", "voices"),
+  },
+  {
+    id: "role",
+    chapter: "Your assistant",
+    text:
+      "A role is an optional focus for a conversation, such as Research or Language partner. " +
+      "Any persona can take on any role; the Roles tab is where you edit them.",
+    places: tab("roles", "roles"),
+  },
+  {
+    id: "thread",
+    chapter: "Conversations",
+    text:
+      "A thread is one conversation with its own memory. You start it with a persona and, if you " +
+      "like, a role; both stay with that thread. Switch between threads here.",
+    places: [
+      { targets: ["threads"], go: ["threads"], needs: CONVERSATION, opens: { sidebar: true } },
+      { targets: ["new-thread"], go: ["new-thread"], needs: { settings: null, sidebar: true } },
+    ],
   },
   {
     id: "memory",
-    text: "See what each thread remembers.",
-    places: [{ targets: ["memory"] }],
+    chapter: "Conversations",
+    text:
+      "Iris has a memory: it remembers the topics of each thread and brings them back later in " +
+      "that thread. The Memory panel shows what it remembers.",
+    places: [{ targets: ["memory"], go: ["memory"] }],
+  },
+  {
+    id: "pipeline",
+    chapter: "How Iris works",
+    text:
+      "The Pipeline tab shows how Iris works, from your voice to its answer: it hears you, thinks " +
+      "with a language model, and speaks. The times show how long each stage took in your last turn.",
+    places: [SETTINGS, ...tab("pipeline", "pipeline")],
+  },
+  {
+    id: "stages",
+    chapter: "How Iris works",
+    text:
+      "Click a stage to change it, such as the microphone or the language model. A value tagged " +
+      "with a persona or a thread is set there instead.",
+    places: [{ targets: ["stage-llm"], go: ["stage-llm"], needs: { settings: "pipeline" } }],
   },
 ];
 
@@ -74,6 +151,12 @@ export interface TourPosition {
   place: number;
 }
 
+const placeAt = ({ step, place }: TourPosition) => TOUR[step].places[place];
+
+/** The settings page wanted, if one is named. */
+const pageOf = (want?: TourWant): SettingsPage | undefined =>
+  want?.settings && want.settings !== "open" ? want.settings : undefined;
+
 /** The place after this one; null after the last. */
 export function after({ step, place }: TourPosition): TourPosition | null {
   if (place + 1 < TOUR[step].places.length) return { step, place: place + 1 };
@@ -81,11 +164,13 @@ export function after({ step, place }: TourPosition): TourPosition | null {
   return null;
 }
 
-/** The app as a place shows it: as the tour found it, with the
- *  conversation shown unless the place is a settings page. */
-export function viewAt(place: TourPlace, found: TourView): TourView {
-  if (place.settings) return { settingsPage: place.settings, sidebar: found.sidebar, panel: null };
-  return { settingsPage: null, sidebar: place.sidebar ?? found.sidebar, panel: found.panel };
+/** Whether the app shows what is wanted. */
+export function holds(want: TourWant | undefined, view: TourView): boolean {
+  if (!want) return true;
+  const { settings, sidebar } = want;
+  if (settings === "open" && view.settingsPage === null) return false;
+  if (settings !== undefined && settings !== "open" && view.settingsPage !== settings) return false;
+  return sidebar === undefined || view.sidebar === sidebar;
 }
 
 /** Taken at the end of the first walkthrough, until finished or skipped;
@@ -101,14 +186,23 @@ export interface TourApp {
   save(patch: { tour: TourProgress }): void;
 }
 
+type Aspect = keyof TourView;
+
+/** A change the tour made: the value before it, and the one it left. */
+interface Change {
+  from: TourView[Aspect];
+  to: TourView[Aspect];
+}
+
 export class TourGuide {
   private app: TourApp;
-  /** Where the tour is, null when it is not shown; a reactive cell in the app */
-  private now: { position: TourPosition | null };
-  /** The app as the tour found it, to leave it so */
-  private found: TourView | null = null;
+  /** Where the tour is, null when it is not shown, and whether the user is
+   *  away in presence; a reactive cell in the app */
+  private now: { position: TourPosition | null; away: boolean };
+  /** What the tour changed, to put back at the end */
+  private changes = new Map<Aspect, Change>();
 
-  constructor(app: TourApp, now: { position: TourPosition | null }) {
+  constructor(app: TourApp, now: { position: TourPosition | null; away: boolean }) {
     this.app = app;
     this.now = now;
   }
@@ -117,13 +211,16 @@ export class TourGuide {
     return this.now.position !== null;
   }
 
+  get away(): boolean {
+    return this.now.away;
+  }
+
   get step(): TourStep | null {
     return this.now.position ? TOUR[this.now.position.step] : null;
   }
 
   get place(): TourPlace | null {
-    const position = this.now.position;
-    return position ? TOUR[position.step].places[position.place] : null;
+    return this.now.position ? placeAt(this.now.position) : null;
   }
 
   /** The step shown, counted from 1 */
@@ -150,16 +247,44 @@ export class TourGuide {
 
   start() {
     if (this.active) return;
-    this.found = this.app.view();
-    this.go({ step: 0, place: 0 });
+    this.changes.clear();
+    this.now.away = false;
+    this.arrive({ step: 0, place: 0 });
   }
 
-  /** On to the next place, or the end after the last. */
+  /** On, doing what the lit control would have done. */
   next() {
-    if (!this.now.position) return;
-    const next = after(this.now.position);
-    if (next) this.go(next);
-    else this.end();
+    if (!this.now.position || this.now.away) return;
+    this.change(this.place!.opens, this.ahead());
+    this.arrive(after(this.now.position));
+  }
+
+  /** A lit control was clicked, and did what it does (`before` is the app as
+   *  it was): what that changed is the user's, and a control that goes on
+   *  goes on, or waits for the user to come back. */
+  clicked(name: string, before: TourView) {
+    const place = this.place;
+    if (!place || this.now.away) return;
+    const view = this.app.view();
+    for (const aspect of Object.keys(view) as Aspect[]) {
+      if (view[aspect] !== before[aspect]) this.changes.delete(aspect);
+    }
+    if (!place.go?.includes(name)) return;
+    if (place.away) {
+      this.now.away = true;
+      return;
+    }
+    const next = after(this.now.position!);
+    // The last control's use ends the tour where it leaves the app
+    if (!next) this.keep(place.needs);
+    this.arrive(next);
+  }
+
+  /** Back from presence, however the user came: the tour goes on. */
+  cameBack() {
+    if (!this.now.away) return;
+    this.now.away = false;
+    this.arrive(after(this.now.position!));
   }
 
   /** The end before the last step: the same as the end after it. */
@@ -167,16 +292,68 @@ export class TourGuide {
     this.end();
   }
 
-  private go(position: TourPosition) {
+  /** The page the steps ahead open, for Settings opened by Next. */
+  private ahead(): SettingsPage | undefined {
+    const step = this.now.position!.step;
+    for (let at = after(this.now.position!); at && at.step === step; at = after(at)) {
+      const page = pageOf(placeAt(at).opens) ?? pageOf(placeAt(at).needs);
+      if (page) return page;
+    }
+    return undefined;
+  }
+
+  /** To a place, showing what it needs, and past those whose control's
+   *  effect shows already; the end after the last. */
+  private arrive(position: TourPosition | null) {
+    while (position) {
+      const place = placeAt(position);
+      this.change(place.needs, pageOf(place.opens));
+      if (!place.opens || !holds(place.opens, this.app.view())) break;
+      position = after(position);
+    }
+    if (!position) return this.end();
     this.now.position = position;
-    this.app.show(viewAt(TOUR[position.step].places[position.place], this.found!));
+  }
+
+  /** Have the app show what is wanted, keeping what the tour changed. */
+  private change(want: TourWant | undefined, page?: SettingsPage) {
+    if (!want || holds(want, this.app.view())) return;
+    const view = this.app.view();
+    const next = { ...view };
+    if (want.settings === "open") next.settingsPage = page ?? "pipeline";
+    else if (want.settings !== undefined) next.settingsPage = want.settings;
+    if (next.settingsPage && !view.settingsPage) next.panel = null;
+    if (want.sidebar !== undefined) next.sidebar = want.sidebar;
+    for (const aspect of Object.keys(next) as Aspect[]) {
+      if (next[aspect] === view[aspect]) continue;
+      const change = this.changes.get(aspect);
+      this.changes.set(aspect, { from: change ? change.from : view[aspect], to: next[aspect] });
+    }
+    this.app.show(next);
+  }
+
+  /** What the tour opened for these needs becomes the user's. */
+  private keep(needs: TourWant | undefined) {
+    if (needs?.settings) this.changes.delete("settingsPage");
+    if (needs?.sidebar) this.changes.delete("sidebar");
   }
 
   private end() {
     if (!this.active) return;
-    this.app.show(this.found!);
+    const view = this.app.view();
+    const back = { ...view };
+    for (const aspect of ["settingsPage", "sidebar", "panel"] as Aspect[]) {
+      const change = this.changes.get(aspect);
+      // Put back unless the user changed it since; the memory panel only
+      // beside the conversation
+      if (!change || view[aspect] !== change.to) continue;
+      if (aspect === "panel" && back.settingsPage) continue;
+      Object.assign(back, { [aspect]: change.from });
+    }
+    this.changes.clear();
     this.now.position = null;
-    this.found = null;
+    this.now.away = false;
+    this.app.show(back);
     this.app.save({ tour: "done" });
   }
 }
@@ -191,44 +368,68 @@ export interface Box {
 const overlaps = (a: Box, b: Box) =>
   a.left < b.left + b.width && b.left < a.left + a.width && a.top < b.top + b.height && b.top < a.top + a.height;
 
-/** Where the sentence stands in the window (space): beside the lit
- *  controls, below, above, right or left of them, wherever it fits clear of
- *  them; else in the largest one's lower right corner. */
+/** Where the sentence stands in the window (space), never over a lit
+ *  control: beside the controls, below, above, right or left of them all or
+ *  of one, else wherever there is room, nearest them; narrower when there is
+ *  no room at its width. `sizes` are the callout's, widest first. */
 export function calloutAt(
   holes: Box[],
-  size: { width: number; height: number },
+  sizes: { width: number; height: number }[],
   space: { width: number; height: number },
   margin = 12,
   gap = 14
-): { left: number; top: number } {
+): Box {
+  const widest = sizes[0];
   if (!holes.length) {
-    return { left: (space.width - size.width) / 2, top: (space.height - size.height) / 2 };
+    return { left: (space.width - widest.width) / 2, top: (space.height - widest.height) / 2, ...widest };
   }
-  const left = Math.min(...holes.map((h) => h.left));
-  const top = Math.min(...holes.map((h) => h.top));
-  const right = Math.max(...holes.map((h) => h.left + h.width));
-  const bottom = Math.max(...holes.map((h) => h.top + h.height));
-  const clamp = (value: number, max: number) => Math.max(margin, Math.min(value, max - margin));
-  const across = clamp((left + right - size.width) / 2, space.width - size.width);
-  const down = clamp((top + bottom - size.height) / 2, space.height - size.height);
-  const candidates = [
-    { left: across, top: bottom + gap },
-    { left: across, top: top - gap - size.height },
-    { left: right + gap, top: down },
-    { left: left - gap - size.width, top: down },
-  ];
-  for (const at of candidates) {
-    const box = { ...at, ...size };
-    const inside =
-      box.left >= margin &&
-      box.top >= margin &&
-      box.left + box.width <= space.width - margin &&
-      box.top + box.height <= space.height - margin;
-    if (inside && !holes.some((hole) => overlaps(box, hole))) return at;
+  const union = {
+    left: Math.min(...holes.map((h) => h.left)),
+    top: Math.min(...holes.map((h) => h.top)),
+    right: Math.max(...holes.map((h) => h.left + h.width)),
+    bottom: Math.max(...holes.map((h) => h.top + h.height)),
+  };
+  const fits = (box: Box) =>
+    box.left >= margin &&
+    box.top >= margin &&
+    box.left + box.width <= space.width - margin &&
+    box.top + box.height <= space.height - margin &&
+    !holes.some((hole) => overlaps(box, hole));
+  for (const size of sizes) {
+    const clampX = (x: number) => Math.max(margin, Math.min(x, space.width - margin - size.width));
+    const clampY = (y: number) => Math.max(margin, Math.min(y, space.height - margin - size.height));
+    const around = (r: { left: number; top: number; right: number; bottom: number }) => {
+      const x = clampX((r.left + r.right - size.width) / 2);
+      const y = clampY((r.top + r.bottom - size.height) / 2);
+      return [
+        { left: x, top: r.bottom + gap },
+        { left: x, top: r.top - gap - size.height },
+        { left: r.right + gap, top: y },
+        { left: r.left - gap - size.width, top: y },
+      ];
+    };
+    const sides = [union, ...holes.map((h) => ({ ...h, right: h.left + h.width, bottom: h.top + h.height }))];
+    for (const at of sides.flatMap(around)) {
+      if (fits({ ...at, ...size })) return { ...at, ...size };
+    }
+    // Wherever there is room, nearest the controls
+    let best: Box | null = null;
+    let nearest = Infinity;
+    for (let top = margin; top + size.height <= space.height - margin; top += 8) {
+      for (let left = margin; left + size.width <= space.width - margin; left += 8) {
+        const box = { left, top, ...size };
+        if (!fits(box)) continue;
+        const dx = Math.max(union.left - (left + size.width), 0, left - union.right);
+        const dy = Math.max(union.top - (top + size.height), 0, top - union.bottom);
+        if (dx + dy < nearest) [best, nearest] = [box, dx + dy];
+      }
+    }
+    if (best) return best;
   }
-  const largest = holes.reduce((a, b) => (b.width * b.height > a.width * a.height ? b : a));
+  const narrowest = sizes[sizes.length - 1];
   return {
-    left: clamp(largest.left + largest.width - size.width - gap, space.width - size.width),
-    top: clamp(largest.top + largest.height - size.height - gap, space.height - size.height),
+    left: space.width - margin - narrowest.width,
+    top: space.height - margin - narrowest.height,
+    ...narrowest,
   };
 }

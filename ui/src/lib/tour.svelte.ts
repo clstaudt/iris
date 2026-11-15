@@ -5,7 +5,7 @@
 import { loadSettings, saveSettings, store } from "./state.svelte";
 import { TourGuide, type TourPosition } from "./tour";
 
-const now = $state<{ position: TourPosition | null }>({ position: null });
+const now = $state<{ position: TourPosition | null; away: boolean }>({ position: null, away: false });
 
 export const tour = new TourGuide(
   {
@@ -13,7 +13,8 @@ export const tour = new TourGuide(
     show(view) {
       if (store.settingsPage !== view.settingsPage) store.openSettings(view.settingsPage);
       if (store.sidebar !== view.sidebar) store.toggleSidebar();
-      store.panel = view.panel;
+      if (view.panel === "memory" && store.panel !== "memory") store.togglePanel("memory");
+      else if (view.panel === null) store.panel = null;
     },
     saved: loadSettings,
     save: saveSettings,

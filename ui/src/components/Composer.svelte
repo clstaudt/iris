@@ -251,6 +251,7 @@
           disabled={!hasDraft}
           class="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-frame transition-opacity hover:opacity-90 disabled:bg-hover disabled:text-ink-3"
           title="Send (Enter)"
+          data-tour="send"
         >
           <Icon name="send" size={16} stroke={2.25} />
         </button>
