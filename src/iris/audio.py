@@ -32,10 +32,13 @@ from iris.turns import (
     HOLD_CERTAIN,
     HOLD_CERTAIN_GOES_ON,
     HOLD_CERTAIN_TIME,
+    HOLD_RESIDUAL,
     HOLD_SETTLE,
     HOLD_SPEECH,
+    HOLD_STANDS_OUT,
     HOLD_THRESHOLD,
     HOLD_TRIGGER,
+    HOLD_TRIGGER_NEAR_ECHO,
     SAMPLE_RATE,
     SPEECH_THRESHOLD,
     SmartTurn,
@@ -534,6 +537,10 @@ def _follow_system(audio):
         follow()
 
 
+def _db(value: float | None) -> str:
+    return "unknown" if value is None else f"{value:.1f} dB"
+
+
 class AudioRecorder:
     """Records the user's turns from the microphone: from the first syllable
     to where Smart Turn hears the end of what they had to say."""
@@ -582,6 +589,10 @@ class AudioRecorder:
         self._capture: _Capture | None = None
         self._capture_lock = threading.Lock()
         self._heard_until: float | None = None
+        # How long speech over the voice about as loud as its echo must go
+        # on to hold it (seconds): longer once such a hold heard only the
+        # echo, in the replies after it too, until a hold hears the user
+        self.near_echo_needs = HOLD_TRIGGER_NEAR_ECHO
         # When the system's default devices were last looked at
         self._followed = 0.0
         self.set_device(device)
@@ -800,10 +811,22 @@ class AudioRecorder:
         (hold() pauses it), and the microphone listens in the quiet: the user
         goes on speaking, the voice's echo dies away with it; speech the VAD
         is certain of needs to go on for a moment only. Echo lets the voice
-        go on (release()). Until the canceller has learned the room, it lets
-        too much of the voice through for that: speech over the voice is not
-        listened to then. Listening ends with the voice going on, however it
-        ends.
+        go on (release()) where it was cut; speech too short for a turn (a
+        back-channel), a little before it. Until the canceller has learned
+        the room, it lets too much of the voice through for that: speech over
+        the voice is not listened to then. Listening ends with the voice
+        going on, however it ends.
+
+        The VAD hardly hears how loud speech is, and takes even the faint
+        echo a working canceller leaves for speech; at the start of a reply,
+        while the canceller finds the voice again (its sound comes out of
+        the speaker a little earlier or later each time), much of the voice
+        comes through. So speech over the voice is weighed against how loud
+        the voice's echo could be (EchoCanceller.against_echo): speech
+        standing out above it holds the voice at once; speech about as loud
+        as the echo only once it has gone on for a while; and speech the VAD
+        is sure of while the canceller leaves far less than the echo is what
+        it leaves of the voice, and holds nothing.
 
         Args:
             turn: Path to the turn recorded by listen()
@@ -816,7 +839,8 @@ class AudioRecorder:
             silence_duration: As for listen()
             speaking: Whether the voice is speaking; the user is heard over it
             hold: Pauses the voice
-            release: Lets the voice go on after a hold
+            release: Lets the voice go on after a hold: release(rewind), a
+                little before where it was cut, or exactly there
 
         Returns:
             Path to the turn the user spoke (with the earlier one, if it went
@@ -833,6 +857,7 @@ class AudioRecorder:
         level = self._level_meter(on_level)
         frame_seconds = FRAME / self.sample_rate
         trigger = round(HOLD_TRIGGER / frame_seconds)
+        near_trigger = round(self.near_echo_needs / frame_seconds)
         echo_trigger = round(HOLD_TRIGGER_AFTER_ECHO / frame_seconds)
         certain_frames = round(HOLD_CERTAIN_TIME / frame_seconds)
         backoff = round(HOLD_BACKOFF / frame_seconds)
@@ -855,12 +880,27 @@ class AudioRecorder:
         calm, waiting, echoed = 0, False, -again
         # Frames in a row the voice was not speaking, and frames taken
         quiet, taken = 0, 0
+        # Whether the hold was for speech about as loud as the echo
+        held_near = False
         # Frames of speech that hold the voice. Each hold stops and restarts
         # the voice, so holds for echo stutter: after one, it takes longer
         # speech to hold the voice; after a second, it is not held again
         # until it has ended
         hold_after = trigger
         never = 1 << 30
+        # How loud what the microphone heard was against the voice's echo
+        # (None from a canceller that cannot tell)
+        against = getattr(echo, "against_echo", None)
+        # Of the speech over the voice sure to be speech now, once it was
+        # long enough to hold the voice: the most it stood out above the
+        # voice's echo (dB), and for how many frames it was sure
+        loudest, lasted = None, 0
+
+        def not_held(frames: int, why: str):
+            """Speech over the voice long enough to have held it before it
+            was weighed against the echo, which did not hold it."""
+            voice_log.info("not held: %.2f s sure to be speech over the voice, %s", frames * frame_seconds, why)
+
         try:
             with self._microphone(echo, go_on=True) as frames:
                 while True:
@@ -888,6 +928,29 @@ class AudioRecorder:
                         if quiet >= done_frames:
                             hold_after = trigger
                     over_voice = echo is not None and quiet < done_frames
+                    # The speech's last frames, weighed against the echo
+                    levels = None
+                    if not sure:
+                        if loudest is not None and not held:
+                            not_held(lasted, f"at most {loudest:.1f} dB over its echo (holding it takes "
+                                             f"{HOLD_STANDS_OUT:.0f} dB, or {near_trigger * frame_seconds:.2f} s)")
+                        loudest = None
+                    elif over_voice and not held and against is not None and echo.settled:
+                        levels = against(at - (min(sure, trigger) - 1) * frame_seconds, at + frame_seconds)
+                    if levels is not None and levels.left <= HOLD_RESIDUAL:
+                        # The VAD is sure of what the canceller leaves of
+                        # the voice: it starts over
+                        if sure >= trigger:
+                            not_held(sure, f"{-levels.left:.0f} dB below its echo: what the canceller left of it")
+                        sure, certain, was_certain, loudest, levels = 0, 0, False, None, None
+                    elif levels is not None and sure >= trigger:
+                        loudest = levels.heard if loudest is None else max(loudest, levels.heard)
+                        lasted = sure
+                    # Speech that does not stand out above the echo holds
+                    # the voice only once it has gone on for a while
+                    bar = hold_after
+                    if levels is not None and levels.heard < HOLD_STANDS_OUT:
+                        bar = max(hold_after, near_trigger)
                     if held:
                         held -= 1
                         heard += speech and at - held_at >= died_away
@@ -901,37 +964,58 @@ class AudioRecorder:
                         # to speak
                         sure_users = was_certain and heard >= HOLD_CERTAIN_GOES_ON
                         if not ((enough or sure_users) and tracker.started):
-                            # The voice's echo: it goes on, and so does listening
+                            # The voice's echo, or too little speech for a
+                            # turn (a back-channel): the voice goes on, and so
+                            # does listening. Held for nothing it goes on
+                            # where it was cut; the user who spoke over it
+                            # hears the cut word again
                             if paused:
-                                release()
+                                release(heard > 0)
                                 if not getattr(echo, "cancelling", True) or taken - echoed < again:
                                     calm = backoff
                                 echoed = taken
                                 hold_after = echo_trigger if hold_after == trigger else never
+                                if held_near and not heard:
+                                    # The echo went on long enough: from now
+                                    # on, in later replies too, such speech
+                                    # must go on longer
+                                    near_trigger = max(near_trigger, echo_trigger)
+                                    self.near_echo_needs = max(self.near_echo_needs, HOLD_TRIGGER_AFTER_ECHO)
                                 voice_log.info(
-                                    "echo: released after %.2f s of speech while held; %s",
+                                    "%s: released after %.2f s of speech while held, going on %s; %s%s",
+                                    "aside" if heard else "echo",
                                     heard * frame_seconds,
+                                    "a little before where it was cut" if heard else "where it was cut",
                                     "no more holds until the voice ends" if hold_after == never
                                     else f"holds now need {hold_after * frame_seconds:.2f} s",
+                                    f", and speech about as loud as the echo {near_trigger * frame_seconds:.2f} s "
+                                    "from now on" if held_near and not heard else "",
                                 )
-                            tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
+                            tracker, sure, certain, was_certain, loudest = new_tracker(), 0, 0, False, None
                             continue
                         voice_log.info(
                             "user: %.2f s of speech while held%s", heard * frame_seconds,
                             " (the voice had ended)" if not paused else "",
                         )
+                        if self.near_echo_needs > HOLD_TRIGGER_NEAR_ECHO:
+                            self.near_echo_needs = HOLD_TRIGGER_NEAR_ECHO
+                            voice_log.info(
+                                "speech about as loud as the voice's echo holds it after %.2f s again",
+                                HOLD_TRIGGER_NEAR_ECHO,
+                            )
                         spoke = False  # the user's: taken up below
                     elif echo is not None and (not spoke or waiting) and (sure >= trigger or tracker.started):
                         if over_voice:
                             if not echo.settled:
                                 tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
                                 waiting = False
-                            elif calm or sure < hold_after:
+                            elif calm or sure < bar:
                                 # Kept, to be judged once the voice may be
                                 # held again or has ended; over while the
                                 # voice speaks on, it cannot be told from
-                                # its echo. After a hold for echo, it holds
-                                # the voice only once it has gone on longer
+                                # its echo. After a hold for echo, or about
+                                # as loud as the echo, it holds the voice
+                                # only once it has gone on longer
                                 if ended:
                                     tracker, sure, certain, was_certain = new_tracker(), 0, 0, False
                                     waiting = False
@@ -940,17 +1024,21 @@ class AudioRecorder:
                             else:
                                 hold()
                                 voice_log.info(
-                                    "held: %.2f s sure to be speech, canceller %s, suppression %s",
+                                    "held: %.2f s sure to be speech, %s, canceller %s, suppression %s",
                                     sure * frame_seconds,
+                                    "its level against the echo unknown" if levels is None
+                                    else f"{levels.heard:.1f} dB over the voice's echo",
                                     "cancelling" if getattr(echo, "cancelling", True) else "leaking",
-                                    getattr(echo, "suppression", None),
+                                    _db(getattr(echo, "suppression", None)),
                                 )
                                 held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, True, 0, False
+                                held_near, loudest = bar > hold_after, None
                             continue
                         if waiting:
                             # The voice ended meanwhile: what was heard is
                             # judged as in a hold, with nothing to hold
                             held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, False, 0, False
+                            held_near = False
                             continue
                     if tracker.started:
                         if not spoke and not on_speech():
@@ -964,7 +1052,7 @@ class AudioRecorder:
             return None
         finally:
             if held and paused and release is not None:
-                release()
+                release(True)
 
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         sf.write(temp_file.name, tracker.audio(), self.sample_rate)
@@ -1382,6 +1470,8 @@ class AudioPlayer:
         self.echo: EchoCanceller | None = None
         self._paused = threading.Event()
         self._stopped = threading.Event()
+        # Whether playback goes on a little before where a pause cut it
+        self._rewind = True
         # Where the clip playing now is: (its length and sample rate, the
         # position its current segment started from, and when that segment
         # started being heard, None while paused)
@@ -1402,8 +1492,11 @@ class AudioPlayer:
         """Pause playback; play() holds its place until resume()."""
         self._paused.set()
 
-    def resume(self):
-        """Continue playback from where pause() cut it."""
+    def resume(self, rewind: bool = True):
+        """Continue playback from where pause() cut it: a little before it
+        (rewind), so a listener who was interrupted hears the cut word again,
+        or exactly there, for a voice held for nothing (its own echo)."""
+        self._rewind = rewind
         self._paused.clear()
 
     @property
@@ -1482,11 +1575,19 @@ class AudioPlayer:
             return self._stopped.is_set() or (cancelled is not None and cancelled())
 
         position = 0
+        # Where the last cut left the clip: how far it was heard (samples),
+        # and how much of its segment was heard (seconds)
+        cut: tuple[int, float] | None = None
         while position < len(audio):
             while self._paused.is_set() and not stopped():
                 time.sleep(0.05)
             if stopped():
                 return
+            if cut is not None:
+                position = self._going_on(cut, len(audio), sample_rate)
+                cut = None
+                if position >= len(audio):
+                    return
 
             segment = np.ascontiguousarray(audio[position:])
             if position > 0:
@@ -1535,6 +1636,10 @@ class AudioPlayer:
             elapsed = time.monotonic() - started
             moved = _generation(self.audio) != generation
             cut_by_pause = (self._paused.is_set() or moved) and not stopped()
+            if moved and not self._paused.is_set():
+                # Played on at once on the device as it is now: the words
+                # the change clipped are heard again
+                self._rewind = True
             if cut_by_pause or stopped():
                 self.audio.stop()
                 self._cut()
@@ -1546,17 +1651,26 @@ class AudioPlayer:
 
             if not cut_by_pause:
                 return
-            # What was heard is the wall time minus the output latency. It
-            # goes on a little before that, for the words the cut may have
-            # clipped, but never further back than half of what was heard: a
-            # hold early in a clip must not start it over
+            # What was heard is the wall time minus the output latency; where
+            # it goes on is decided once it does (resume)
             heard = max(0.0, elapsed - latency)
-            position += int((heard - min(RESUME_REWIND, heard / 2)) * sample_rate)
-            voice_log.info(
-                "resumes at %.2f s of %.2f s (heard %.2f s of this segment)",
-                position / sample_rate, len(audio) / sample_rate, heard,
-            )
-            self._place = (len(audio), sample_rate, position, None)
+            cut = (position + int(heard * sample_rate), heard)
+            self._place = (len(audio), sample_rate, min(cut[0], len(audio)), None)
+
+    def _going_on(self, cut: tuple[int, float], length: int, sample_rate: int) -> int:
+        """Where playback goes on after a cut: where the clip was heard to,
+        or a little before it (rewind), for the words the cut may have
+        clipped, but never further back than half of the segment heard: a
+        hold early in a clip must not start it over."""
+        heard_to, heard = cut
+        back = min(RESUME_REWIND, heard / 2) if self._rewind else 0.0
+        position = max(0, heard_to - int(back * sample_rate))
+        voice_log.info(
+            "resumes at %.2f s of %.2f s, %s (heard %.2f s of this segment)",
+            position / sample_rate, length / sample_rate,
+            f"{back:.2f} s before where it was cut" if back else "where it was cut", heard,
+        )
+        return position
 
     def play(
         self,

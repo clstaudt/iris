@@ -206,14 +206,17 @@ def replayed(earlier: Clip, clip: Clip) -> Optional[float]:
 
 def voice_holds(lines: list) -> dict:
     """What Iris's voice log (iris.voice: (at, message) lines) says of the
-    holds: how many, how many were judged its own echo and the user's, and
-    how often the voice went on after being cut."""
+    holds: how many, how many were judged its own echo, too little for a
+    turn (an aside) and the user's, how often the voice went on after being
+    cut, and how often speech over it was weighed and did not hold it."""
     messages = [message for _, message in lines]
     return {
         "held": sum(m.startswith("held") for m in messages),
         "echo": sum(m.startswith("echo") for m in messages),
+        "aside": sum(m.startswith("aside") for m in messages),
         "user": sum(m.startswith("user") for m in messages),
         "resumed": sum(m.startswith("resumes") for m in messages),
+        "not_held": sum(m.startswith("not held") for m in messages),
     }
 
 
@@ -374,8 +377,8 @@ class TurnResult:
         counts = voice_holds(self.voice)
         if counts["held"] or counts["resumed"]:
             repeated = [rewind for _, _, rewind in self.holds if rewind is not None and rewind > REPEAT_SLACK]
-            parts.append(f"held {counts['held']} ({counts['echo']} echo, {counts['user']} user), "
-                         f"resumed {counts['resumed']}"
+            parts.append(f"held {counts['held']} ({counts['echo']} echo, {counts['aside']} aside, "
+                         f"{counts['user']} user), resumed {counts['resumed']}"
                          + (f", repeating {', '.join(f'{r:.2f}' for r in repeated)} s" if repeated else ""))
         lines = [f"\n         {f}" for f in self.failures]
         lines += [f"\n         expected failure: {f}" for f in self.expected]
@@ -1637,7 +1640,8 @@ def summarize(results: list[TurnResult]) -> dict:
         "skipped": sorted({f"{r.conversation}: {r.skipped}" for r in results if r.skipped}),
         "taken_early": sum(r.taken_early for r in held),
         # The voice held, and what the holds were judged to be (iris.voice)
-        "holds": {key: sum(voice_holds(r.voice)[key] for r in held) for key in ("held", "echo", "user", "resumed")},
+        "holds": {key: sum(voice_holds(r.voice)[key] for r in held)
+                  for key in ("held", "echo", "aside", "user", "resumed", "not_held")},
         "repeated": sum(1 for r in held for _, _, rewind in r.holds if rewind is not None and rewind > REPEAT_SLACK),
         **block(held),
     }

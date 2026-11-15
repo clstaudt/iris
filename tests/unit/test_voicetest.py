@@ -986,8 +986,12 @@ class TestMeasures:
                  (0.1, "resumes at 0.52 s of 4.24 s (heard 0.87 s of this segment)"),
                  (0.5, "echo: released after 0.00 s of speech while held; holds now need 0.99 s"),
                  (2.0, "held: 0.13 s sure to be speech, canceller cancelling, suppression 20.1"),
-                 (2.5, "user: 0.32 s of speech while held")]
-        assert voice_holds(lines) == {"held": 2, "echo": 1, "user": 1, "resumed": 1}
+                 (2.5, "user: 0.32 s of speech while held"),
+                 (4.0, "not held: 0.29 s sure to be speech over the voice, at most 3.1 dB over its echo"),
+                 (5.0, "held: 0.13 s sure to be speech, 12.0 dB over the voice's echo"),
+                 (5.5, "aside: released after 0.19 s of speech while held, going on a little before where it "
+                       "was cut; holds now need 0.99 s")]
+        assert voice_holds(lines) == {"held": 3, "echo": 1, "aside": 1, "user": 1, "resumed": 1, "not_held": 1}
 
     def test_a_hold_is_found_with_what_it_repeated(self):
         speaker = Space().endpoint("a").speaker
