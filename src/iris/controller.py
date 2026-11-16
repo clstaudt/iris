@@ -185,6 +185,10 @@ class AssistantController:
         self.plugins = load_plugins()
 
         self._loop_thread: threading.Thread | None = None
+        # Whether that thread runs Iris: from its start until its loop has
+        # ended (_loop_ended). The thread lives on for a moment after that,
+        # ending, but Iris no longer runs
+        self._loop_alive = False
         self._poller: threading.Thread | None = None
         self._start_lock = threading.Lock()
         # Whether the assistant's loop runs, and whether it failed again and
@@ -369,7 +373,7 @@ class AssistantController:
         options = dict(options or {})
         greet = bool(options.pop("greet", False))
         with self._start_lock:
-            if self._loop_thread and self._loop_thread.is_alive():
+            if self._running():
                 return {"ok": True, "already_running": True}
             self._release_first_run()
             if greet:
@@ -386,9 +390,15 @@ class AssistantController:
             self._loop_thread = threading.Thread(
                 target=self._run, args=(options,), daemon=True
             )
+            self._loop_alive = True
             self._loop_thread.start()
             self._start_poller()
         return {"ok": True}
+
+    def _running(self) -> bool:
+        """Whether Iris runs: its loop's thread has started and its loop has
+        not ended (see _loop_ended)."""
+        return self._loop_alive and self._loop_thread is not None and self._loop_thread.is_alive()
 
     @staticmethod
     def _shut_down(assistant):
@@ -409,7 +419,10 @@ class AssistantController:
     def _loop_ended(self):
         """No loop runs: nothing polls the state, which is idle. Called
         under the start lock, so a command never shows a state of its own
-        (paused, muted) after this."""
+        (paused, muted) after this. Iris does not run from here on, though
+        the loop's thread still ends: one that asks on seeing the idle state
+        is told so, and may start Iris again at once."""
+        self._loop_alive = False
         self._poller_stop.set()
         if self._poller is not None and self._poller is not threading.current_thread():
             self._poller.join(timeout=1.0)
@@ -429,6 +442,7 @@ class AssistantController:
             self._looping = True
             logger.info("Starting the assistant's loop again")
             self._loop_thread = threading.Thread(target=self._supervise, daemon=True)
+            self._loop_alive = True
             self._loop_thread.start()
             self._start_poller()
 
@@ -534,11 +548,13 @@ class AssistantController:
         The loop survives what goes wrong in it; should it fail all the same,
         it is started again, so that Pause, Resume and the microphone always
         steer a live loop. Failing more than LOOP_RESTARTS times within
-        LOOP_RESTART_WINDOW, it is left stopped, the error is told, and Iris
-        is idle until Resume or the microphone starts it again.
+        LOOP_RESTART_WINDOW, it is left stopped, and Iris is idle until
+        Resume or the microphone starts it again; the error is told once it
+        is, so that the app, told, finds Iris not running and may start it.
         """
         failures: deque[float] = deque()
-        gave_up = False
+        # Why the loop was given up on, if it was
+        failure = None
         try:
             while True:
                 try:
@@ -553,15 +569,16 @@ class AssistantController:
                     while now - failures[0] > LOOP_RESTART_WINDOW:
                         failures.popleft()
                     if len(failures) > LOOP_RESTARTS:
-                        gave_up = True
-                        self.bus.emit("error", {"message": f"Assistant loop failed: {e}"})
+                        failure = e
                         return
                     time.sleep(LOOP_RESTART_DELAY)
         finally:
             with self._start_lock:
                 self._looping = False
-                self._loop_failed = gave_up
+                self._loop_failed = failure is not None
                 self._loop_ended()
+            if failure is not None:
+                self.bus.emit("error", {"message": f"Assistant loop failed: {failure}"})
 
     def stop(self) -> dict:
         """Request shutdown. Takes effect after the current listen/turn ends."""
@@ -2079,7 +2096,7 @@ class AssistantController:
             "personas": list(names),
             "persona_names": names,
             "state": state,
-            "running": bool(self._loop_thread and self._loop_thread.is_alive()),
+            "running": self._running(),
             "timings": list(self._timings),
         }
         if self.assistant is not None:

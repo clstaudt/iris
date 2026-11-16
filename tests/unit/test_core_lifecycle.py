@@ -60,6 +60,9 @@ class Assistant:
     def config_info(self):
         return {}
 
+    def shut_down(self):
+        pass
+
     def run_loop(self):
         if Assistant.fails is not None:
             raise Assistant.fails
@@ -103,14 +106,36 @@ def test_a_start_that_fails_is_reported_and_iris_can_be_started_again(monkeypatc
 
 
 def test_a_loop_that_keeps_failing_is_reported(monkeypatch):
+    """Once Iris is idle, and not running: the app, told, may start it again
+    at once. The error came while the loop's thread was still ending, which
+    reported Iris running, and would not start it again."""
     controller, seen = _controller(monkeypatch)
+    # Whether Iris runs, asked as the error is told (on the loop's thread)
+    running_when_told = []
+    told = threading.Event()
+
+    def on_error(kind, data):
+        if kind == "error":
+            running_when_told.append(controller.info()["running"])
+            told.set()
+
+    controller.bus.subscribe(on_error)
     Assistant.fails = RuntimeError("the audio thread died")
     try:
         controller.start({})
-        assert _wait_for(lambda: seen.of("error"))
+        assert told.wait(5)
         assert seen.of("error") == [{"message": "Assistant loop failed: the audio thread died"}]
-        assert _wait_for(lambda: seen.of("state")[-1] == {"state": "idle"})
+        assert seen.of("state")[-1] == {"state": "idle"}
+        assert running_when_told == [False]
         assert not controller.info()["running"]
+
+        # Started again at once, the thread before maybe still ending
+        Assistant.fails = None
+        again = controller.start({})
+        assert again["ok"] and "already_running" not in again
+        assert _wait_for(lambda: controller._looping)
+        assert controller.info()["running"]
+        controller.stop()
     finally:
         Assistant.fails = None
 
