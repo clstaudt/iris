@@ -250,9 +250,10 @@ class Room:
 class Speaker:
     """An endpoint's speaker: records every clip instead of playing it.
 
-    As a sounddevice stream does, it plays in blocks (blocksize): the last
-    one is filled up with silence, and the stream is playing until that has
-    been played too.
+    As Iris's own speaker plays a clip (iris.audio.SoundDevice), its stream
+    plays in blocks (blocksize), the last one filled up with silence, but
+    the clip is over once its last sample has been heard: the next one
+    starts then, while the stream before plays out its silence.
 
     It always reports OUTPUT_LATENCY. Woken after WAKE_IDLE seconds of
     silence, it plays up to wake_latency later than that, by an amount the
@@ -299,12 +300,11 @@ class Speaker:
             self._quiet_since = min(self._quiet_since, max(now, self.clips[-1].started))
 
     def playing(self) -> bool:
-        """Whether the last clip's stream is still playing, its last block
-        filled up with silence (a stopped one is not, even before it was
-        heard)."""
+        """Whether some of the last clip is still to be heard (a stopped one
+        is not, even before it was heard)."""
         with self._lock:
             last = self.clips[-1] if self.clips else None
-            return last is not None and last.stopped is None and self._stream_end > time.monotonic()
+            return last is not None and last.stopped is None and last.end > time.monotonic()
 
     def clips_between(self, start: float, end: float = float("inf")) -> list[Clip]:
         with self._lock:

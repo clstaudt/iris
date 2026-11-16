@@ -103,9 +103,20 @@ def test_the_player_says_when_its_sound_leaves_the_speaker(monkeypatch):
         latency = 0.1
         active = False
 
-    monkeypatch.setattr(audio_module.sd, "play", lambda *a, **k: None)
-    monkeypatch.setattr(audio_module.sd, "stop", lambda: None)
-    monkeypatch.setattr(audio_module.sd, "get_stream", lambda: Stream())
+        def __init__(self, **options):
+            pass
+
+        def start(self):
+            pass
+
+        def abort(self, ignore_errors=True):
+            pass
+
+        def close(self, ignore_errors=True):
+            pass
+
+    monkeypatch.setattr(audio_module.sd, "OutputStream", Stream)
+    monkeypatch.setattr(audio_module, "_PORTAUDIO", audio_module._PortAudio())
     player = AudioPlayer()
     player.echo = Echo()
     before = time.monotonic()
