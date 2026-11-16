@@ -29,9 +29,11 @@ from iris.turns import (
     HOLD_AGAIN,
     HOLD_TRIGGER_AFTER_ECHO,
     HOLD_BACKOFF,
+    HOLD_CANCELLED,
     HOLD_CERTAIN,
     HOLD_CERTAIN_GOES_ON,
     HOLD_CERTAIN_TIME,
+    HOLD_OUT_OF_RESIDUE,
     HOLD_RESIDUAL,
     HOLD_SETTLE,
     HOLD_SPEECH,
@@ -39,6 +41,7 @@ from iris.turns import (
     HOLD_THRESHOLD,
     HOLD_TRIGGER,
     HOLD_TRIGGER_NEAR_ECHO,
+    HOLD_WITHIN_ECHO,
     SAMPLE_RATE,
     SPEECH_THRESHOLD,
     SmartTurn,
@@ -272,14 +275,123 @@ def system_defaults() -> tuple[int, ...] | None:
     return tuple(found)
 
 
-def _stop_playback():
-    """End what sounddevice.play() plays, at once rather than once its
-    buffers have played (its device may be gone)."""
-    try:
-        sd.get_stream().abort()
-    except Exception:
-        pass
-    sd.stop()
+# Closing a stream takes a moment (0.1 s on macOS): the streams of clips
+# played to their end are closed while the clip playing now still has at
+# least this long to play (seconds), so its end is not noticed late
+CLOSE_WITHIN = 0.5
+
+
+class _Clip:
+    """A clip played on an output stream of its own, as sounddevice.play()
+    plays one: block by block, the last block filled up with silence, the
+    stream ending by itself after it.
+
+    Its callback learns from PortAudio when the clip's last sample is due at
+    the speaker: the clip has played then, and the next one can start at
+    once, on a stream of its own, while this one plays out the silence after
+    it alone. Waiting for that silence, up to a block (1.4 s at 24 kHz), and
+    closing the stream before the next could open, was a pause of up to 1.5 s
+    between every two pieces of a reply. Its stream is not cut short: should
+    the speaker play later than it says (Bluetooth), nothing of the clip is
+    lost.
+    """
+
+    def __init__(self, audio: np.ndarray, sample_rate: int, **options):
+        data = np.asarray(audio, dtype=np.float32)
+        self.data = data.reshape(len(data), -1)
+        self.sample_rate = sample_rate
+        # Frames handed to the device so far
+        self.frame = 0
+        # When its last sample is heard (time.monotonic()), once the block
+        # holding it went to the device
+        self.ends: float | None = None
+        # Blocks the device asked for after they were due, and how late
+        # (seconds): what the speaker had no audio for
+        self.late: list[float] = []
+        self._reported = False
+        self.stream = sd.OutputStream(
+            samplerate=sample_rate,
+            channels=self.data.shape[1],
+            dtype="float32",
+            callback=self._callback,
+            prime_output_buffers_using_stream_callback=False,
+            **options,
+        )
+        try:
+            self.latency = float(self.stream.latency)
+        except Exception:
+            self.latency = 0.0
+        try:
+            self.stream.start()
+        except Exception:
+            self.stream.close(ignore_errors=True)
+            raise
+
+    def _callback(self, outdata, frames, time_info, status):
+        entered = time.monotonic()
+        count = min(len(self.data) - self.frame, frames)
+        if count <= 0:
+            raise sd.CallbackAbort  # the block after the last: as sounddevice.play()
+        outdata[:count] = self.data[self.frame : self.frame + count]
+        outdata[count:] = 0
+        self.frame += count
+        # How long until this block's first sample is heard
+        ahead = time_info.outputBufferDacTime - time_info.currentTime
+        if not 0.0 <= ahead < 1.0:  # not told
+            ahead = self.latency
+        if status.output_underflow:
+            self.late.append(0.0)
+        elif time_info.outputBufferDacTime > 0.0:
+            # Called this long after the block was due (waiting for Python)
+            try:
+                behind = self.stream.time - time_info.outputBufferDacTime
+            except Exception:
+                behind = 0.0
+            if behind > 0.0:
+                self.late.append(behind)
+        if self.frame >= len(self.data):
+            self.ends = entered + ahead + count / self.sample_rate
+
+    @property
+    def active(self) -> bool:
+        try:
+            return bool(self.stream.active)
+        except Exception:
+            return False
+
+    def playing(self) -> bool:
+        """Whether some of the clip is still to be heard."""
+        return self.active and (self.ends is None or time.monotonic() < self.ends)
+
+    def played_out(self) -> bool:
+        """Whether all of the clip has been heard: its stream plays silence."""
+        return self.ends is not None and time.monotonic() >= self.ends
+
+    def left(self) -> float:
+        """Seconds of the clip still to be heard."""
+        if self.ends is not None:
+            return max(0.0, self.ends - time.monotonic())
+        return (len(self.data) - self.frame) / self.sample_rate
+
+    def report(self):
+        """Tell the voice log, once, where the speaker ran out of audio."""
+        if self._reported:
+            return
+        self._reported = True
+        for behind in self.late:
+            voice_log.debug(
+                "dropout: the speaker had no audio for a block of the clip%s",
+                f" ({behind * 1000:.0f} ms late)" if behind else " (PortAudio's output underflow)",
+            )
+
+    def close(self):
+        """End its stream at once (its device may be gone)."""
+        self.report()
+        try:
+            self.stream.abort(ignore_errors=True)
+            self.stream.close(ignore_errors=True)
+        except Exception:
+            logger.warning("The speaker's stream did not close cleanly", exc_info=True)
 
 
 class _PortAudio:
@@ -297,12 +409,15 @@ class _PortAudio:
     """
 
     def __init__(self):
-        # sounddevice's play() and stop() act on one shared output stream,
-        # and PortAudio crashes the process when two threads close it at
-        # once. Stop reaches it from several threads (the app's command, the
-        # reply's thread, the playback thread), so every use goes through
-        # this lock, and the devices are read anew under it.
+        # PortAudio crashes the process when two threads close a stream at
+        # once. Stop reaches the speaker's from several threads (the app's
+        # command, the reply's thread, the playback thread), so every use
+        # goes through this lock, and the devices are read anew under it.
         self.lock = threading.RLock()
+        # The clip playing now, and clips played to their end whose streams
+        # still play the silence after them, until they end by themselves
+        self.clip: _Clip | None = None
+        self.ending: list[_Clip] = []
         # How many times the devices were read anew: a stream opened before
         # the last time is gone
         self.generation = 0
@@ -328,7 +443,7 @@ class _PortAudio:
         with self.lock:
             if seen is not None and seen != self.generation:
                 return True
-            _stop_playback()
+            self.silence()
             for stream in list(self.streams):
                 stream.drop()
             try:
@@ -366,6 +481,59 @@ class _PortAudio:
             self.defaults = defaults
             logger.info("The system's default audio devices changed")
             return self.refresh()
+
+    def play(self, audio: np.ndarray, sample_rate: int, options: dict) -> _Clip:
+        """Start playing a clip (under the lock), ending the one before,
+        unless all of it has been heard: its stream is left to play the
+        silence after it and end by itself."""
+        last, self.clip = self.clip, None
+        if last is not None and last.played_out():
+            self.ending.append(last)
+        elif last is not None:
+            last.close()
+        try:
+            self.clip = _Clip(audio, sample_rate, **options)
+        except sd.PortAudioError:
+            if not self.ending:
+                raise
+            # Some speakers take one stream at a time: what still plays
+            # after the clips before is only silence
+            self._close_ending(everything=True)
+            self.clip = _Clip(audio, sample_rate, **options)
+        return self.clip
+
+    def playing(self) -> bool:
+        """Whether some of the clip played last is still to be heard (under
+        the lock). The streams of clips played out that have ended are
+        closed meanwhile, while it has long to play."""
+        clip = self.clip
+        if clip is None or clip.left() > CLOSE_WITHIN:
+            self._close_ending()
+        if clip is None:
+            return False
+        if clip.playing():
+            return True
+        clip.report()
+        return False
+
+    def stop(self):
+        """End the clip playing now at once (under the lock). The streams
+        that only play silence are closed later, as Stop and a hold must
+        silence the voice without waiting for them."""
+        if self.clip is not None:
+            self.clip.close()
+        self.clip = None
+
+    def silence(self):
+        """End every stream of a clip at once (under the lock)."""
+        self.stop()
+        self._close_ending(everything=True)
+
+    def _close_ending(self, everything: bool = False):
+        for clip in list(self.ending):
+            if everything or not clip.active:
+                clip.close()
+                self.ending.remove(clip)
 
 
 def _default_name(kind: str) -> str | None:
@@ -429,9 +597,9 @@ class SoundDevice:
     """The computer's microphone and speaker, through sounddevice.
 
     All of Iris's audio goes through a device: the microphone as an input
-    stream, the speaker as one output stream that plays a clip at a time. A
-    test gives Iris a device of its own instead, such as a virtual room, and
-    two assistants in one process can each have one.
+    stream, the speaker as an output stream for each clip, one clip heard at
+    a time (see _Clip). A test gives Iris a device of its own instead, such
+    as a virtual room, and two assistants in one process can each have one.
 
     The devices may change while Iris runs. A clip the speaker cannot play
     has the devices read anew and is played once more, on the default as it
@@ -477,7 +645,8 @@ class SoundDevice:
             return sd.query_devices(*args, **kwargs)
 
     def play(self, audio: np.ndarray, sample_rate: int, **options) -> float:
-        """Start playing a clip, ending the one before.
+        """Start playing a clip, ending the one before unless all of it has
+        been heard (see _Clip). The options are sounddevice.OutputStream's.
 
         A speaker that cannot be opened may be one PortAudio knows from
         before a device change: the devices are read anew and the clip is
@@ -490,30 +659,25 @@ class SoundDevice:
             _PORTAUDIO.follow_system()
             seen = _PORTAUDIO.generation
             try:
-                sd.play(audio, sample_rate, **options)
+                clip = _PORTAUDIO.play(audio, sample_rate, options)
             except sd.PortAudioError as error:
                 logger.warning("The speaker could not be opened (%s); reading the devices anew",
                                error)
                 if not _PORTAUDIO.refresh(seen):
                     raise
-                sd.play(audio, sample_rate, **options)
-            try:
-                return float(sd.get_stream().latency)
-            except Exception:
-                return 0.0
+                clip = _PORTAUDIO.play(audio, sample_rate, options)
+            return clip.latency
 
     def stop(self):
         """Stop what plays."""
         with _PORTAUDIO.lock:
-            sd.stop()
+            _PORTAUDIO.stop()
 
     def playing(self) -> bool:
-        """Whether the clip played last still has audio to play."""
+        """Whether some of the clip played last is still to be heard: not
+        the silence its stream plays after it."""
         with _PORTAUDIO.lock:
-            try:
-                return bool(sd.get_stream().active)
-            except Exception:
-                return False
+            return _PORTAUDIO.playing()
 
 
 # The computer's own audio, which Iris uses unless given another device
@@ -823,10 +987,17 @@ class AudioRecorder:
         the speaker a little earlier or later each time), much of the voice
         comes through. So speech over the voice is weighed against how loud
         the voice's echo could be (EchoCanceller.against_echo): speech
-        standing out above it holds the voice at once; speech about as loud
-        as the echo only once it has gone on for a while; and speech the VAD
-        is sure of while the canceller leaves far less than the echo is what
-        it leaves of the voice, and holds nothing.
+        standing out above it holds the voice at once; so does speech that
+        the canceller leaves far above what it left of the voice just
+        before, while it was cancelling (a user quieter than loud speakers),
+        unless it is about as loud as the echo where the voice is loud (the
+        voice let through for a moment); speech about as loud as the echo
+        holds it only once it has gone on for a while; and speech the VAD is
+        sure of while the canceller leaves far less than the echo, and no
+        more than before, is what it leaves of the voice, and holds nothing.
+        Speech that stood out is heard from the moment the voice is held,
+        and a hold for echo does not make it wait longer: a "Stop" said once
+        is over before the voice has died away.
 
         Args:
             turn: Path to the turn recorded by listen()
@@ -880,8 +1051,9 @@ class AudioRecorder:
         calm, waiting, echoed = 0, False, -again
         # Frames in a row the voice was not speaking, and frames taken
         quiet, taken = 0, 0
-        # Whether the hold was for speech about as loud as the echo
-        held_near = False
+        # Whether the hold was for speech about as loud as the echo, and for
+        # speech that stood out (not the voice's echo)
+        held_near, held_out = False, False
         # Frames of speech that hold the voice. Each hold stops and restarts
         # the voice, so holds for echo stutter: after one, it takes longer
         # speech to hold the voice; after a second, it is not held again
@@ -893,8 +1065,9 @@ class AudioRecorder:
         against = getattr(echo, "against_echo", None)
         # Of the speech over the voice sure to be speech now, once it was
         # long enough to hold the voice: the most it stood out above the
-        # voice's echo (dB), and for how many frames it was sure
-        loudest, lasted = None, 0
+        # voice's echo and above what the canceller left before it (dB),
+        # and for how many frames it was sure
+        loudest, above, lasted = None, None, 0
 
         def not_held(frames: int, why: str):
             """Speech over the voice long enough to have held it before it
@@ -932,37 +1105,63 @@ class AudioRecorder:
                     levels = None
                     if not sure:
                         if loudest is not None and not held:
-                            not_held(lasted, f"at most {loudest:.1f} dB over its echo (holding it takes "
-                                             f"{HOLD_STANDS_OUT:.0f} dB, or {near_trigger * frame_seconds:.2f} s)")
-                        loudest = None
+                            not_held(lasted, f"at most {loudest:.1f} dB over its echo"
+                                             + (f" and {above:.0f} dB over what the canceller left before it"
+                                                if above is not None else "")
+                                             + f" (holding it takes {HOLD_STANDS_OUT:.0f} dB, "
+                                             f"or {near_trigger * frame_seconds:.2f} s)")
+                        loudest, above = None, None
                     elif over_voice and not held and against is not None and echo.settled:
                         levels = against(at - (min(sure, trigger) - 1) * frame_seconds, at + frame_seconds)
-                    if levels is not None and levels.left <= HOLD_RESIDUAL:
+                    # Speech that is not the voice's echo: louder than it
+                    # could be, or far above what the canceller left of the
+                    # voice just before, while it was cancelling, and not
+                    # the voice let through (about as loud as its echo,
+                    # where the voice is loud)
+                    clear = (levels is not None and levels.before is not None and levels.before <= -HOLD_CANCELLED
+                             and levels.left - levels.before >= HOLD_OUT_OF_RESIDUE
+                             and (levels.left <= HOLD_RESIDUAL or levels.heard <= HOLD_WITHIN_ECHO))
+                    stood_out = clear or (levels is not None and levels.heard >= HOLD_STANDS_OUT)
+                    if levels is not None and levels.left <= HOLD_RESIDUAL and not clear:
                         # The VAD is sure of what the canceller leaves of
                         # the voice: it starts over
                         if sure >= trigger:
-                            not_held(sure, f"{-levels.left:.0f} dB below its echo: what the canceller left of it")
-                        sure, certain, was_certain, loudest, levels = 0, 0, False, None, None
+                            not_held(sure, f"{-levels.left:.0f} dB below its echo"
+                                           + (f" and {levels.left - levels.before:.0f} dB over what the canceller "
+                                              f"left before it (standing out of that takes "
+                                              f"{HOLD_OUT_OF_RESIDUE:.0f} dB)" if levels.before is not None else "")
+                                           + ": what the canceller left of it")
+                        sure, certain, was_certain, loudest, above, levels = 0, 0, False, None, None, None
                     elif levels is not None and sure >= trigger:
                         loudest = levels.heard if loudest is None else max(loudest, levels.heard)
+                        if levels.before is not None:
+                            jump = levels.left - levels.before
+                            above = jump if above is None else max(above, jump)
                         lasted = sure
-                    # Speech that does not stand out above the echo holds
-                    # the voice only once it has gone on for a while
                     bar = hold_after
-                    if levels is not None and levels.heard < HOLD_STANDS_OUT:
+                    if stood_out:
+                        # Not the echo: a hold that heard only the echo does
+                        # not make it wait longer, only a second one
+                        bar = trigger if hold_after < never else never
+                    elif levels is not None:
+                        # Speech that does not stand out above the echo holds
+                        # the voice only once it has gone on for a while
                         bar = max(hold_after, near_trigger)
                     if held:
                         held -= 1
-                        heard += speech and at - held_at >= died_away
+                        # Speech that stood out counts from the start: it
+                        # was not the voice's echo
+                        heard += speech and (held_out or at - held_at >= died_away)
                         if held:
                             continue
                         enough = heard * frame_seconds >= HOLD_SPEECH * (HOLD - HOLD_SETTLE)
                         # Speech the VAD was certain of needs to go on for
-                        # a moment only. The canceller's own measure cannot
+                        # a moment only. The canceller's suppression cannot
                         # spare it that: the moment it starts letting the
                         # voice through looks to it like the user starting
-                        # to speak
-                        sure_users = was_certain and heard >= HOLD_CERTAIN_GOES_ON
+                        # to speak. Speech that stood out, heard from the
+                        # hold on, need only not have ended with it
+                        sure_users = (was_certain and heard >= HOLD_CERTAIN_GOES_ON) or (held_out and heard > 0)
                         if not ((enough or sure_users) and tracker.started):
                             # The voice's echo, or too little speech for a
                             # turn (a back-channel): the voice goes on, and so
@@ -970,12 +1169,13 @@ class AudioRecorder:
                             # where it was cut; the user who spoke over it
                             # hears the cut word again
                             if paused:
-                                release(heard > 0)
+                                aside = heard > 0
+                                release(aside)
                                 if not getattr(echo, "cancelling", True) or taken - echoed < again:
                                     calm = backoff
                                 echoed = taken
                                 hold_after = echo_trigger if hold_after == trigger else never
-                                if held_near and not heard:
+                                if held_near and not aside:
                                     # The echo went on long enough: from now
                                     # on, in later replies too, such speech
                                     # must go on longer
@@ -983,15 +1183,15 @@ class AudioRecorder:
                                     self.near_echo_needs = max(self.near_echo_needs, HOLD_TRIGGER_AFTER_ECHO)
                                 voice_log.info(
                                     "%s: released after %.2f s of speech while held, going on %s; %s%s",
-                                    "aside" if heard else "echo",
+                                    "aside" if aside else "echo",
                                     heard * frame_seconds,
-                                    "a little before where it was cut" if heard else "where it was cut",
+                                    "a little before where it was cut" if aside else "where it was cut",
                                     "no more holds until the voice ends" if hold_after == never
                                     else f"holds now need {hold_after * frame_seconds:.2f} s",
                                     f", and speech about as loud as the echo {near_trigger * frame_seconds:.2f} s "
-                                    "from now on" if held_near and not heard else "",
+                                    "from now on" if held_near and not aside else "",
                                 )
-                            tracker, sure, certain, was_certain, loudest = new_tracker(), 0, 0, False, None
+                            tracker, sure, certain, was_certain, loudest, above = new_tracker(), 0, 0, False, None, None
                             continue
                         voice_log.info(
                             "user: %.2f s of speech while held%s", heard * frame_seconds,
@@ -1024,21 +1224,27 @@ class AudioRecorder:
                             else:
                                 hold()
                                 voice_log.info(
-                                    "held: %.2f s sure to be speech, %s, canceller %s, suppression %s",
+                                    "held: %.2f s sure to be speech, %s%s, canceller %s, suppression %s",
                                     sure * frame_seconds,
                                     "its level against the echo unknown" if levels is None
                                     else f"{levels.heard:.1f} dB over the voice's echo",
+                                    f", {levels.left - levels.before:.0f} dB over what the canceller left before it"
+                                    if levels is not None and levels.before is not None else "",
                                     "cancelling" if getattr(echo, "cancelling", True) else "leaking",
                                     _db(getattr(echo, "suppression", None)),
                                 )
                                 held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, True, 0, False
-                                held_near, loudest = bar > hold_after, None
+                                # Heard from the hold on, unless a canceller
+                                # that lets the voice through leaves it to
+                                # die away there too
+                                held_out = clear or (stood_out and getattr(echo, "cancelling", True))
+                                held_near, loudest, above = bar > hold_after, None, None
                             continue
                         if waiting:
                             # The voice ended meanwhile: what was heard is
                             # judged as in a hold, with nothing to hold
                             held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, False, 0, False
-                            held_near = False
+                            held_near, held_out = False, False
                             continue
                     if tracker.started:
                         if not spoke and not on_speech():
@@ -1755,6 +1961,9 @@ class AudioPlayer:
         # position its current segment started from, and when that segment
         # started being heard, None while paused)
         self._place: tuple[int, int, int, float | None] | None = None
+        # Of the clip played last: when it began to be heard, and when it
+        # was heard to its end (None while it plays, or once cut short)
+        self.heard: tuple[float | None, float | None] = (None, None)
 
     def _cut(self):
         """What plays stopped being heard now."""
@@ -1849,6 +2058,7 @@ class AudioPlayer:
         """
         self._stopped.clear()
         self._place = (len(audio), sample_rate, 0, None)
+        self.heard = (None, None)
 
         def stopped() -> bool:
             return self._stopped.is_set() or (cancelled is not None and cancelled())
@@ -1875,8 +2085,8 @@ class AudioPlayer:
                 ramp = np.linspace(0, 1, fade)
                 segment[:fade] *= ramp if segment.ndim == 1 else ramp[:, np.newaxis]
 
-            # Play with maximum buffer size and latency for ultra-smooth playback
-            # Extra large buffer (32768 samples = ~740ms) prevents any underruns
+            # Large blocks and a high latency, so the audio callback (which
+            # needs Python) runs seldom and is never late
             started = time.monotonic()
             try:
                 latency = self.audio.play(
@@ -1886,6 +2096,8 @@ class AudioPlayer:
                 raise SpeakerError(str(error)) from error
             generation = _generation(self.audio)
             self._place = (len(audio), sample_rate, position, started + latency)
+            if self.heard[0] is None:
+                self.heard = (started + latency, None)
             if self.echo is not None:
                 self.echo.played(started + latency, segment, sample_rate)
 
@@ -1899,11 +2111,11 @@ class AudioPlayer:
                 )
                 level_thread.start()
 
-            # Until the stream has played its last buffer (PortAudio only then
-            # reports it inactive), or a pause or stop cuts it. The stream
-            # outlives the clip by up to a block plus the device latency; giving
-            # up earlier let the next clip's sd.play() cut off the last words.
-            # The deadline is only a safety net against a hung device.
+            # Until the clip has been heard to its end (the device tells when,
+            # see SoundDevice.playing), or a pause or stop cuts it. The next
+            # clip starts then, while the stream of this one plays out the
+            # silence after it alone. The deadline is only a safety net
+            # against a hung device.
             buffered = latency + 2 * PLAYBACK_BLOCK / sample_rate
             deadline = len(segment) / sample_rate + buffered + 2.0
             while time.monotonic() - started < deadline:
@@ -1929,6 +2141,8 @@ class AudioPlayer:
                 on_level(0.0)
 
             if not cut_by_pause:
+                if not stopped():
+                    self.heard = (self.heard[0], started + elapsed)
                 return
             # What was heard is the wall time minus the output latency; where
             # it goes on is decided once it does (resume)

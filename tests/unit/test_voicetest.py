@@ -163,18 +163,22 @@ class TestSpeaker:
         speaker.play(tone(1.0), RATE)
         assert speaker.clips[-2].stopped is not None
 
-    def test_the_stream_plays_on_to_the_end_of_its_last_block(self, clock):
-        speaker = Space().endpoint("a").speaker
+    def test_a_clip_is_over_once_heard_though_its_stream_plays_on(self, clock):
+        """As Iris's speaker: the stream plays on to the end of its last
+        block, filled up with silence, but the clip is over once its last
+        sample was heard, and the next one starts then."""
+        speaker = Space(wake_latency=0).endpoint("a").speaker
         speaker.play(tone(0.1), RATE, blocksize=RATE // 2)
         clip = speaker.clips[-1]
-        clock.sleep(clip.end - clock.monotonic() + 0.1)
-        # Heard no more, but still playing the silence after it
-        assert not speaker.audible() and speaker.playing()
-        # Until the end of its block of 0.5 s
-        clock.sleep(clip.started + 0.5 - clock.monotonic() - 0.01)
+        clock.sleep(clip.end - clock.monotonic() - 0.01)
         assert speaker.playing()
         clock.sleep(0.02)
         assert not speaker.playing()
+        # The next clip, while the stream before still plays its silence,
+        # keeps the latency it woke with
+        speaker.play(tone(0.1), RATE, blocksize=RATE // 2)
+        assert speaker.clips[-2].stopped is None
+        assert speaker.clips[-1].started == pytest.approx(clock.monotonic() + OUTPUT_LATENCY)
 
     def test_another_rate_is_resampled(self):
         speaker = Space().endpoint("a").speaker

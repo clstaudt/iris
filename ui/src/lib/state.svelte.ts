@@ -1625,20 +1625,26 @@ class IrisStore {
     if (model && model !== current) await this.setModel(model);
   }
 
-  /** Keep a server to switch to later. */
-  addServer(url: string) {
+  /** Keep a server to switch to later, with the key it wants, if one is
+   *  given: the core keeps the key, on this computer alone, and the window
+   *  does not. */
+  async addServer(url: string, key = "") {
     const server = url.trim().replace(/\/+$/, "");
-    if (!server || this.servers.includes(server)) return;
-    this.servers = [...this.servers, server];
-    saveSettings({ servers: $state.snapshot(this.servers) });
+    if (!server) return;
+    if (key.trim()) await rpc("llm.set_key", { url: server, key: key.trim() });
+    if (!this.servers.includes(server)) {
+      this.servers = [...this.servers, server];
+      saveSettings({ servers: $state.snapshot(this.servers) });
+    }
     this.checkServers().catch(() => {});
   }
 
-  /** Forget a server; the one in use stays. */
+  /** Forget a server, and its key; the one in use stays. */
   removeServer(url: string) {
     if (url === (this.config?.ollama_host ?? "")) return;
     this.servers = this.servers.filter((server) => server !== url);
     saveSettings({ servers: $state.snapshot(this.servers) });
+    rpc("llm.set_key", { url, key: "" }).catch(() => {});
   }
 
   /** Ask which of the servers answer, the default one included. */
