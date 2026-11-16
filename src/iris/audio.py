@@ -275,14 +275,123 @@ def system_defaults() -> tuple[int, ...] | None:
     return tuple(found)
 
 
-def _stop_playback():
-    """End what sounddevice.play() plays, at once rather than once its
-    buffers have played (its device may be gone)."""
-    try:
-        sd.get_stream().abort()
-    except Exception:
-        pass
-    sd.stop()
+# Closing a stream takes a moment (0.1 s on macOS): the streams of clips
+# played to their end are closed while the clip playing now still has at
+# least this long to play (seconds), so its end is not noticed late
+CLOSE_WITHIN = 0.5
+
+
+class _Clip:
+    """A clip played on an output stream of its own, as sounddevice.play()
+    plays one: block by block, the last block filled up with silence, the
+    stream ending by itself after it.
+
+    Its callback learns from PortAudio when the clip's last sample is due at
+    the speaker: the clip has played then, and the next one can start at
+    once, on a stream of its own, while this one plays out the silence after
+    it alone. Waiting for that silence, up to a block (1.4 s at 24 kHz), and
+    closing the stream before the next could open, was a pause of up to 1.5 s
+    between every two pieces of a reply. Its stream is not cut short: should
+    the speaker play later than it says (Bluetooth), nothing of the clip is
+    lost.
+    """
+
+    def __init__(self, audio: np.ndarray, sample_rate: int, **options):
+        data = np.asarray(audio, dtype=np.float32)
+        self.data = data.reshape(len(data), -1)
+        self.sample_rate = sample_rate
+        # Frames handed to the device so far
+        self.frame = 0
+        # When its last sample is heard (time.monotonic()), once the block
+        # holding it went to the device
+        self.ends: float | None = None
+        # Blocks the device asked for after they were due, and how late
+        # (seconds): what the speaker had no audio for
+        self.late: list[float] = []
+        self._reported = False
+        self.stream = sd.OutputStream(
+            samplerate=sample_rate,
+            channels=self.data.shape[1],
+            dtype="float32",
+            callback=self._callback,
+            prime_output_buffers_using_stream_callback=False,
+            **options,
+        )
+        try:
+            self.latency = float(self.stream.latency)
+        except Exception:
+            self.latency = 0.0
+        try:
+            self.stream.start()
+        except Exception:
+            self.stream.close(ignore_errors=True)
+            raise
+
+    def _callback(self, outdata, frames, time_info, status):
+        entered = time.monotonic()
+        count = min(len(self.data) - self.frame, frames)
+        if count <= 0:
+            raise sd.CallbackAbort  # the block after the last: as sounddevice.play()
+        outdata[:count] = self.data[self.frame : self.frame + count]
+        outdata[count:] = 0
+        self.frame += count
+        # How long until this block's first sample is heard
+        ahead = time_info.outputBufferDacTime - time_info.currentTime
+        if not 0.0 <= ahead < 1.0:  # not told
+            ahead = self.latency
+        if status.output_underflow:
+            self.late.append(0.0)
+        elif time_info.outputBufferDacTime > 0.0:
+            # Called this long after the block was due (waiting for Python)
+            try:
+                behind = self.stream.time - time_info.outputBufferDacTime
+            except Exception:
+                behind = 0.0
+            if behind > 0.0:
+                self.late.append(behind)
+        if self.frame >= len(self.data):
+            self.ends = entered + ahead + count / self.sample_rate
+
+    @property
+    def active(self) -> bool:
+        try:
+            return bool(self.stream.active)
+        except Exception:
+            return False
+
+    def playing(self) -> bool:
+        """Whether some of the clip is still to be heard."""
+        return self.active and (self.ends is None or time.monotonic() < self.ends)
+
+    def played_out(self) -> bool:
+        """Whether all of the clip has been heard: its stream plays silence."""
+        return self.ends is not None and time.monotonic() >= self.ends
+
+    def left(self) -> float:
+        """Seconds of the clip still to be heard."""
+        if self.ends is not None:
+            return max(0.0, self.ends - time.monotonic())
+        return (len(self.data) - self.frame) / self.sample_rate
+
+    def report(self):
+        """Tell the voice log, once, where the speaker ran out of audio."""
+        if self._reported:
+            return
+        self._reported = True
+        for behind in self.late:
+            voice_log.debug(
+                "dropout: the speaker had no audio for a block of the clip%s",
+                f" ({behind * 1000:.0f} ms late)" if behind else " (PortAudio's output underflow)",
+            )
+
+    def close(self):
+        """End its stream at once (its device may be gone)."""
+        self.report()
+        try:
+            self.stream.abort(ignore_errors=True)
+            self.stream.close(ignore_errors=True)
+        except Exception:
+            logger.warning("The speaker's stream did not close cleanly", exc_info=True)
 
 
 class _PortAudio:
@@ -300,12 +409,15 @@ class _PortAudio:
     """
 
     def __init__(self):
-        # sounddevice's play() and stop() act on one shared output stream,
-        # and PortAudio crashes the process when two threads close it at
-        # once. Stop reaches it from several threads (the app's command, the
-        # reply's thread, the playback thread), so every use goes through
-        # this lock, and the devices are read anew under it.
+        # PortAudio crashes the process when two threads close a stream at
+        # once. Stop reaches the speaker's from several threads (the app's
+        # command, the reply's thread, the playback thread), so every use
+        # goes through this lock, and the devices are read anew under it.
         self.lock = threading.RLock()
+        # The clip playing now, and clips played to their end whose streams
+        # still play the silence after them, until they end by themselves
+        self.clip: _Clip | None = None
+        self.ending: list[_Clip] = []
         # How many times the devices were read anew: a stream opened before
         # the last time is gone
         self.generation = 0
@@ -331,7 +443,7 @@ class _PortAudio:
         with self.lock:
             if seen is not None and seen != self.generation:
                 return True
-            _stop_playback()
+            self.silence()
             for stream in list(self.streams):
                 stream.drop()
             try:
@@ -369,6 +481,59 @@ class _PortAudio:
             self.defaults = defaults
             logger.info("The system's default audio devices changed")
             return self.refresh()
+
+    def play(self, audio: np.ndarray, sample_rate: int, options: dict) -> _Clip:
+        """Start playing a clip (under the lock), ending the one before,
+        unless all of it has been heard: its stream is left to play the
+        silence after it and end by itself."""
+        last, self.clip = self.clip, None
+        if last is not None and last.played_out():
+            self.ending.append(last)
+        elif last is not None:
+            last.close()
+        try:
+            self.clip = _Clip(audio, sample_rate, **options)
+        except sd.PortAudioError:
+            if not self.ending:
+                raise
+            # Some speakers take one stream at a time: what still plays
+            # after the clips before is only silence
+            self._close_ending(everything=True)
+            self.clip = _Clip(audio, sample_rate, **options)
+        return self.clip
+
+    def playing(self) -> bool:
+        """Whether some of the clip played last is still to be heard (under
+        the lock). The streams of clips played out that have ended are
+        closed meanwhile, while it has long to play."""
+        clip = self.clip
+        if clip is None or clip.left() > CLOSE_WITHIN:
+            self._close_ending()
+        if clip is None:
+            return False
+        if clip.playing():
+            return True
+        clip.report()
+        return False
+
+    def stop(self):
+        """End the clip playing now at once (under the lock). The streams
+        that only play silence are closed later, as Stop and a hold must
+        silence the voice without waiting for them."""
+        if self.clip is not None:
+            self.clip.close()
+        self.clip = None
+
+    def silence(self):
+        """End every stream of a clip at once (under the lock)."""
+        self.stop()
+        self._close_ending(everything=True)
+
+    def _close_ending(self, everything: bool = False):
+        for clip in list(self.ending):
+            if everything or not clip.active:
+                clip.close()
+                self.ending.remove(clip)
 
 
 def _default_name(kind: str) -> str | None:
@@ -432,9 +597,9 @@ class SoundDevice:
     """The computer's microphone and speaker, through sounddevice.
 
     All of Iris's audio goes through a device: the microphone as an input
-    stream, the speaker as one output stream that plays a clip at a time. A
-    test gives Iris a device of its own instead, such as a virtual room, and
-    two assistants in one process can each have one.
+    stream, the speaker as an output stream for each clip, one clip heard at
+    a time (see _Clip). A test gives Iris a device of its own instead, such
+    as a virtual room, and two assistants in one process can each have one.
 
     The devices may change while Iris runs. A clip the speaker cannot play
     has the devices read anew and is played once more, on the default as it
@@ -480,7 +645,8 @@ class SoundDevice:
             return sd.query_devices(*args, **kwargs)
 
     def play(self, audio: np.ndarray, sample_rate: int, **options) -> float:
-        """Start playing a clip, ending the one before.
+        """Start playing a clip, ending the one before unless all of it has
+        been heard (see _Clip). The options are sounddevice.OutputStream's.
 
         A speaker that cannot be opened may be one PortAudio knows from
         before a device change: the devices are read anew and the clip is
@@ -493,30 +659,25 @@ class SoundDevice:
             _PORTAUDIO.follow_system()
             seen = _PORTAUDIO.generation
             try:
-                sd.play(audio, sample_rate, **options)
+                clip = _PORTAUDIO.play(audio, sample_rate, options)
             except sd.PortAudioError as error:
                 logger.warning("The speaker could not be opened (%s); reading the devices anew",
                                error)
                 if not _PORTAUDIO.refresh(seen):
                     raise
-                sd.play(audio, sample_rate, **options)
-            try:
-                return float(sd.get_stream().latency)
-            except Exception:
-                return 0.0
+                clip = _PORTAUDIO.play(audio, sample_rate, options)
+            return clip.latency
 
     def stop(self):
         """Stop what plays."""
         with _PORTAUDIO.lock:
-            sd.stop()
+            _PORTAUDIO.stop()
 
     def playing(self) -> bool:
-        """Whether the clip played last still has audio to play."""
+        """Whether some of the clip played last is still to be heard: not
+        the silence its stream plays after it."""
         with _PORTAUDIO.lock:
-            try:
-                return bool(sd.get_stream().active)
-            except Exception:
-                return False
+            return _PORTAUDIO.playing()
 
 
 # The computer's own audio, which Iris uses unless given another device
@@ -1800,6 +1961,9 @@ class AudioPlayer:
         # position its current segment started from, and when that segment
         # started being heard, None while paused)
         self._place: tuple[int, int, int, float | None] | None = None
+        # Of the clip played last: when it began to be heard, and when it
+        # was heard to its end (None while it plays, or once cut short)
+        self.heard: tuple[float | None, float | None] = (None, None)
 
     def _cut(self):
         """What plays stopped being heard now."""
@@ -1894,6 +2058,7 @@ class AudioPlayer:
         """
         self._stopped.clear()
         self._place = (len(audio), sample_rate, 0, None)
+        self.heard = (None, None)
 
         def stopped() -> bool:
             return self._stopped.is_set() or (cancelled is not None and cancelled())
@@ -1920,8 +2085,8 @@ class AudioPlayer:
                 ramp = np.linspace(0, 1, fade)
                 segment[:fade] *= ramp if segment.ndim == 1 else ramp[:, np.newaxis]
 
-            # Play with maximum buffer size and latency for ultra-smooth playback
-            # Extra large buffer (32768 samples = ~740ms) prevents any underruns
+            # Large blocks and a high latency, so the audio callback (which
+            # needs Python) runs seldom and is never late
             started = time.monotonic()
             try:
                 latency = self.audio.play(
@@ -1931,6 +2096,8 @@ class AudioPlayer:
                 raise SpeakerError(str(error)) from error
             generation = _generation(self.audio)
             self._place = (len(audio), sample_rate, position, started + latency)
+            if self.heard[0] is None:
+                self.heard = (started + latency, None)
             if self.echo is not None:
                 self.echo.played(started + latency, segment, sample_rate)
 
@@ -1944,11 +2111,11 @@ class AudioPlayer:
                 )
                 level_thread.start()
 
-            # Until the stream has played its last buffer (PortAudio only then
-            # reports it inactive), or a pause or stop cuts it. The stream
-            # outlives the clip by up to a block plus the device latency; giving
-            # up earlier let the next clip's sd.play() cut off the last words.
-            # The deadline is only a safety net against a hung device.
+            # Until the clip has been heard to its end (the device tells when,
+            # see SoundDevice.playing), or a pause or stop cuts it. The next
+            # clip starts then, while the stream of this one plays out the
+            # silence after it alone. The deadline is only a safety net
+            # against a hung device.
             buffered = latency + 2 * PLAYBACK_BLOCK / sample_rate
             deadline = len(segment) / sample_rate + buffered + 2.0
             while time.monotonic() - started < deadline:
@@ -1974,6 +2141,8 @@ class AudioPlayer:
                 on_level(0.0)
 
             if not cut_by_pause:
+                if not stopped():
+                    self.heard = (self.heard[0], started + elapsed)
                 return
             # What was heard is the wall time minus the output latency; where
             # it goes on is decided once it does (resume)

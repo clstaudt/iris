@@ -32,7 +32,7 @@ from pocket_tts.default_parameters import DEFAULT_VOICE_FOR_LANGUAGE
 from pykakasi import kakasi
 
 from iris import cloning, downloads, pocket
-from iris.audio import SpeakerError, get_filter
+from iris.audio import SpeakerError, get_filter, voice_log
 from iris.cloning import cloned_voices, made_for, voice_folder, voice_state
 from iris.downloads import HubFile, Progress
 from iris.engines import (
@@ -1095,6 +1095,10 @@ class SpeechPipeline:
         # end, and the one playing now
         self._said: list[str] = []
         self._playing: str | None = None
+        # Of the piece of the reply played last, for the gap before the next:
+        # when it was heard to its end, and when the player was done with it
+        # (None at the start of a reply, or once a piece was cut short)
+        self._heard_to: tuple[float, float] | None = None
 
         # Worker threads
         self.generation_worker_thread = None
@@ -1109,16 +1113,12 @@ class SpeechPipeline:
         """
 
         def generation_worker():
-            """Generate TTS audio files from text queue with lower priority."""
-            # Lower priority of generation thread to prevent audio underruns
-            try:
-                import os
-
-                # Increase niceness significantly (lower priority) on Unix systems
-                os.nice(10)
-            except (AttributeError, OSError):
-                pass  # Not available on all systems
-
+            """Generate TTS audio files from the text queue, at the priority
+            of the rest of the core. It used to call os.nice(10), which on
+            macOS lowers the whole process, the audio's threads too, and
+            stacked with every pipeline made (a preview, then Iris's own)
+            to the lowest priority there is. Synthesis runs far ahead of
+            playback without it (irisdev.speech_timing measures that)."""
             while True:
                 item = self.text_queue.get()
                 if item is None:  # Shutdown signal
@@ -1159,6 +1159,7 @@ class SpeechPipeline:
                 if item is None:  # Shutdown signal
                     break
                 audio_file, epoch, text, sound = item
+                ready = time.monotonic()
 
                 # Play the audio, unless it belongs to a stopped epoch; the
                 # player checks again while playing, so a stop() racing the
@@ -1170,6 +1171,7 @@ class SpeechPipeline:
                     if playing and not sound:
                         self._playing = text
                         self._reply_heard = True
+                    heard_to, self._heard_to = self._heard_to, None
                 if first and self.on_reply_audio:
                     self.on_reply_audio()
                 if playing:
@@ -1195,6 +1197,8 @@ class SpeechPipeline:
                     else:
                         self._speaker_failed = False
                     self.is_speaking_flag.clear()
+                    heard = getattr(self.player, "heard", None)
+                    began, ended = heard if isinstance(heard, tuple) else (None, None)
                     with self._status_lock:
                         # Played to its end, unless stop() came first and
                         # kept the part that was heard
@@ -1203,6 +1207,10 @@ class SpeechPipeline:
                         self._playing = None
                         if played and not sound:
                             self._spoken.append((time.monotonic(), text))
+                        if played and not sound and epoch == self._epoch and ended is not None:
+                            self._heard_to = (ended, time.monotonic())
+                    if played and not sound and heard_to is not None and began is not None:
+                        self._log_gap(began - heard_to[0], ready - heard_to[1])
 
                 # Cleanup
                 try:
@@ -1217,6 +1225,16 @@ class SpeechPipeline:
         self.playback_worker_thread = threading.Thread(target=playback_worker, daemon=True)
         self.generation_worker_thread.start()
         self.playback_worker_thread.start()
+
+    @staticmethod
+    def _log_gap(gap: float, waited: float):
+        """Tell the voice log how long the voice was silent between two
+        pieces of a reply, and how much of that it waited for the second to
+        be synthesized."""
+        waiting = f", {waited:.2f} s of it waiting for the piece to be synthesized"
+        voice_log.debug(
+            "gap: %.2f s between two pieces of the reply%s", gap, waiting if waited >= 0.01 else ""
+        )
 
     @property
     def is_active(self) -> bool:
@@ -1275,6 +1293,7 @@ class SpeechPipeline:
             self._said = []
             self._reply_heard = False
             self._muted = False
+            self._heard_to = None
 
     def spoken_since(self, moment: float) -> str:
         """What the voice was saying at or after this moment (time.monotonic()):
@@ -1310,6 +1329,7 @@ class SpeechPipeline:
         what is still being generated."""
         with self._status_lock:
             self._epoch += 1
+            self._heard_to = None
             # What comes next is spoken again, should the speaker have failed
             self._muted = False
             # Of the clip playing now, the words heard before the stop count

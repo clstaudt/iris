@@ -129,18 +129,17 @@ class Computer:
             return dict(self.known[device])
         return [dict(d) for d in self.known]
 
-    def play(self, data, samplerate, **options):
+    def OutputStream(self, device=None, callback=None, **options):  # noqa: N802 (sounddevice's)
         self.plays += 1
-        name = self.known[self.known_output]["name"] if self.known_output is not None else None
+        index = self.known_output if device is None else device
+        name = self.known[index]["name"] if index is not None else None
         if self.output_broken or name not in self.devices:
             raise sd.PortAudioError("Error opening OutputStream: Internal PortAudio error", -9986)
         self.played.append(name)
-
-    def stop(self, ignore_errors=True):
-        pass
-
-    def get_stream(self):
-        return SimpleNamespace(latency=0.0, active=False, abort=lambda: None)
+        return SimpleNamespace(
+            latency=0.0, active=False, start=lambda: None,
+            abort=lambda ignore_errors=True: None, close=lambda ignore_errors=True: None,
+        )
 
     def InputStream(self, device=None, callback=None, **options):  # noqa: N802 (sounddevice's)
         index = self.known_input if device is None else device
@@ -188,8 +187,8 @@ def computer(monkeypatch):
         default_input=AIRPODS,
         default_output=AIRPODS,
     )
-    portaudio = ("_initialize", "_terminate", "query_devices", "play", "stop", "get_stream")
-    for name in (*portaudio, "InputStream"):
+    portaudio = ("_initialize", "_terminate", "query_devices")
+    for name in (*portaudio, "InputStream", "OutputStream"):
         monkeypatch.setattr(audio.sd, name, getattr(machine, name))
     monkeypatch.setattr(audio, "system_defaults", lambda: None)
     monkeypatch.setattr(audio, "_PORTAUDIO", audio._PortAudio())

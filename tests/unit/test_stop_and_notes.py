@@ -263,13 +263,23 @@ def test_the_output_stream_is_only_ever_touched_by_one_thread(monkeypatch):
         with guard:
             inside[0] -= 1
 
-    monkeypatch.setattr(audio.sd, "stop", slow)
-    monkeypatch.setattr(audio.sd, "play", slow)
-    monkeypatch.setattr(audio.sd, "get_stream", lambda: MagicMock(latency=0.0, active=False))
+    class Stream:
+        """The speaker's stream: every call into PortAudio is watched."""
+
+        latency, active = 0.0, False
+
+        def __init__(self, **options):
+            slow()
+
+        start = abort = close = slow
+
+    monkeypatch.setattr(audio.sd, "OutputStream", Stream)
+    monkeypatch.setattr(audio, "_PORTAUDIO", audio._PortAudio())
     player = audio.AudioPlayer()
+    clip = [0.0] * 240
     threads = [threading.Thread(target=player.stop) for _ in range(6)]
     threads += [threading.Thread(target=audio.stop_sound) for _ in range(3)]
-    threads += [threading.Thread(target=audio.play_sound, args=(None, 24000)) for _ in range(3)]
+    threads += [threading.Thread(target=audio.play_sound, args=(clip, 24000)) for _ in range(3)]
     for thread in threads:
         thread.start()
     for thread in threads:

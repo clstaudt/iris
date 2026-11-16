@@ -85,18 +85,38 @@ def _device(monkeypatch):
 
     stream = FakeStream()
 
-    def fake_play(segment, rate, **kwargs):
-        played.append(segment.copy())
-        stream.active = True
+    class FakeClip:
+        """A clip on the speaker, heard until the test says it is over."""
 
-    def fake_stop():
-        stream.active = False
+        latency = 0.0
+
+        def __init__(self, segment, rate, **kwargs):
+            played.append(segment.copy())
+            stream.active = True
+
+        @property
+        def active(self):
+            return stream.active
+
+        def playing(self):
+            return stream.active
+
+        def played_out(self):
+            return not stream.active
+
+        def left(self):
+            return 0.0
+
+        def report(self):
+            pass
+
+        def close(self):
+            stream.active = False
 
     clock = Clock()
     monkeypatch.setattr(audio_module, "time", clock)
-    monkeypatch.setattr(audio_module.sd, "play", fake_play)
-    monkeypatch.setattr(audio_module.sd, "stop", fake_stop)
-    monkeypatch.setattr(audio_module.sd, "get_stream", lambda: stream)
+    monkeypatch.setattr(audio_module, "_Clip", FakeClip)
+    monkeypatch.setattr(audio_module, "_PORTAUDIO", audio_module._PortAudio())
     return clock, stream, played
 
 
@@ -132,37 +152,6 @@ def test_paused_playback_resumes_where_it_was_cut(monkeypatch):
     resumed_at, heard = _hold(monkeypatch, 0.8, rewind=True)
     # Restarted a little before the cut, never after it
     assert resumed_at == pytest.approx(heard - audio_module.RESUME_REWIND, abs=0.001)
-
-
-def test_playback_waits_until_the_stream_has_really_finished(monkeypatch):
-    """The stream outlives the clip by its buffers; returning before it is
-    inactive let the next clip's sd.play() cut off the last words."""
-    import time as time_module
-
-    from iris import audio as audio_module
-
-    sample_rate = 16000
-    audio = np.zeros(sample_rate // 10, dtype=np.float32)  # a 0.1 s clip
-    started = []
-
-    class SlowStream:
-        latency = 0.0
-
-        @property
-        def active(self):
-            # Still draining its buffers a second after the clip's own length
-            return time_module.monotonic() - started[0] < 1.0
-
-    stream = SlowStream()
-    def fake_play(*args, **kwargs):
-        started.append(time_module.monotonic())
-
-    monkeypatch.setattr(audio_module.sd, "play", fake_play)
-    monkeypatch.setattr(audio_module.sd, "stop", lambda: None)
-    monkeypatch.setattr(audio_module.sd, "get_stream", lambda: stream)
-
-    AudioPlayer()._play_resumable(audio, sample_rate, None)
-    assert time_module.monotonic() - started[0] >= 1.0
 
 
 @pytest.mark.parametrize("after", [0.3, 0.8])
