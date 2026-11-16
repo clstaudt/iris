@@ -1113,16 +1113,12 @@ class SpeechPipeline:
         """
 
         def generation_worker():
-            """Generate TTS audio files from text queue with lower priority."""
-            # Lower priority of generation thread to prevent audio underruns
-            try:
-                import os
-
-                # Increase niceness significantly (lower priority) on Unix systems
-                os.nice(10)
-            except (AttributeError, OSError):
-                pass  # Not available on all systems
-
+            """Generate TTS audio files from the text queue, at the priority
+            of the rest of the core. It used to call os.nice(10), which on
+            macOS lowers the whole process, the audio's threads too, and
+            stacked with every pipeline made (a preview, then Iris's own)
+            to the lowest priority there is. Synthesis runs far ahead of
+            playback without it (irisdev.speech_timing measures that)."""
             while True:
                 item = self.text_queue.get()
                 if item is None:  # Shutdown signal

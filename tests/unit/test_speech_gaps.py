@@ -19,6 +19,7 @@ test depends on how fast it runs.
 """
 
 import logging
+import os
 import tempfile
 import threading
 import time
@@ -283,6 +284,28 @@ def _spoken(pipeline: SpeechPipeline, *pieces):
     done.start()
     done.join(10)
     assert not done.is_alive()
+
+
+class Silent:
+    """A player that plays nothing."""
+
+    heard = (None, None)
+
+    def play(self, audio_file, **options):
+        pass
+
+
+@pytest.mark.skipif(not hasattr(os, "getpriority"), reason="no process priorities here")
+def test_speaking_leaves_the_core_at_its_priority():
+    """Synthesis used to lower its priority with os.nice(10): on macOS the
+    whole process's, the audio's threads with it, once more for each
+    pipeline (a voice's preview, then Iris's own), down to the lowest."""
+    before = os.getpriority(os.PRIO_PROCESS, 0)
+    for _ in range(2):
+        voice = Voice()
+        _spoken(SpeechPipeline(voice, Silent()), "Two.")
+        assert voice.synthesized.is_set()
+    assert os.getpriority(os.PRIO_PROCESS, 0) == before
 
 
 def test_the_next_piece_is_synthesized_while_one_plays():
