@@ -44,7 +44,8 @@ SPEECH_PAUSE = 0.2
 HOLD_THRESHOLD = 0.7
 HOLD_TRIGGER = 0.13
 # Speech that holds the voice again after a hold heard only its echo; after
-# a second such hold the voice is not held again until it has ended
+# a second such hold the voice is not held again until it has ended. Speech
+# that stands out holds it after HOLD_TRIGGER all the same, until then
 HOLD_TRIGGER_AFTER_ECHO = 1.0
 # Over the voice, speech is weighed against how loud the voice's echo could
 # be (dB). Iris's own echo, let through by a canceller that is finding the
@@ -61,11 +62,31 @@ HOLD_STANDS_OUT = 8.0
 HOLD_TRIGGER_NEAR_ECHO = 0.6
 # Speech the VAD is sure of while the canceller leaves this much less than
 # the echo (dB) is what the canceller leaves of the voice: it holds nothing,
-# and speech over the voice starts over
+# and speech over the voice starts over. Unless the canceller left far less
+# of the voice just before: of the voice alone a working canceller leaves
+# 30 to 50 dB less than its echo, of a user quieter than the voice of loud
+# speakers it leaves 10 to 25 dB less, as loud as the user is. Speech that
+# leaves HOLD_OUT_OF_RESIDUE dB more than the canceller left of the voice
+# just before, while that was HOLD_CANCELLED dB or more below the echo, is
+# the user's however loud the voice is, and holds it after HOLD_TRIGGER: if
+# the canceller leaves it HOLD_RESIDUAL dB or more below the echo, or the
+# microphone hears it no louder than the echo could be (HOLD_WITHIN_ECHO).
+# A canceller that loses the voice for a moment (after the speaker's delay
+# changed) lets it through about as loud as its echo, as far out of what it
+# left before as the user, and where the voice is loud
 HOLD_RESIDUAL = -10.0
+HOLD_CANCELLED = 20.0
+HOLD_OUT_OF_RESIDUE = 20.0
+HOLD_WITHIN_ECHO = 0.0
 # Held, the voice is listened to this long in the quiet. Once the device has
 # played out what it had (about 0.15 s) and the room is still, speech in at
 # least this share of the time is the user's; anything less was the echo.
+# Speech that stood out (above the echo, or out of what the canceller
+# leaves) was not the echo: it is heard from the moment the voice is held,
+# and is the user's unless it ended as the voice was held. Not while the
+# canceller measurably lets the voice through: a door slammed over the
+# voice let through stands out above the echo, and the voice dies away in
+# the hold as it would
 HOLD = 0.55
 HOLD_SETTLE = 0.25
 HOLD_SPEECH = 0.5

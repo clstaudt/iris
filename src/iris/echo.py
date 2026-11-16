@@ -73,19 +73,42 @@ COUPLING_WINDOWS = 40
 # Seconds of the microphone's levels kept, for what was heard to be weighed
 # against the voice's echo (against_echo)
 LEVELS_KEPT = 3.0
+# What the canceller left of the voice just before a stretch: in the last
+# RESIDUE_STEPS steps before it in which the microphone heard the voice
+# (within VOICE_HEARD dB of its echo, and over the room's noise), within
+# RESIDUE_WINDOW seconds before it (a pause between sentences has none),
+# and up to RESIDUE_GAP before it (where the user's first syllable may be,
+# before the VAD is sure of it). Fewer than RESIDUE_FEWEST such steps tell
+# nothing (the voice has not reached the microphone yet)
+RESIDUE_WINDOW = 2.5
+RESIDUE_GAP = 0.15
+VOICE_HEARD = -15.0
+RESIDUE_STEPS = 50
+RESIDUE_FEWEST = 20
 
 
 @dataclass(frozen=True)
 class EchoLevels:
     """What the microphone heard over a stretch, against the voice's echo
     as loud as it could have been then (dB): all of it (heard), and what the
-    canceller left of it (left). Speech that is the user's is louder than
-    the echo, or at least near it; what a working canceller leaves of the
-    voice is far below it, and a canceller that has lost the voice leaves
-    about as much as the echo."""
+    canceller left of it (left); and what it left of the voice it heard
+    just before (before; None if it heard too little of it then).
+
+    Speech louder than the echo is the user's. Speech quieter than the echo
+    can be told by what the canceller leaves: of the voice alone, a working
+    canceller leaves 30 dB or more below the echo, the user it leaves as
+    loud as they are. So speech it leaves far above what it left just
+    before is the user's, however loud the voice, unless it is about as
+    loud as the echo: a canceller that loses the voice, for a moment or for
+    longer, lets it through so."""
 
     heard: float
     left: float
+    before: float | None = None
+
+
+def _db(energy: float, reference: float) -> float:
+    return 10.0 * float(np.log10(max(energy, 1e-12) / reference))
 
 
 def _int16(audio: np.ndarray) -> bytes:
@@ -159,16 +182,25 @@ class EchoCanceller:
         if coupling is None:
             return None
         heard = left = bound = 0.0
+        # The steps just before in which the voice was heard: (what the
+        # canceller left, the most its echo could have had)
+        noise = ABOVE_NOISE * min(self._levels) if self._levels else 0.0
+        voice = 10.0 ** (VOICE_HEARD / 10.0)
+        voiced: list[tuple[float, float]] = []
         for at, energy, cleaned, most in self._steps:
             if start <= at < end:
                 heard, left, bound = heard + energy, left + cleaned, bound + most
+            elif (start - RESIDUE_WINDOW <= at < start - RESIDUE_GAP and most >= PLAYING**2
+                  and energy >= voice * coupling * most and energy > noise):
+                voiced.append((cleaned, most))
         echo = coupling * bound
         if bound < PLAYING**2 or echo <= 0.0:
             return None
-        return EchoLevels(
-            10.0 * float(np.log10(max(heard, 1e-12) / echo)),
-            10.0 * float(np.log10(max(left, 1e-12) / echo)),
-        )
+        before = None
+        if len(voiced) >= RESIDUE_FEWEST:
+            residue, most = (sum(x) for x in zip(*voiced[-RESIDUE_STEPS:]))
+            before = _db(residue, coupling * most)
+        return EchoLevels(_db(heard, echo), _db(left, echo), before)
 
     @property
     def cancelling(self) -> bool:

@@ -29,9 +29,11 @@ from iris.turns import (
     HOLD_AGAIN,
     HOLD_TRIGGER_AFTER_ECHO,
     HOLD_BACKOFF,
+    HOLD_CANCELLED,
     HOLD_CERTAIN,
     HOLD_CERTAIN_GOES_ON,
     HOLD_CERTAIN_TIME,
+    HOLD_OUT_OF_RESIDUE,
     HOLD_RESIDUAL,
     HOLD_SETTLE,
     HOLD_SPEECH,
@@ -39,6 +41,7 @@ from iris.turns import (
     HOLD_THRESHOLD,
     HOLD_TRIGGER,
     HOLD_TRIGGER_NEAR_ECHO,
+    HOLD_WITHIN_ECHO,
     SAMPLE_RATE,
     SPEECH_THRESHOLD,
     SmartTurn,
@@ -823,10 +826,17 @@ class AudioRecorder:
         the speaker a little earlier or later each time), much of the voice
         comes through. So speech over the voice is weighed against how loud
         the voice's echo could be (EchoCanceller.against_echo): speech
-        standing out above it holds the voice at once; speech about as loud
-        as the echo only once it has gone on for a while; and speech the VAD
-        is sure of while the canceller leaves far less than the echo is what
-        it leaves of the voice, and holds nothing.
+        standing out above it holds the voice at once; so does speech that
+        the canceller leaves far above what it left of the voice just
+        before, while it was cancelling (a user quieter than loud speakers),
+        unless it is about as loud as the echo where the voice is loud (the
+        voice let through for a moment); speech about as loud as the echo
+        holds it only once it has gone on for a while; and speech the VAD is
+        sure of while the canceller leaves far less than the echo, and no
+        more than before, is what it leaves of the voice, and holds nothing.
+        Speech that stood out is heard from the moment the voice is held,
+        and a hold for echo does not make it wait longer: a "Stop" said once
+        is over before the voice has died away.
 
         Args:
             turn: Path to the turn recorded by listen()
@@ -880,8 +890,9 @@ class AudioRecorder:
         calm, waiting, echoed = 0, False, -again
         # Frames in a row the voice was not speaking, and frames taken
         quiet, taken = 0, 0
-        # Whether the hold was for speech about as loud as the echo
-        held_near = False
+        # Whether the hold was for speech about as loud as the echo, and for
+        # speech that stood out (not the voice's echo)
+        held_near, held_out = False, False
         # Frames of speech that hold the voice. Each hold stops and restarts
         # the voice, so holds for echo stutter: after one, it takes longer
         # speech to hold the voice; after a second, it is not held again
@@ -893,8 +904,9 @@ class AudioRecorder:
         against = getattr(echo, "against_echo", None)
         # Of the speech over the voice sure to be speech now, once it was
         # long enough to hold the voice: the most it stood out above the
-        # voice's echo (dB), and for how many frames it was sure
-        loudest, lasted = None, 0
+        # voice's echo and above what the canceller left before it (dB),
+        # and for how many frames it was sure
+        loudest, above, lasted = None, None, 0
 
         def not_held(frames: int, why: str):
             """Speech over the voice long enough to have held it before it
@@ -932,37 +944,63 @@ class AudioRecorder:
                     levels = None
                     if not sure:
                         if loudest is not None and not held:
-                            not_held(lasted, f"at most {loudest:.1f} dB over its echo (holding it takes "
-                                             f"{HOLD_STANDS_OUT:.0f} dB, or {near_trigger * frame_seconds:.2f} s)")
-                        loudest = None
+                            not_held(lasted, f"at most {loudest:.1f} dB over its echo"
+                                             + (f" and {above:.0f} dB over what the canceller left before it"
+                                                if above is not None else "")
+                                             + f" (holding it takes {HOLD_STANDS_OUT:.0f} dB, "
+                                             f"or {near_trigger * frame_seconds:.2f} s)")
+                        loudest, above = None, None
                     elif over_voice and not held and against is not None and echo.settled:
                         levels = against(at - (min(sure, trigger) - 1) * frame_seconds, at + frame_seconds)
-                    if levels is not None and levels.left <= HOLD_RESIDUAL:
+                    # Speech that is not the voice's echo: louder than it
+                    # could be, or far above what the canceller left of the
+                    # voice just before, while it was cancelling, and not
+                    # the voice let through (about as loud as its echo,
+                    # where the voice is loud)
+                    clear = (levels is not None and levels.before is not None and levels.before <= -HOLD_CANCELLED
+                             and levels.left - levels.before >= HOLD_OUT_OF_RESIDUE
+                             and (levels.left <= HOLD_RESIDUAL or levels.heard <= HOLD_WITHIN_ECHO))
+                    stood_out = clear or (levels is not None and levels.heard >= HOLD_STANDS_OUT)
+                    if levels is not None and levels.left <= HOLD_RESIDUAL and not clear:
                         # The VAD is sure of what the canceller leaves of
                         # the voice: it starts over
                         if sure >= trigger:
-                            not_held(sure, f"{-levels.left:.0f} dB below its echo: what the canceller left of it")
-                        sure, certain, was_certain, loudest, levels = 0, 0, False, None, None
+                            not_held(sure, f"{-levels.left:.0f} dB below its echo"
+                                           + (f" and {levels.left - levels.before:.0f} dB over what the canceller "
+                                              f"left before it (standing out of that takes "
+                                              f"{HOLD_OUT_OF_RESIDUE:.0f} dB)" if levels.before is not None else "")
+                                           + ": what the canceller left of it")
+                        sure, certain, was_certain, loudest, above, levels = 0, 0, False, None, None, None
                     elif levels is not None and sure >= trigger:
                         loudest = levels.heard if loudest is None else max(loudest, levels.heard)
+                        if levels.before is not None:
+                            jump = levels.left - levels.before
+                            above = jump if above is None else max(above, jump)
                         lasted = sure
-                    # Speech that does not stand out above the echo holds
-                    # the voice only once it has gone on for a while
                     bar = hold_after
-                    if levels is not None and levels.heard < HOLD_STANDS_OUT:
+                    if stood_out:
+                        # Not the echo: a hold that heard only the echo does
+                        # not make it wait longer, only a second one
+                        bar = trigger if hold_after < never else never
+                    elif levels is not None:
+                        # Speech that does not stand out above the echo holds
+                        # the voice only once it has gone on for a while
                         bar = max(hold_after, near_trigger)
                     if held:
                         held -= 1
-                        heard += speech and at - held_at >= died_away
+                        # Speech that stood out counts from the start: it
+                        # was not the voice's echo
+                        heard += speech and (held_out or at - held_at >= died_away)
                         if held:
                             continue
                         enough = heard * frame_seconds >= HOLD_SPEECH * (HOLD - HOLD_SETTLE)
                         # Speech the VAD was certain of needs to go on for
-                        # a moment only. The canceller's own measure cannot
+                        # a moment only. The canceller's suppression cannot
                         # spare it that: the moment it starts letting the
                         # voice through looks to it like the user starting
-                        # to speak
-                        sure_users = was_certain and heard >= HOLD_CERTAIN_GOES_ON
+                        # to speak. Speech that stood out, heard from the
+                        # hold on, need only not have ended with it
+                        sure_users = (was_certain and heard >= HOLD_CERTAIN_GOES_ON) or (held_out and heard > 0)
                         if not ((enough or sure_users) and tracker.started):
                             # The voice's echo, or too little speech for a
                             # turn (a back-channel): the voice goes on, and so
@@ -970,12 +1008,13 @@ class AudioRecorder:
                             # where it was cut; the user who spoke over it
                             # hears the cut word again
                             if paused:
-                                release(heard > 0)
+                                aside = heard > 0
+                                release(aside)
                                 if not getattr(echo, "cancelling", True) or taken - echoed < again:
                                     calm = backoff
                                 echoed = taken
                                 hold_after = echo_trigger if hold_after == trigger else never
-                                if held_near and not heard:
+                                if held_near and not aside:
                                     # The echo went on long enough: from now
                                     # on, in later replies too, such speech
                                     # must go on longer
@@ -983,15 +1022,15 @@ class AudioRecorder:
                                     self.near_echo_needs = max(self.near_echo_needs, HOLD_TRIGGER_AFTER_ECHO)
                                 voice_log.info(
                                     "%s: released after %.2f s of speech while held, going on %s; %s%s",
-                                    "aside" if heard else "echo",
+                                    "aside" if aside else "echo",
                                     heard * frame_seconds,
-                                    "a little before where it was cut" if heard else "where it was cut",
+                                    "a little before where it was cut" if aside else "where it was cut",
                                     "no more holds until the voice ends" if hold_after == never
                                     else f"holds now need {hold_after * frame_seconds:.2f} s",
                                     f", and speech about as loud as the echo {near_trigger * frame_seconds:.2f} s "
-                                    "from now on" if held_near and not heard else "",
+                                    "from now on" if held_near and not aside else "",
                                 )
-                            tracker, sure, certain, was_certain, loudest = new_tracker(), 0, 0, False, None
+                            tracker, sure, certain, was_certain, loudest, above = new_tracker(), 0, 0, False, None, None
                             continue
                         voice_log.info(
                             "user: %.2f s of speech while held%s", heard * frame_seconds,
@@ -1024,21 +1063,27 @@ class AudioRecorder:
                             else:
                                 hold()
                                 voice_log.info(
-                                    "held: %.2f s sure to be speech, %s, canceller %s, suppression %s",
+                                    "held: %.2f s sure to be speech, %s%s, canceller %s, suppression %s",
                                     sure * frame_seconds,
                                     "its level against the echo unknown" if levels is None
                                     else f"{levels.heard:.1f} dB over the voice's echo",
+                                    f", {levels.left - levels.before:.0f} dB over what the canceller left before it"
+                                    if levels is not None and levels.before is not None else "",
                                     "cancelling" if getattr(echo, "cancelling", True) else "leaking",
                                     _db(getattr(echo, "suppression", None)),
                                 )
                                 held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, True, 0, False
-                                held_near, loudest = bar > hold_after, None
+                                # Heard from the hold on, unless a canceller
+                                # that lets the voice through leaves it to
+                                # die away there too
+                                held_out = clear or (stood_out and getattr(echo, "cancelling", True))
+                                held_near, loudest, above = bar > hold_after, None, None
                             continue
                         if waiting:
                             # The voice ended meanwhile: what was heard is
                             # judged as in a hold, with nothing to hold
                             held, held_at, paused, heard, waiting = round(HOLD / frame_seconds), at, False, 0, False
-                            held_near = False
+                            held_near, held_out = False, False
                             continue
                     if tracker.started:
                         if not spoke and not on_speech():
