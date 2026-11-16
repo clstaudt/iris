@@ -717,7 +717,7 @@ wheels = [
 
 [[package]]
 name = "iris"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
