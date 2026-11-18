@@ -27,7 +27,8 @@ The test looks into the core through methods of its own:
 - e2e.speaker {since, until}: how much sound the virtual speaker played
   between two moments, so the test knows a voice was heard, not only that
   the core reported its level, when each ping Iris sounds while it thinks
-  was heard (from, to), and when the first clip besides them was;
+  was heard (from, to), when the first clip besides them was, and how many
+  of those were cut off before their end;
 - e2e.model: when the model's streamed replies came in, its reasoning
   included, which the app is never shown: a reasoning model may think for
   minutes before it writes a word;
@@ -261,8 +262,8 @@ def speaker(params: dict) -> dict:
     """How much sound the laptop's speaker played between two moments
     (since, and until or now): the seconds it was audible, the clips it was
     given, when each ping Iris sounds while it thinks was heard (from, to),
-    and when the first clip besides the chimes and pings began to be (None
-    for none)."""
+    when the first clip besides the chimes and pings began to be (None for
+    none), and how many of those clips were cut off before their end."""
     start = _monotonic(float(params.get("since") or 0))
     end = _monotonic(float(params["until"])) if params.get("until") else time.monotonic()
     played = LAPTOP.speaker
@@ -277,6 +278,7 @@ def speaker(params: dict) -> dict:
             if chime_of(clip) == "thinking"
         ],
         "voice": _test_ms(others[0]) if others else None,
+        "cut": sum(1 for clip in clips if not chime_of(clip) and clip.stopped is not None),
     }
 
 
