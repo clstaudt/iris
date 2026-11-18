@@ -46,3 +46,4 @@ Use neutral placeholders instead: invented names (Ada, Robin, Felix), `https://<
 - Before a pull request is opened, and again before it is merged, its commits on top of `main` (`git log origin/main..<branch>`) are only its own. A pull request that would bring in another open pull request's commits is not merged.
 - Publish a pull request as soon as it is ready, so CI runs on it while other work goes on.
 - Merge pull requests one at a time, from the bottom of a stack, and wait for CI on `main` to pass after each merge before merging the next.
+- When mentioning an issue or pull request, always add its title in parentheses: "#95 (Show the features in a short tour, at the end of the walkthrough or from Settings)", never a bare "#95". This holds everywhere: commit messages, pull request and issue text, code comments and docs.
