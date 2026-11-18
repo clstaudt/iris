@@ -55,7 +55,13 @@ def model_server(url: str, timeout: float = DISCOVER_TIMEOUT) -> bool:
         response = httpx.get(
             f"{url.rstrip('/')}/models", timeout=timeout, headers=auth_headers(url)
         )
-        return response.status_code == 200 and isinstance(response.json().get("data"), list)
+        body = response.json()
+        # The OpenAI API lists models under "data"; some compatible servers
+        # under "models", in Ollama's shape
+        lists = isinstance(body, dict) and any(
+            isinstance(body.get(key), list) for key in ("data", "models")
+        )
+        return response.status_code == 200 and lists
     except Exception:
         return False
 
