@@ -1,7 +1,7 @@
 {
   "name": "iris-ui",
   "private": true,
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "description": "Electron UI shell for the Iris voice assistant",
   "author": "Christian Staudt",
   "license": "AGPL-3.0-or-later",

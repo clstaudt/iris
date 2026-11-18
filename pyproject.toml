@@ -1,6 +1,6 @@
 [project]
 name = "iris"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 description = "A modular voice and vision assistant, used through its desktop app"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
