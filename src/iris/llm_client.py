@@ -124,9 +124,26 @@ def auth_headers(url: Optional[str]) -> dict:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
-def _answers(server: str, path: str, key: str) -> Optional[bool]:
-    """Whether a GET of the server's path returns JSON holding this key;
-    None when the server wants a key it was not given. Raises
+def model_entries(body) -> list[dict]:
+    """The models of a server's /v1/models answer, each with its name as
+    "id": under "data" as the OpenAI API lists them, or under "models", each
+    named by "model" or "name", as some OpenAI-compatible servers list them
+    in Ollama's shape."""
+    if not isinstance(body, dict):
+        return []
+    entries = body.get("data") if isinstance(body.get("data"), list) else body.get("models")
+    models = []
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict):
+            name = entry.get("id") or entry.get("model") or entry.get("name")
+            if name:
+                models.append({**entry, "id": name})
+    return models
+
+
+def _answers(server: str, path: str, *keys: str) -> Optional[bool]:
+    """Whether a GET of the server's path returns JSON holding one of these
+    keys; None when the server wants a key it was not given. Raises
     httpx.TransportError when nothing answers at all."""
     response = httpx.get(
         f"{server}{path}", timeout=PROBE_TIMEOUT, headers=auth_headers(server),
@@ -140,7 +157,7 @@ def _answers(server: str, path: str, key: str) -> Optional[bool]:
         body = response.json()
     except ValueError:
         return False
-    return isinstance(body, dict) and key in body
+    return isinstance(body, dict) and any(key in body for key in keys)
 
 
 def resolve_host(url: Optional[str]) -> Optional[str]:
@@ -165,7 +182,7 @@ def resolve_host(url: Optional[str]) -> Optional[str]:
         elif url.endswith("/v1"):
             resolved = url
         else:
-            models = _answers(url, "/v1/models", "data")
+            models = _answers(url, "/v1/models", "data", "models")
             if models is None:
                 return f"{url}/v1"
             resolved = f"{url}/v1" if models else url
@@ -321,8 +338,7 @@ class OpenAIClient:
     def list(self) -> ollama.ListResponse:
         response = self._client.get(f"{self.base}/models")
         self._raise(response)
-        entries = response.json().get("data") or []
-        self._models = {e["id"]: e for e in entries if isinstance(e, dict) and e.get("id")}
+        self._models = {e["id"]: e for e in model_entries(response.json())}
         return ollama.ListResponse(
             models=[ollama.ListResponse.Model(model=name) for name in self._models]
         )
@@ -342,8 +358,9 @@ class OpenAIClient:
     def show(self, model: str) -> ollama.ShowResponse:
         """What the server tells of a model: its context length when it says,
         that it holds conversations and, unless refused, calls tools, and
-        that it sees images when it says so (as capabilities, as input
-        modalities, a list or {"input": [...]}, or as supports_vision)."""
+        that it sees images when it says so (as capabilities, "vision" or
+        "multimodal", as input modalities, a list or {"input": [...]}, or as
+        supports_vision)."""
         if self._models is None or model not in self._models:
             self.list()
         entry = self._models.get(model)
@@ -359,7 +376,8 @@ class OpenAIClient:
         if isinstance(modalities, dict):
             modalities = modalities.get("input") or []
         declared = list(entry.get("capabilities") or []) + list(modalities)
-        if "vision" in declared or "image" in declared or entry.get("supports_vision") is True:
+        sees = {"vision", "image", "multimodal"} & set(declared)
+        if sees or entry.get("supports_vision") is True:
             capabilities.append("vision")
         return ollama.ShowResponse(
             model_info=modelinfo, details={"family": ""}, capabilities=capabilities
