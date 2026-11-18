@@ -780,14 +780,16 @@ const voiceDone = (timeout = 60_000) =>
 const heard = async (since, until) => (await rpc("e2e.speaker", { since, until })).seconds;
 
 // Sound enough to be a voice: a preview's sentence gives seconds of it, and
-// so does a short reply; a click or a breath, a few hundredths
+// so does a short reply; a single word a third of a second; a click or a
+// breath, a few hundredths
 const SPOKEN = 0.5;
+const WORD = 0.2;
 
 /** Wait for a voice to reach the speaker from a moment on: SPOKEN seconds of
- *  sound at least. */
-async function checkHeard(since, what, timeout = 60_000) {
+ *  sound at least, or as many as given. */
+async function checkHeard(since, what, timeout = 60_000, least = SPOKEN) {
   let seconds = 0;
-  await until(`${what} to be heard`, async () => (seconds = await heard(since)) >= SPOKEN, timeout).catch(() => {
+  await until(`${what} to be heard`, async () => (seconds = await heard(since)) >= least, timeout).catch(() => {
     throw new Error(`${what} reached the speaker as ${seconds.toFixed(2)} s of sound`);
   });
 }
@@ -2406,7 +2408,12 @@ try {
     check(!done.data.interrupted && done.data.text.trim(), "the reply did not come");
     await eventAfter("audio.output", since, (data) => data.rms > 0.001, 60_000);
     await until("the voice to finish", () => rpc("app.info").then((info) => info.state !== "speaking"), 60_000);
-    await checkHeard(since, "the reply after Stop");
+    // The replies Stop cut short are kept as far as they were heard ("One",
+    // "A haiku"), and a model may answer in kind, in a single word ("ready"):
+    // spoken to its end, a word is the reply spoken
+    await checkHeard(since, "the reply after Stop", 60_000, WORD);
+    const { cut } = await rpc("e2e.speaker", { since });
+    check(cut === 0, `the reply after Stop was cut off at the speaker (${cut} of its clips)`);
   });
 
   await step("Stop while the reply is still being written silences it too", async () => {
