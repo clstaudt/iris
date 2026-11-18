@@ -40,6 +40,15 @@ class TestReference:
         canceller.played(0.0, np.ones(24000, dtype=np.float32), 24000)
         assert abs(len(canceller._played[0][1]) - RATE) <= 1
 
+    def test_a_new_clip_ends_the_one_before(self):
+        # The speaker plays one clip at a time: the voice cuts a ping
+        canceller = EchoCanceller()
+        canceller.played(10.0, np.full(RATE * 5, 0.5, dtype=np.float32), RATE)
+        canceller.played(11.0, np.ones(RATE // 2, dtype=np.float32), RATE)
+        assert np.allclose(canceller._reference(10.5, STEP), 0.5)
+        assert np.allclose(canceller._reference(11.1, STEP), 1.0)
+        assert not canceller._reference(12.0, STEP).any()
+
     def test_nothing_after_a_stop(self):
         canceller = EchoCanceller()
         canceller.played(10.0, np.ones(RATE, dtype=np.float32), RATE)

@@ -34,6 +34,12 @@ LEAD = 0.05
 KEEP = 20.0
 # Voice heard by the canceller before it has learned the room (seconds)
 SETTLE = 3.0
+# Voice heard before it is told of a sound besides the voice, as the
+# thinking ping (seconds). Told of a quiet sound before it has found the
+# voice's way to the microphone, it lets more of it through, and more like
+# speech, than if it was not told at all; after this much voice, and while
+# it is cancelling, it takes such a sound out
+LEARNED = 10.0
 # How much quieter the voice must come out of the canceller than it went in
 # (dB) for it to count as cancelling. A working canceller takes out 20 dB
 # or more; one that has lost the voice's timing takes out little, and the
@@ -153,6 +159,12 @@ class EchoCanceller:
         return self._voice_heard >= SETTLE
 
     @property
+    def learned(self) -> bool:
+        """Whether it may be told of a sound besides the voice: it heard
+        LEARNED seconds of the voice, and is cancelling."""
+        return self._voice_heard >= LEARNED and self.cancelling
+
+    @property
     def suppression(self) -> float | None:
         """How much quieter the voice came out than it went in, lately, in
         all stretches but the CANCELLING_SPARED worst (dB); None before any
@@ -211,12 +223,18 @@ class EchoCanceller:
         return self.settled and (suppression is None or suppression >= CANCELLING)
 
     def played(self, start: float, audio: np.ndarray, sample_rate: int):
-        """Audio that leaves the speaker from start (time.monotonic()) on."""
+        """Audio that leaves the speaker from start (time.monotonic()) on.
+        The speaker plays one clip at a time: what was playing ends there
+        (the voice starting cuts a thinking ping)."""
         mono = audio.mean(axis=1) if audio.ndim > 1 else audio
         if sample_rate != RATE:
             common = gcd(RATE, sample_rate)
             mono = resample_poly(mono, RATE // common, sample_rate // common)
         with self._lock:
+            self._played = deque(
+                (begin, samples[: max(0, int((start - begin) * RATE))])
+                for begin, samples in self._played
+            )
             self._played.append((start, mono.astype(np.float32)))
             # What ended long ago is forgotten
             while self._played and self._ends(self._played[0]) < start - KEEP:

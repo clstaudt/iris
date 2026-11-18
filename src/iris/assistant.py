@@ -1,5 +1,6 @@
 """Voice assistant coordinator that orchestrates all components."""
 
+import functools
 import logging
 import math
 import os
@@ -15,10 +16,11 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 from faster_whisper.audio import decode_audio
+from scipy.signal import butter, fftconvolve, sosfilt
 
 from iris import cloning, engines, language
 from iris.attachments import Attachment, recorded_text
-from iris.audio import AudioPlayer, AudioRecorder, SoundDevice, get_filter
+from iris.audio import PLAYBACK_BLOCK, AudioPlayer, AudioRecorder, SoundDevice, get_filter
 from iris.echo import HAS_ECHO_CANCELLATION, EchoCanceller
 from iris.events import EventBus, brief
 from iris.llm import (
@@ -90,14 +92,17 @@ NO_VISION = (
 )
 
 # While Iris thinks and nothing is heard of it (the model is slow to begin,
-# a tool runs), a soft tone now and then says it has not dropped out: the
-# first after this many seconds of silence, then one every
+# a tool runs), a low, soft ping now and then says it has not dropped out:
+# the first after this many seconds of silence, then one every
 # THINKING_TONE_EVERY seconds while the wait goes on. A reply that comes
 # quickly has none.
 THINKING_TONE_AFTER = 4.0
 THINKING_TONE_EVERY = 6.0
 # Seconds between looks at the wait
 THINKING_TONE_STEP = 0.1
+# How loud the ping is at its loudest, as the voice's clips are scaled
+# (normalized to 0.85): about 15 dB under the voice's average level
+THINKING_PING_LEVEL = 0.025
 
 
 def _chime_tones(freqs: tuple[float, ...]) -> np.ndarray:
@@ -133,19 +138,43 @@ def _thread_chime() -> np.ndarray:
     return _chime_tones((784.0, 784.0))
 
 
-def _thinking_tone() -> np.ndarray:
-    """One tone, far softer than the chimes, that swells in and dies away:
-    "still thinking". Its pitch is the wake chime's lower one: a lower tone
-    comes closer to a voice, and the speech detector would hear more of it."""
+def _lowpass(sound: np.ndarray, cutoff: float, rate: int) -> np.ndarray:
+    return sosfilt(butter(4, cutoff, "low", fs=rate, output="sos"), sound)
+
+
+@functools.lru_cache(maxsize=1)
+def _thinking_ping() -> np.ndarray:
+    """A low, round ping drowned in a dark reverb: "still thinking". C4,
+    swelling in over 0.2 s and dying away, muffled by a low-pass, then
+    mostly the tail of a long, dark room (the same on every run: the room's
+    noise is seeded). It is cut just short of THINKING_TONE_EVERY seconds,
+    fading out over its last 0.4 s, so the next ping takes over without a
+    click: the speaker plays one clip at a time. Made once."""
     rate = 24000
-    t = np.arange(int(rate * 0.45)) / rate
-    # At its loudest 50 ms in, then fading out: no edge to click
-    envelope = (t / 0.05) * np.exp(1 - t / 0.05)
-    return (0.04 * envelope * np.sin(2 * np.pi * 659.25 * t)).astype(np.float32)
+    rise, fade = 0.2, 0.8
+    t = np.arange(int(rate * (rise + 6 * fade))) / rate
+    envelope = np.where(t < rise, np.sin(np.pi / 2 * t / rise) ** 2, np.exp(-(t - rise) / fade))
+    ping = _lowpass(envelope * np.sin(2 * np.pi * 261.63 * t), 550, rate)
+    # The dark room: exponentially decaying noise (RT60 6 s), low-passed at
+    # 420 Hz, after 30 ms, its tail as loud as the ping, 82% of what is heard.
+    # Its noise is the second draw of a generator seeded 3, as in the sound
+    # chosen: another draw rings on longer
+    n = int(rate * 6.0 * 1.3)
+    noise = np.random.default_rng(3).standard_normal(2 * n)[n:]
+    room = noise * np.exp(-6.91 * np.arange(n) / rate / 6.0)
+    room = _lowpass(room, 420, rate)
+    room[: int(0.03 * rate)] = 0.0
+    dry = np.concatenate([ping, np.zeros(n)])
+    tail = fftconvolve(dry, room)[: len(dry)]
+    tail *= np.abs(dry).max() / np.abs(tail).max()
+    sound = (0.18 * dry + 0.82 * tail)[: int(rate * (THINKING_TONE_EVERY - 0.1))]
+    out = int(rate * 0.4)
+    sound[-out:] *= np.cos(np.linspace(0, np.pi / 2, out)) ** 2
+    return (THINKING_PING_LEVEL * sound / np.abs(sound).max()).astype(np.float32)
 
 
 class ThinkingTones:
-    """A soft tone now and then while Iris thinks and is not heard (see
+    """A ping now and then while Iris thinks and is not heard (see
     THINKING_TONE_AFTER).
 
     heard() tells whether Iris's voice is heard, or about to be: the silence
@@ -876,20 +905,38 @@ class VoiceAssistant:
             self._play_chime(_thread_chime())
 
     def _thinking_tones(self) -> ThinkingTones:
-        """Soft tones while the reply is thought out and nothing is heard of
-        Iris. Like the chimes they are not the voice: the echo canceller is
-        not told of them, and to the speech detector a tone this soft and
-        pure is nobody speaking, so it neither starts a turn nor interrupts
-        one. A tone still playing ends as the voice starts: the speaker
+        """Low pings while the reply is thought out and nothing is heard of
+        Iris. A ping still sounding ends as the voice starts: the speaker
         plays one clip at a time."""
         return ThinkingTones(
-            lambda: self._play_chime(_thinking_tone()),
+            self._play_thinking_ping,
             heard=lambda: self.speech_pipeline.is_active,
             may_sound=self._may_think_aloud,
         ).start()
 
+    def _play_thinking_ping(self):
+        """Play a thinking ping. The microphone hears it while it listens
+        for the user going on, and a ping this low can sound to the speech
+        detector like someone speaking. So once the echo canceller has
+        learned the room it is told of the ping, as of the voice, and takes
+        it out; until then it is not: told of a sound before it has found
+        the voice's way to the microphone, it lets more of it through, and
+        more like speech, than if it was not told at all."""
+        sound = _thinking_ping()
+        started = time.monotonic()
+        try:
+            # As the voice is played: the canceller learned the voice's way
+            # through such a stream, and finds the ping on it
+            latency = self.player.audio.play(sound, 24000, blocksize=PLAYBACK_BLOCK, latency="high")
+        except Exception:
+            logger.warning("The thinking ping could not be played", exc_info=True)
+            return
+        echo = getattr(self, "echo", None)
+        if echo is not None and echo.learned:
+            echo.played(started + latency, sound, 24000)
+
     def _may_think_aloud(self) -> bool:
-        """Whether a thinking tone may sound now: the voice is on, the reply
+        """Whether a thinking ping may sound now: the voice is on, the reply
         neither stopped nor paused, and Iris neither shutting down nor going
         to sleep (by the sleep tool, or a wake word set meanwhile)."""
         asleep = self._ending or self._asleep_until_called or (
@@ -1452,7 +1499,7 @@ class VoiceAssistant:
                     self.event_bus.emit("error", {"message": NO_VISION, "kind": "no_vision"})
 
             interrupted = False
-            # A soft tone now and then while the reply is long in coming
+            # A low ping now and then while the reply is long in coming
             tones = self._thinking_tones()
             try:
                 stream = self.conversation.chat_stream(
