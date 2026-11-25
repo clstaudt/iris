@@ -1,61 +1,85 @@
 <p align="center">
-  <img src="img/iris-title.png" width="80%" alt="Iris">
+  <img src="img/iris-title.png" width="640" alt="Iris">
 </p>
 
-Iris is a modular voice and vision assistant, used through its desktop app. You talk with it as you would with a person, and it looks through the camera or at your screen when a question needs eyes. Each of its parts, from speech recognition to the voice, can be swapped.
+<h3 align="center">A modular voice and vision assistant for your desktop</h3>
+
+<p align="center">
+  Talk with it in your own language. Customize every part, from its voice and personality to the models behind it.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later"></a>
+  <a href="#install"><img src="https://img.shields.io/badge/app-macOS%2014%2B%20%C2%B7%20Apple%20Silicon-lightgrey" alt="App: macOS 14+ on Apple Silicon"></a>
+  <a href="#from-source"><img src="https://img.shields.io/badge/python-3.11%20%E2%80%93%203.13-3776ab" alt="Python 3.11 to 3.13"></a>
+</p>
+
+<p align="center">
+  <a href="#feature-tour">Feature tour</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#documentation">Documentation</a>
+</p>
+
+## Feature tour
+
+### Talk, or type
 
 <p align="center">
   <img src="docs/screenshots/conversation.png" width="720" alt="A conversation with Iris: a web search, a look through the camera, and the orb below the message box while Iris speaks">
 </p>
 
-## What it does
+Iris answers the moment you finish speaking, and you can interrupt it at any time. It looks through the camera or at your screen, searches the web and reads the files you drop in.
 
-- **Talks with you by voice**, or by text in the same conversation. It answers as soon as you have finished speaking, not after a fixed silence, and starts with the first sentence of its reply.
-- **Can be interrupted.** Speak while it talks and it pauses, then stops if you go on. An echo canceller keeps its own voice out of the microphone.
-- **Wake word and personas.** Iris can sleep until called by name. Each persona has its own personality, voice (a Kyutai voice can be cloned from a sample), wake word and sleep word.
-- **Sees** through the camera and the screen, and reads the images, PDFs and text files you hand it.
-- **Searches the web** and reads pages.
-- **Remembers** earlier conversations by topic.
-- **Runs its speech models on your computer.** The language model comes from Ollama or any server with the OpenAI-compatible API, on this computer or another.
-- **Built from swappable parts.** Speech recognition and voices are slots that plugins can fill with other engines, the end of your turn is heard by a model or a silence, and tools are plugins.
-- **Presence mode** shrinks Iris to its orb, floating above your other windows.
+### Personas, voices and roles
 
-## Screenshots
+<p align="center">
+  <img src="docs/screenshots/persona-editor.png" width="720" alt="The persona editor: personality, wake word, sleep word, the Kyutai voices and the voice effect">
+</p>
 
-Presence: only the orb, floating above other windows. It shows whether Iris is listening, thinking, looking or speaking.
+Give your assistant a personality, a voice and a wake word, or clone a voice from a recording. A role such as Research gives a conversation a focus.
 
-<img src="docs/screenshots/presence.png" width="460" alt="The round orb of presence mode over a desktop, beside a document window">
+### Every stage in view
 
-The walkthrough on first launch finds model servers and downloads the speech models while you make the other choices.
+<p align="center">
+  <img src="docs/screenshots/pipeline.png" alt="Settings, Pipeline: the stages hear, think and speak, their timings, and the language model inspector">
+</p>
 
-<img src="docs/screenshots/walkthrough.png" width="600" alt="The walkthrough's language model step: Ollama on this computer, an OpenAI-compatible server, and their models">
+Every stage from microphone to voice, with how long it took in your last turn. Click one to swap it.
 
-Settings > Pipeline: every stage from the microphone to the voice, and how long each took in the latest turn. Click a stage to change it.
+### Ready in a few steps
 
-<img src="docs/screenshots/pipeline.png" alt="Settings, Pipeline: the stages hear, think and speak, their timings, and the language model inspector">
+<p align="center">
+  <img src="docs/screenshots/walkthrough.png" width="600" alt="The walkthrough's language model step: Ollama on this computer, an OpenAI-compatible server, and their models">
+</p>
 
-The persona editor: personality, wake word, sleep word and voice, with every voice playable.
+On first launch, a walkthrough finds your model servers and downloads the speech models while you pick a voice.
 
-<img src="docs/screenshots/persona-editor.png" alt="The persona editor showing Iris with her personality, wake word, sleep word, Kyutai voice and effect">
+### And also
 
-## Getting started
+- **Wake word:** Iris sleeps until called by name.
+- **Presence:** Iris shrinks to its orb, floating above your other windows.
+- **Threads:** separate conversations, each with its own persona, role and memory.
+- **Memory:** Iris remembers by topic; **Amnesia** keeps a conversation out of it.
+- **Local speech:** recognition and voices run on your computer, the language model on Ollama or any OpenAI-compatible server.
 
-Iris needs a language model server. The simplest is [Ollama](https://ollama.com/download) on the same computer, with a small model:
+## Install
+
+Iris runs on macOS. Linux and Windows are not supported yet: [open an issue](https://github.com/clstaudt/iris/issues/new) to ask for them.
+
+Iris needs a language model server, such as [Ollama](https://ollama.com/download):
 
 ```bash
 ollama pull qwen3:1.7b
 ```
 
-### The macOS app
+### macOS app
 
-For Apple Silicon Macs with macOS 14 or later:
-
-1. Download the disk image from [Releases](https://github.com/clstaudt/iris/releases), open it and drag **Iris** into **Applications**. Version releases are signed and notarized. The rolling [latest](https://github.com/clstaudt/iris/releases/tag/latest) pre-release holds a build of `main`, made once a week when it has changed; it is signed ad hoc, so macOS refuses it the first time: click **Open Anyway** in **System Settings > Privacy & Security**.
-2. Open Iris and follow the walkthrough. It downloads the speech models (about 2 GB) while you go on.
+For Apple Silicon and macOS 14 or later: download the disk image from [Releases](https://github.com/clstaudt/iris/releases) and drag **Iris** into **Applications**.
 
 ### From source
 
-On any platform, with Python 3.11 to 3.13, [uv](https://docs.astral.sh/uv/getting-started/installation/), Node.js and a language model server:
+With Python 3.11 to 3.13, [uv](https://docs.astral.sh/uv/getting-started/installation/) and Node.js:
 
 ```bash
 git clone https://github.com/clstaudt/iris.git
@@ -66,29 +90,29 @@ npm ci
 npm run dev
 ```
 
-The walkthrough does the rest.
+## How it works
 
-## How it's built
-
-Iris is two programs. The Python core (`src/iris`) listens, recognizes speech, talks to the language model, speaks, runs tools and keeps memory; the desktop app (`ui/`, Electron and Svelte) shows it. They talk over JSON-RPC on stdio. What runs by default:
+A Python core (`src/iris`) listens, thinks and speaks; an Electron and Svelte app (`ui/`) shows it.
 
 | Part | Default |
 | --- | --- |
-| Speech recognition | Whisper, through MLX on Apple Silicon and faster-whisper elsewhere |
-| Turn end | Silero voice activity detection and Smart Turn v3, or a fixed silence |
+| Speech recognition | Whisper, through MLX or faster-whisper |
+| Turn end | Silero VAD and Smart Turn v3, or a fixed silence |
 | Language model | Ollama or any OpenAI-compatible server |
-| Voice | Kyutai's Pocket TTS or Kokoro, chosen per persona |
+| Voice | Kyutai's Pocket TTS or Kokoro, per persona |
 | Echo cancellation | WebRTC's AEC3 |
-| Tools | Camera, screen, web search, memory and going to sleep, as plugins |
+| Tools | Camera, screen, web search, memory and going to sleep |
 
-A plugin is a Python module that gives Iris tools, engines or both; [examples/plugins/clock.py](examples/plugins/clock.py) is a small one. More in `docs/`:
+Plugins add tools and speech engines: see [Plugins and engines](docs/plugins.md) and a [small example](examples/plugins/clock.py).
 
-- [Getting and using Iris](docs/using-iris.md): installing, the walkthrough, talking, presence, tools, memory, personas and settings
-- [Architecture](docs/architecture.md): the core's modules and the RPC protocol
-- [Plugins and engines](docs/plugins.md): writing a plugin, model slots
-- [Development](docs/development.md): tests, the walkthrough as a new user, end-to-end tests
-- [Testing the voice](docs/voice-tests.md): conversations with Iris in a virtual room
-- [Building the macOS app](docs/building-the-macos-app.md): packaging, signing and releases
+## Documentation
+
+- [Using Iris](docs/using-iris.md)
+- [Architecture](docs/architecture.md)
+- [Plugins and engines](docs/plugins.md)
+- [Development](docs/development.md)
+- [Testing the voice](docs/voice-tests.md)
+- [Building the macOS app](docs/building-the-macos-app.md)
 
 ## Acknowledgments
 
@@ -96,8 +120,4 @@ Iris builds on [Whisper](https://github.com/openai/whisper), [MLX Whisper](https
 
 ## License
 
-Copyright (C) 2025–2026 Christian Staudt
-
-Iris is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-Iris is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [GNU Affero General Public License](LICENSE) for more details.
+Copyright (C) 2025–2026 Christian Staudt. Iris is free software, licensed under the [GNU Affero General Public License](LICENSE), version 3 or later.
