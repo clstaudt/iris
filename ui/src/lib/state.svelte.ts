@@ -256,7 +256,7 @@ const SETUP_KEYS = [
 ] as const;
 
 /** The pages of the settings window. */
-export type SettingsPage = "pipeline" | "personas" | "voices" | "roles";
+export type SettingsPage = "pipeline" | "personas" | "voices" | "roles" | "about";
 
 /** What ends a turn: Smart Turn hearing the user has finished, or a silence. */
 export type TurnDetection = "smart_turn" | "silence";
