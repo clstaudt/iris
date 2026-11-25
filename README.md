@@ -31,14 +31,6 @@
 
 Iris answers the moment you finish speaking, and you can interrupt it at any time. It looks through the camera or at your screen, searches the web and reads the files you drop in.
 
-### Presence: only the orb
-
-<p align="center">
-  <img src="docs/screenshots/presence.png" width="460" alt="The round orb of presence mode over a desktop, beside a document window">
-</p>
-
-Iris shrinks to its orb, floating above your other windows.
-
 ### Personas, voices and roles
 
 <p align="center">
@@ -66,6 +58,7 @@ On first launch, a walkthrough finds your model servers and downloads the speech
 ### And also
 
 - **Wake word:** Iris sleeps until called by name.
+- **Presence:** Iris shrinks to its orb, floating above your other windows.
 - **Threads:** separate conversations, each with its own persona, role and memory.
 - **Memory:** Iris remembers by topic; **Amnesia** keeps a conversation out of it.
 - **Local speech:** recognition and voices run on your computer, the language model on Ollama or any OpenAI-compatible server.
