@@ -202,6 +202,58 @@ const stub = http.createServer((request, response) => {
 await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
 const stubUrl = `http://127.0.0.1:${stub.address().port}/v1`;
 
+// A stand-in for Ollama as a new user has it, installed without models: it
+// says it is Ollama, lists no models until one is pulled, and streams a
+// pull's progress as Ollama does, part by part
+const OLLAMA_LAYERS = [
+  { digest: "sha256:1111aaaa2222bbbb", total: 4_000_000_000 },
+  { digest: "sha256:3333cccc4444dddd", total: 2_600_000_000 },
+];
+/** The models the Ollama stand-in was asked to pull, and the one it has */
+const ollamaPulls = [];
+let ollamaHas = null;
+const ollamaStandIn = http.createServer((request, response) => {
+  let body = "";
+  request.on("data", (part) => (body += part));
+  request.on("end", async () => {
+    const route = request.url.split("?")[0];
+    const json = (value) => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(value));
+    };
+    if (route === "/api/version") return json({ version: "0.12.0" });
+    if (route === "/api/tags") {
+      const models = ollamaHas
+        ? [{ name: ollamaHas, model: ollamaHas, modified_at: "2026-11-25T00:00:00Z", size: 6_600_000_000, digest: "5555eeee", details: {} }]
+        : [];
+      return json({ models });
+    }
+    if (route === "/api/show") return json({ capabilities: ["completion", "tools", "vision"] });
+    if (route === "/api/pull" && request.method === "POST") {
+      const payload = JSON.parse(body || "{}");
+      const model = payload.model ?? payload.name;
+      ollamaPulls.push(model);
+      response.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      const line = (value) => response.write(JSON.stringify(value) + "\n");
+      line({ status: "pulling manifest" });
+      for (let part = 1; part <= 8; part++) {
+        for (const layer of OLLAMA_LAYERS) {
+          line({ status: `pulling ${layer.digest.slice(7, 19)}`, digest: layer.digest, total: layer.total, completed: Math.round((layer.total * part) / 8) });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      line({ status: "verifying sha256 digest" });
+      line({ status: "writing manifest" });
+      line({ status: "success" });
+      ollamaHas = model;
+      return response.end();
+    }
+    response.writeHead(404).end();
+  });
+});
+await new Promise((resolve) => ollamaStandIn.listen(0, "127.0.0.1", resolve));
+const ollamaStandInUrl = `http://127.0.0.1:${ollamaStandIn.address().port}`;
+
 // A stand-in for an MTPLX server, answering as MTPLX's own does
 // (mtplx/server/openai.py): every route wants the key it was started with,
 // and a page from another origin is refused before that. /v1/models lists
@@ -889,6 +941,25 @@ try {
     await walkthroughStep("server").waitFor({ timeout: 5000 });
     const started = events.find((e) => e.type === "state" && e.data.state === "starting");
     check(!started, "Iris started before the walkthrough was done");
+  });
+
+  await step("first run: an Ollama without models downloads the preferred one, with its progress, and chooses it", async () => {
+    await page.locator("button.s-btn", { hasText: "Add server" }).click();
+    await page.locator('input[aria-label="Server address"]').fill(ollamaStandInUrl);
+    await page.locator('input[aria-label="Server address"]').press("Enter");
+    const download = page.locator('[aria-label="Model"] button', { hasText: /^\s*Download / });
+    await download.waitFor({ timeout: 30_000 });
+    const wanted = (await download.innerText()).replace("Download", "").trim();
+    const since = Date.now();
+    await download.click();
+    await page.locator('[aria-label="Model"] [role="progressbar"]').waitFor({ timeout: 10_000 });
+    await page.locator('[aria-label="Model"] .s-option.active', { hasText: wanted }).waitFor({ timeout: 30_000 });
+    check(JSON.stringify(ollamaPulls) === JSON.stringify([wanted]), `the stand-in was asked for ${ollamaPulls.join(", ")}`);
+    const told = events.filter((e) => e.at >= since && e.type === "llm.pull").map((e) => e.data);
+    check(told.some((d) => d.state === "downloading" && d.total > 0 && d.done < d.total), "the download showed no progress");
+    check(told.at(-1)?.state === "done" && told.at(-1)?.total === 6_600_000_000, `the download ended as ${JSON.stringify(told.at(-1))}`);
+    // Back to this computer's server, for a run without E2E_HOST
+    if (!process.env.E2E_HOST) await page.locator(".server .pick").first().click();
   });
 
   await step("first run: a server typed without /v1 is kept as the core resolves it, and a model chosen", async () => {
@@ -3943,6 +4014,7 @@ try {
   server.close();
   stub.close();
   mtplx.close();
+  ollamaStandIn.close();
   await rpc("assistant.stop").catch(() => {});
   bridge.kill();
   fs.rmSync(home, { recursive: true, force: true });

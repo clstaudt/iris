@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
+    OLLAMA_DOWNLOAD,
     PREFERRED_MODEL,
     serverName,
     walkthrough as w,
   } from "../../lib/walkthrough.svelte";
   import Icon from "../Icon.svelte";
+  import Progress from "../Progress.svelte";
   import Step from "./Step.svelte";
 
   const SERVER_CHECK_MS = 15_000;
@@ -23,6 +25,11 @@
   const noServer = $derived(
     w.searched && w.connecting === null && w.server === null && !w.servers.some((s) => s.reachable)
   );
+
+  // Only Ollama downloads models; an OpenAI-compatible server is kept with /v1
+  const ollama = $derived(w.server !== null && !w.server.endsWith("/v1"));
+  const pulling = $derived(w.pull?.state === "downloading");
+  const gb = (bytes: number) => (bytes / 1e9).toFixed(1);
 
   function add() {
     if (!typed.trim()) return;
@@ -93,6 +100,10 @@
           Add server
         </button>
         {#if noServer}
+          <button class="s-btn" onclick={() => window.open(OLLAMA_DOWNLOAD, "_blank")}>
+            <Icon name="download" size={13} />
+            Get Ollama
+          </button>
           <button class="s-btn" onclick={() => w.searchAgain()} disabled={w.searching}>
             Check again
           </button>
@@ -102,10 +113,7 @@
     {#if w.serverError}
       <p class="s-status error">{w.serverError}</p>
     {:else if noServer}
-      <p class="s-status">
-        No server found. Install Ollama from ollama.com and run
-        <code>ollama pull {PREFERRED_MODEL}</code>, or add a server you have.
-      </p>
+      <p class="s-status">No server found.</p>
     {/if}
   </section>
 
@@ -126,9 +134,26 @@
         </button>
       {/each}
       {#if w.serverModels.length === 0}
-        <p class="s-status">
-          This server has no models yet. With Ollama: <code>ollama pull {PREFERRED_MODEL}</code>
-        </p>
+        {#if ollama}
+          <div class="flex items-center gap-2">
+            <button class="s-btn primary" onclick={() => w.pullModel()} disabled={pulling}>
+              <Icon name="download" size={13} />
+              Download {PREFERRED_MODEL}
+            </button>
+            {#if pulling && w.pull?.total}
+              <span class="text-[11.5px] tabular-nums text-ink-3">
+                {gb(w.pull.done)} of {gb(w.pull.total)} GB
+              </span>
+            {/if}
+          </div>
+          {#if pulling}
+            <Progress value={w.pull?.total ? w.pull.done / w.pull.total : 0} waiting={!w.pull?.total} />
+          {:else if w.pull?.state === "failed"}
+            <p class="s-status error">{w.pull.error}</p>
+          {/if}
+        {:else}
+          <p class="s-status">This server has no models yet.</p>
+        {/if}
       {/if}
     </section>
   {/if}
@@ -139,11 +164,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-  }
-  code {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--color-ink-2);
   }
   /* A server: its row picks it, beside it whether it answers */
   .server {

@@ -7,7 +7,7 @@ from iris.llm import ConversationManager
 @pytest.fixture
 def conversation():
     """Create ConversationManager - requires running Ollama."""
-    return ConversationManager("qwen3:1.7b")
+    return ConversationManager("qwen3.5:9b")
 
 
 @pytest.mark.integration

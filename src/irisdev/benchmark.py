@@ -26,7 +26,7 @@ console = Console()
 
 def generate_test_texts(
     target_word_counts: list[int] | None = None,
-    model: str = "qwen3:1.7b",
+    model: str = "qwen3.5:9b",
 ) -> list[str]:
     """Generate test texts using Ollama LLM."""
     if target_word_counts is None:
@@ -433,7 +433,7 @@ def main(
         list[int],
         typer.Option("--words", help="Target word counts for generated texts"),
     ] = None,
-    llm: Annotated[str, typer.Option(help="Ollama model for text generation")] = "qwen3:1.7b",
+    llm: Annotated[str, typer.Option(help="Ollama model for text generation")] = "qwen3.5:9b",
     voice: Annotated[str, typer.Option(help="Voice to use for TTS")] = "af_bella",
     speed: Annotated[float, typer.Option(help="Speech speed multiplier")] = 1.0,
     onnx_only: Annotated[

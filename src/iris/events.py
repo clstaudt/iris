@@ -50,6 +50,10 @@ Event types:
                   "detail", "size_mb", "state",      walkthrough fetches, in order;
                   "done", "total", "error"}],        state: waiting, downloading,
                   "busy": bool}                      done or failed (with error)
+    llm.pull     {"model": str, "state": str,       a model downloading onto Ollama
+                  "done": int, "total": int,         from the walkthrough, in bytes;
+                  "error": str}                      state: downloading, done or
+                                                     failed (with error)
     mic.check    {"level": float, "heard": bool,     the walkthrough's sound check:
                   "silent": bool}                    level 0.0-1.0, a voice came
                                                      through, only exact zeros

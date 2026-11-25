@@ -70,7 +70,7 @@ Iris runs on macOS. Linux and Windows are not supported yet: [open an issue](htt
 Iris needs a language model server, such as [Ollama](https://ollama.com/download):
 
 ```bash
-ollama pull qwen3:1.7b
+ollama pull qwen3.5:9b
 ```
 
 ### macOS app
