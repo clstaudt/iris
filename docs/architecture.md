@@ -35,11 +35,11 @@ Requests are JSON-RPC 2.0; the core's activity arrives as notifications `{"jsonr
 | Assistant | `assistant.start`, `assistant.stop`, `assistant.interrupt`, `assistant.pause`, `assistant.resume`, `assistant.hold`, `assistant.greet` |
 | Listening and voice | `mic.set`, `audio.list_inputs`, `audio.set_input`, `wake.set`, `wake.options`, `wake.adopt`, `voice.set_output`, `voice.set_barge_in` |
 | Conversation | `chat.send_text`, `chat.history` |
-| Language model | `llm.list`, `llm.set`, `llm.set_host`, `llm.check_hosts`, `llm.probe`, `llm.find_servers` |
+| Language model | `llm.list`, `llm.set`, `llm.set_host`, `llm.check_hosts`, `llm.probe`, `llm.find_servers`, `llm.pull` |
 | Recognition and turn end | `stt.models`, `stt.set`, `turn.set` |
 | Memory | `memory.topics`, `memory.topic`, `memory.forget`, `memory.set_amnesia` |
 | Personas | `persona.list`, `persona.set`, `persona.get`, `persona.voices`, `persona.save`, `persona.words`, `persona.delete`, `persona.preview` |
 | Plugins and engines | `tools.set`, `plugins.list`, `engines.list` |
 | Debugging | `debug.emit`, `debug.inject_audio` |
 
-Events: `config` (the loaded models and settings, with `tools`, `engines` and `plugins`), `state`, `flags`, `audio.level`, `audio.output`, `chat.user`, `chat.chunk`, `chat.done`, `chat.continued`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `setup.models`, `mic.check`, `memory.updated`, `turn.timing`, `notice` and `error`. Their payloads are described in `src/iris/events.py`.
+Events: `config` (the loaded models and settings, with `tools`, `engines` and `plugins`), `state`, `flags`, `audio.level`, `audio.output`, `chat.user`, `chat.chunk`, `chat.done`, `chat.continued`, `tool.use`, `wake`, `wake.window`, `sleep`, `setup.progress`, `setup.models`, `llm.pull`, `mic.check`, `memory.updated`, `turn.timing`, `notice` and `error`. Their payloads are described in `src/iris/events.py`.

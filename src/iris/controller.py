@@ -64,6 +64,9 @@ from iris.tts import (
 
 logger = logging.getLogger(__name__)
 
+# How often a model's download onto Ollama tells its progress, in seconds
+PULL_TELL_EVERY = 0.25
+
 # How long a voice played that is not here yet is waited for, in seconds
 PREVIEW_WAIT = 900.0
 
@@ -191,6 +194,8 @@ class AssistantController:
         self._loop_alive = False
         self._poller: threading.Thread | None = None
         self._start_lock = threading.Lock()
+        # The model the walkthrough is downloading onto an Ollama server, if any
+        self._pulling: str | None = None
         # Whether the assistant's loop runs, and whether it failed again and
         # again and was left stopped; both changed under the start lock
         self._looping = False
@@ -1222,6 +1227,49 @@ class AssistantController:
             "host": host or "",
             "models": ConversationManager.list_available_models(host),
         }
+
+    def pull_model(self, url: str, model: str) -> dict:
+        """Download a model onto an Ollama server, for the walkthrough's
+        Download button. It runs on a thread of its own and tells its
+        progress as llm.pull events: the bytes of all its parts, then done,
+        or failed with the reason."""
+        host = resolve_host(url)
+        if is_openai(host):
+            return {"ok": False, "error": "Only Ollama downloads models"}
+        if not model:
+            return {"ok": False, "error": "No model named"}
+        if self._pulling is not None:
+            return {"ok": False, "error": f"{self._pulling} is downloading"}
+        self._pulling = model
+        threading.Thread(
+            target=self._pull, args=(host, model), name="model-pull", daemon=True
+        ).start()
+        return {"ok": True}
+
+    def _pull(self, host: str | None, model: str):
+        def tell(state: str, **data):
+            self.bus.emit("llm.pull", {"model": model, "state": state, **data})
+
+        # Bytes per part, as Ollama counts them while it downloads each layer
+        totals: dict[str, int] = {}
+        done: dict[str, int] = {}
+        told = 0.0
+        try:
+            tell("downloading", done=0, total=0)
+            for part in ollama_client(host, timeout=None).pull(model, stream=True):
+                if part.digest and part.total:
+                    totals[part.digest] = part.total
+                    done[part.digest] = part.completed or 0
+                now = time.monotonic()
+                if now - told >= PULL_TELL_EVERY:
+                    told = now
+                    tell("downloading", done=sum(done.values()), total=sum(totals.values()))
+            tell("done", done=sum(totals.values()), total=sum(totals.values()))
+        except Exception as e:
+            logger.warning("Could not download %s: %s", model, e)
+            tell("failed", error=brief(e))
+        finally:
+            self._pulling = None
 
     @staticmethod
     def find_servers() -> dict:

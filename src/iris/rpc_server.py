@@ -245,6 +245,9 @@ def main(extra: dict | None = None):
         "llm.check_hosts": lambda params: controller.check_servers(params.get("urls", [])),
         "llm.find_servers": lambda params: controller.find_servers(),
         "llm.probe": lambda params: controller.probe_server(params.get("url", "")),
+        "llm.pull": lambda params: controller.pull_model(
+            params.get("url", ""), params.get("model", "")
+        ),
         "chat.send_text": lambda params: controller.send_text(
             params.get("text", ""), params.get("attachments")
         ),

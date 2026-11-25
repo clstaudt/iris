@@ -15,6 +15,17 @@ export type Step = (typeof STEPS)[number];
 
 /** The model setup offers first, when the server has it: small, and it calls tools */
 export const PREFERRED_MODEL = "qwen3.5:9b";
+/** Where Ollama is downloaded, from the walkthrough's Get Ollama */
+export const OLLAMA_DOWNLOAD = "https://ollama.com/download";
+
+/** A model downloading onto Ollama (the core's llm.pull events) */
+export interface ModelPull {
+  model: string;
+  state: "downloading" | "done" | "failed";
+  done: number;
+  total: number;
+  error?: string;
+}
 /** Plugins the walkthrough does not offer: memory is always on, and going to
  *  sleep comes with the wake word */
 const UNOFFERED_TOOLS = new Set(["memory", "sleep"]);
@@ -126,6 +137,8 @@ class Walkthrough {
    *  an OpenAI-compatible server, the root for Ollama); null for none */
   server = $state<string | null>(null);
   serverModels = $state<LlmModel[]>([]);
+  /** The preferred model downloading onto an Ollama server, from Download */
+  pull = $state<ModelPull | null>(null);
   model = $state("");
   connecting = $state<string | null>(null);
   serverError = $state("");
@@ -276,6 +289,11 @@ class Walkthrough {
       if (type === "setup.models") {
         this.downloads = data.models as SpeechDownload[];
         this.downloading = !!data.busy;
+      } else if (type === "llm.pull") {
+        this.pull = data as unknown as ModelPull;
+        // Downloaded: the server's models are asked for again, and the new
+        // one is chosen, being the preferred model
+        if (this.pull.state === "done" && this.server !== null) this.connect(this.server);
       } else if (type === "mic.check" && this.listening) {
         this.level = (data.level as number) ?? 0;
         if (data.heard) this.heard = true;
@@ -443,6 +461,17 @@ class Walkthrough {
     } finally {
       if (asked === this.asking) this.connecting = null;
     }
+  }
+
+  /** Download the preferred model onto the Ollama server chosen. */
+  async pullModel() {
+    if (this.server === null) return;
+    this.pull = { model: PREFERRED_MODEL, state: "downloading", done: 0, total: 0 };
+    const result = await rpc<{ ok: boolean; error?: string }>("llm.pull", {
+      url: this.server,
+      model: PREFERRED_MODEL,
+    }).catch((err) => ({ ok: false, error: String(err) }));
+    if (!result.ok) this.pull = { model: PREFERRED_MODEL, state: "failed", done: 0, total: 0, error: result.error };
   }
 
   /** A server typed by the user: listed, and asked for its models. */
