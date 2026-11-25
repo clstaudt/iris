@@ -169,13 +169,10 @@ def kokoro_speech(tokenizer, text: str, language: str, code: str) -> dict:
         return {"text": text, "lang": code}
     return {"text": text, "lang": "en-us", "phonemes": tokenizer.phonemize(text, code)}
 
-# Kokoro model download URLs
-KOKORO_MODEL_URL = (
-    "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx"
-)
-KOKORO_VOICES_URL = (
-    "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin"
-)
+# Kokoro's model and voices, as kokoro-onnx, which runs them, releases them
+KOKORO_RELEASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+KOKORO_MODEL_URL = f"{KOKORO_RELEASE}/kokoro-v1.0.onnx"
+KOKORO_VOICES_URL = f"{KOKORO_RELEASE}/voices-v1.0.bin"
 
 # Whisper codes of the languages Kokoro speaks, and the language its phonemes
 # for each are made in (espeak's, misaki's for Mandarin). Kokoro has no

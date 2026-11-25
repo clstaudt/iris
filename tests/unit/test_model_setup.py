@@ -7,6 +7,7 @@ import pytest
 from iris import downloads, transcription, tts
 from iris.controller import AssistantController
 from iris.events import EventBus
+from iris.speech_models import KOKORO_MB
 from iris.transcription import WhisperTranscriber, folder_engine
 from iris.turns import SMART_TURN_FILE
 
@@ -201,7 +202,7 @@ def test_setup_info_says_what_is_already_here(tmp_path, monkeypatch):
     monkeypatch.setattr("iris.controller.find_kokoro_models", lambda: tmp_path)
     info = AssistantController(EventBus()).setup_info()
     assert info["stt"]["cached"] is True and info["stt"]["model"]
-    assert info["tts"] == {"found": str(tmp_path), "size_mb": 335}
+    assert info["tts"] == {"found": str(tmp_path), "size_mb": KOKORO_MB}
     assert info["ollama_url"].startswith("http")
 
 
