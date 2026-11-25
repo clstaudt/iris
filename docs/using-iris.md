@@ -102,11 +102,12 @@ A Kyutai persona can also speak in a voice cloned in the app: under the voices i
 
 ### Settings
 
-Settings (top right) open as a window of their own, in two pages. All choices are remembered between launches.
+Settings (top right) open as a window of their own. All choices are remembered between launches.
 
 - **Pipeline** shows how a turn travels through Iris, as one line from top to bottom: what it hears (microphone, wake word, turn end, recognition), how it thinks (the language model, with the persona, tools and memory it draws on) and how it speaks (the voice and the output). Click a stage to change it in the inspector beside the line: the recognition model, Smart Turn or a silence for the turn end, the model server and model, the tool switches, and so on.
   Beside each timed stage is how long it took in the latest turn (turn end, recognition, the model's first sentence, the voice starting), on one scale, and below the line the time from the end of your speech to Iris's first word. A stage changed since shows no time until the next turn measures it.
 - **Personas** holds who Iris is: each persona's name, personality and voice, with every voice playable before you pick it, and the languages each voice speaks.
+- **About** shows Iris's version, copyright and license, with the license in full.
 
 A **setup** (top of the window) is a named set of choices for how Iris works: the model server and model, the recognition model, the turn end and the tools. Changes go into the setup in use; make a new one to keep the current choices under another name, and switch between setups to compare them.
 

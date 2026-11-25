@@ -3,6 +3,7 @@
   import { tour } from "../../lib/tour.svelte";
   import { walkthrough } from "../../lib/walkthrough.svelte";
   import Icon from "../Icon.svelte";
+  import About from "./About.svelte";
   import Personas from "./Personas.svelte";
   import Pipeline from "./Pipeline.svelte";
   import Roles from "./Roles.svelte";
@@ -17,7 +18,11 @@
     { id: "roles", label: "Roles", icon: "target" },
   ];
 
-  const page = $derived(PAGES.find((p) => p.id === store.settingsPage) ?? PAGES[0]);
+  const ABOUT = { id: "about", label: "About", icon: "info" } as const;
+
+  const page = $derived(
+    [...PAGES, ABOUT].find((p) => p.id === store.settingsPage) ?? PAGES[0]
+  );
 </script>
 
 <div class="flex min-h-0 min-w-0 flex-1 gap-2">
@@ -42,7 +47,15 @@
         {/if}
       </button>
     {/each}
-    <button onclick={() => walkthrough.open(false)} class="nav back mt-auto">
+    <button
+      onclick={() => store.openSettings(ABOUT.id)}
+      aria-current={store.settingsPage === ABOUT.id ? "page" : undefined}
+      class="nav back mt-auto {store.settingsPage === ABOUT.id ? 'active' : ''}"
+    >
+      <Icon name={ABOUT.icon} size={13} />
+      {ABOUT.label}
+    </button>
+    <button onclick={() => walkthrough.open(false)} class="nav back">
       <Icon name="play" size={13} />
       Set up
     </button>
@@ -70,6 +83,8 @@
         <Voices />
       {:else if page.id === "roles"}
         <Roles />
+      {:else if page.id === "about"}
+        <About />
       {:else}
         <Personas />
       {/if}

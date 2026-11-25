@@ -48,6 +48,8 @@ const REPO = path.resolve(UI, "..");
 const DIST = path.join(UI, "dist");
 const OUT = path.join(UI, "e2e", "output");
 const WAKE_WORD = "Zanzibar";
+// The version and copyright the About page shows
+const PACKAGE = JSON.parse(fs.readFileSync(path.join(UI, "package.json"), "utf8"));
 
 if (!fs.existsSync(path.join(DIST, "index.html"))) {
   console.error("ui/dist is missing: run `npm run build` first");
@@ -1143,6 +1145,19 @@ try {
     }
     await inspector.locator('button[title="Close"]').click();
     await until("the inspector to close", async () => !(await inspector.count()));
+  });
+
+  await step("about: the version, copyright and license are shown, and the license opens in full", async () => {
+    await openSettings("About");
+    const about = page.locator('[data-page="about"]');
+    await about.getByText(`Version ${PACKAGE.version}`, { exact: true }).waitFor({ timeout: 5000 });
+    await about.getByText(PACKAGE.build.copyright, { exact: true }).waitFor();
+    await about.getByText("It comes without any warranty.", { exact: false }).waitFor();
+    check(!(await about.locator("pre.license").count()), "the license shows before it is asked for");
+    await about.getByRole("button", { name: "License", exact: true }).click();
+    await about.locator("pre.license", { hasText: "GNU AFFERO GENERAL PUBLIC LICENSE" }).waitFor({ timeout: 5000 });
+    check((await about.locator("pre.license").innerText()).includes("END OF TERMS AND CONDITIONS"), "the license is not shown in full");
+    await openSettings("Pipeline");
   });
 
   await step("language model: the server's models are listed and one is chosen", async () => {
