@@ -92,8 +92,10 @@ def test_a_start_that_fails_is_reported_and_iris_can_be_started_again(monkeypatc
     assert controller.start({})["ok"]
     assert _wait_for(lambda: seen.of("error"))
     assert seen.of("error") == [{"message": "Failed to start assistant: cannot open the memory database"}]
+    # Iris stops running, then says it is idle once the state's poller has
+    # stopped, which takes a moment on a slow machine
     assert _wait_for(lambda: not controller.info()["running"])
-    assert seen.of("state")[-1] == {"state": "idle"}
+    assert _wait_for(lambda: seen.of("state")[-1:] == [{"state": "idle"}])
 
     # Nothing is left half started: starting again works. Its thread runs
     # at once; the assistant is built, and its loop runs, a moment later
