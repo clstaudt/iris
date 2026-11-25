@@ -72,6 +72,8 @@ On first launch, a walkthrough finds your model servers and downloads the speech
 
 ## Install
 
+Iris runs on macOS. Linux and Windows are not supported yet: [open an issue](https://github.com/clstaudt/iris/issues/new) to ask for them.
+
 Iris needs a language model server, such as [Ollama](https://ollama.com/download):
 
 ```bash
@@ -101,7 +103,7 @@ A Python core (`src/iris`) listens, thinks and speaks; an Electron and Svelte ap
 
 | Part | Default |
 | --- | --- |
-| Speech recognition | Whisper (MLX on Apple Silicon, faster-whisper elsewhere) |
+| Speech recognition | Whisper, through MLX or faster-whisper |
 | Turn end | Silero VAD and Smart Turn v3, or a fixed silence |
 | Language model | Ollama or any OpenAI-compatible server |
 | Voice | Kyutai's Pocket TTS or Kokoro, per persona |
