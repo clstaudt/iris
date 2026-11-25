@@ -45,11 +45,11 @@ export IRIS_MODELS_DIR=/path/to/your/models
 
 ## Where to Get the Models
 
-The Kokoro TTS models are available from the [kokoro-tts releases](https://github.com/nazdridoy/kokoro-tts/releases).
+The Kokoro TTS models are available from the [kokoro-onnx releases](https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0).
 
 Download links:
-- Model: https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx
-- Voices: https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin
+- Model: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+- Voices: https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 
 You can download them with:
 ```bash
@@ -57,8 +57,8 @@ You can download them with:
 mkdir -p ~/.iris/models
 
 # Download the models
-wget -O ~/.iris/models/kokoro-v1.0.onnx https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx
-wget -O ~/.iris/models/voices-v1.0.bin https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin
+wget -O ~/.iris/models/kokoro-v1.0.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+wget -O ~/.iris/models/voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 ```
 
 ## Verify Installation

@@ -37,7 +37,7 @@ WHISPER_MB = {
     "large-v3": 3100,
     "large-v3-turbo": 1600,
 }
-KOKORO_MB = 335
+KOKORO_MB = 337
 KYUTAI_MB = 220
 KYUTAI_VOICE_MB = 6
 TURN_MB = 9
