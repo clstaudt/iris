@@ -1522,7 +1522,6 @@ try {
     await page.locator('.clone[data-step="sample"]').waitFor({ timeout: 30_000 });
     check(events.some((e) => e.at >= since && e.type === "clone.progress" && e.data.done === e.data.total),
       "the download showed no progress");
-    await page.getByText("Only clone a voice you have permission to use.").waitFor();
     // A sample from a file is prepared, with its length: nothing is cloned yet
     const sample = speechSample();
     const file = { name: "sample.wav", mimeType: "audio/wav", buffer: sample };

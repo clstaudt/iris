@@ -481,7 +481,6 @@
             onchange={chosen}
           />
         </div>
-        <p class="line">Only clone a voice you have permission to use.</p>
       {:else if step === "recording"}
         <p class="script">{SCRIPT}</p>
         <div class="flex items-center gap-3">
