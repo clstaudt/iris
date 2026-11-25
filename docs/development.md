@@ -1,6 +1,7 @@
 # Development
 
 ```bash
+just dev                       # the app in development mode (cd ui && npm run dev)
 uv run pytest                  # unit tests
 uv run pytest -m integration   # integration tests, which need Ollama, Kokoro and Whisper
 ```
