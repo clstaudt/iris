@@ -32,6 +32,11 @@ echo "== UI"
 cd "$ROOT/ui"
 npm run build
 
+echo "== Third-party notices"
+# The licenses of what others made in the app, from the core's build
+# environment and the ui's bundle, beside the app's own LICENSE
+"$ROOT/packaging/.venv/bin/python" -I "$ROOT/packaging/notices.py"
+
 echo "== App and disk image"
 signing=()
 if [ -z "${CSC_LINK:-}" ] && { [ "${CSC_IDENTITY_AUTO_DISCOVERY:-true}" = "false" ] ||
