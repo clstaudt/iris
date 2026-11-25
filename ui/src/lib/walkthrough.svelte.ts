@@ -14,7 +14,7 @@ export const STEPS = ["welcome", "server", "models", "microphone", "voice", "ext
 export type Step = (typeof STEPS)[number];
 
 /** The model setup offers first, when the server has it: small, and it calls tools */
-export const PREFERRED_MODEL = "qwen3:1.7b";
+export const PREFERRED_MODEL = "qwen3.5:9b";
 /** Plugins the walkthrough does not offer: memory is always on, and going to
  *  sleep comes with the wake word */
 const UNOFFERED_TOOLS = new Set(["memory", "sleep"]);

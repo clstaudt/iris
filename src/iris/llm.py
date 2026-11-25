@@ -256,7 +256,7 @@ class ConversationManager:
 
     def __init__(
         self,
-        model: str = "qwen3:1.7b",
+        model: str = "qwen3.5:9b",
         persona: Optional[Persona] = None,
         tools=None,
         vision_model: Optional[str] = None,

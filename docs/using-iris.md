@@ -2,10 +2,10 @@
 
 ## Getting Iris
 
-Iris needs a language model server in any case. The simplest is [Ollama](https://ollama.com) on the same computer, with a small model:
+Iris needs a language model server in any case. The simplest is [Ollama](https://ollama.com) on the same computer, with a model of about 7 GB that sees and calls tools:
 
 ```bash
-ollama pull qwen3:1.7b
+ollama pull qwen3.5:9b
 ```
 
 Install Ollama from [ollama.com/download](https://ollama.com/download) (on macOS also `brew install ollama && brew services start ollama`, on Linux `curl -fsSL https://ollama.com/install.sh | sh`). A server on another computer works too, Ollama or OpenAI-compatible: the walkthrough asks for its address.
@@ -35,7 +35,7 @@ npm run dev             # starts Vite, Electron and the Python core
 
 The first time it opens, Iris walks you through getting ready, a step at a time; nothing starts before the last one, and every step has a default, so Continue all the way works:
 
-1. **Language model.** Conversations need a large language model. The walkthrough looks for Ollama on this computer and for OpenAI-compatible servers at their usual ports here (LM Studio, llama.cpp, vLLM, Jan), shows which answer, and takes any server you type. It offers the server's models, preferring `qwen3:1.7b`, then one that calls tools. Without a server it says what to install.
+1. **Language model.** Conversations need a large language model. The walkthrough looks for Ollama on this computer and for OpenAI-compatible servers at their usual ports here (LM Studio, llama.cpp, vLLM, Jan), shows which answer, and takes any server you type. It offers the server's models, preferring `qwen3.5:9b`, then one that calls tools. Without a server it says what to install.
 2. **Speech models.** They download in the background from here on, the voices first (Kyutai's Pocket TTS with the personas' voices, Kokoro), then Smart Turn and Whisper, about 2 GB together; models already downloaded are reused. Each shows its progress in bytes, and a failed one can be tried again. Folders you already have can be used instead.
 3. **Microphone.** The walkthrough asks for the microphone (on macOS, the system's prompt), then shows its level and says when it hears your voice.
 4. **Voice.** The persona you talk to, Iris unless you made others; its voice can be played as soon as its engine is downloaded.

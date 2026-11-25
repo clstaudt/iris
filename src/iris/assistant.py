@@ -333,7 +333,7 @@ class VoiceAssistant:
         whisper_device: str = "auto",
         whisper_engine: str = "auto",
         recognition_engine: str = "whisper",
-        llm_model: str = "qwen3:1.7b",
+        llm_model: str = "qwen3.5:9b",
         sample_rate: int = 16000,
         silence_threshold: float = 0.015,
         silence_duration: float = 3.5,

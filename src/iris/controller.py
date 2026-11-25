@@ -1404,7 +1404,7 @@ class AssistantController:
         else:
             message = (
                 f"Can't reach Ollama at {url}. Install it from ollama.com and start "
-                f"it, then download a model, e.g.: ollama pull qwen3:1.7b. Or set "
+                f"it, then download a model, e.g.: ollama pull qwen3.5:9b. Or set "
                 f"another server in Settings."
             )
         self.bus.emit(
