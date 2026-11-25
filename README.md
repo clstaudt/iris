@@ -120,6 +120,6 @@ Iris builds on [Whisper](https://github.com/openai/whisper), [MLX Whisper](https
 
 ## License
 
-Copyright (C) 2025–2026 Christian Staudt. Iris is free software, licensed under the [GNU Affero General Public License](LICENSE), version 3 or later.
+Copyright (C) 2025–2026 Christian Staudt and contributors. Iris is free software, licensed under the [GNU Affero General Public License](LICENSE), version 3 or later.
 
 Contributions are welcome, under the [Contributor License Agreement](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
