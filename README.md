@@ -5,7 +5,7 @@
 <h3 align="center">A modular voice and vision assistant for your desktop</h3>
 
 <p align="center">
-  Talk with it like a person. It sees through your camera and screen, and every part of it can be swapped.
+  Talk with it in your own language. Customize every part, from its voice and personality to the models behind it.
 </p>
 
 <p align="center">
