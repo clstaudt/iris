@@ -5,11 +5,12 @@ cd ui
 npm run dist:mac        # -> ui/release/Iris-<version>-macOS-arm64.dmg
 ```
 
-`ui/scripts/package-mac.sh` does three things:
+`ui/scripts/package-mac.sh` does four things:
 
 1. It freezes the Python core with PyInstaller (`packaging/iris-rpc.spec`) into a standalone `iris-rpc` folder. The core's own Python, from a separate build environment in `packaging/.venv`, comes along, so the recipient needs no Python. `iris-rpc --check` then imports every engine inside the bundle (speech recognition on MLX and on the CPU, voice activity detection, turn detection, echo cancellation, Pocket TTS and Kokoro, the voice itself, OpenAI-compatible model servers, web search, web pages, camera, screen capture, audio devices) and stops the build if one is missing.
 2. It builds the UI.
-3. It runs electron-builder, which puts the core into the app's `Resources`, signs the app under the hardened runtime (`ui/build/entitlements.mac.plist`) and writes the `.dmg`.
+3. It writes the third-party notices (`packaging/notices.py`): every piece of software others made that the app ships, with its license and the license texts it comes with. That is Python and every package of the core's build environment, the libraries those packages carry without their license text (espeak-ng, FFmpeg), Electron, and the packages from `node_modules` that the UI's bundle holds, which the UI's build lists in `dist/bundled-packages.json`. The app keeps them in its `Resources` as `THIRD_PARTY_NOTICES.txt`, beside its own `LICENSE` and Chromium's `LICENSES.chromium.html`.
+4. It runs electron-builder, which puts the core into the app's `Resources`, signs the app under the hardened runtime (`ui/build/entitlements.mac.plist`) and writes the `.dmg`.
 
 What is not in the app: the speech models, which are downloaded at first launch (or taken from folders the recipient points to), and the language model server.
 
