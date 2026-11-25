@@ -9,9 +9,9 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 5173,
     strictPort: true,
-    // The settings' About page shows the license, kept at the top of the
-    // repository
-    fs: { allow: [searchForWorkspaceRoot(process.cwd()), "../LICENSE"] },
+    // The settings' About page shows the license and the notices, kept at
+    // the top of the repository
+    fs: { allow: [searchForWorkspaceRoot(process.cwd()), "../LICENSE", "../NOTICES.md"] },
     // Main-process sources are bundled by esbuild; a change there must not
     // reload the renderer and wipe the open conversation
     watch: { ignored: ["**/electron/**", "**/dist-electron/**"] },

@@ -1147,7 +1147,7 @@ try {
     await until("the inspector to close", async () => !(await inspector.count()));
   });
 
-  await step("about: the version, copyright and license are shown, and the license opens in full", async () => {
+  await step("about: the version, copyright and license are shown, the license opens in full, and so do the notices", async () => {
     await openSettings("About");
     const about = page.locator('[data-page="about"]');
     await about.getByText(`Version ${PACKAGE.version}`, { exact: true }).waitFor({ timeout: 5000 });
@@ -1157,6 +1157,16 @@ try {
     await about.getByRole("button", { name: "License", exact: true }).click();
     await about.locator("pre.license", { hasText: "GNU AFFERO GENERAL PUBLIC LICENSE" }).waitFor({ timeout: 5000 });
     check((await about.locator("pre.license").innerText()).includes("END OF TERMS AND CONDITIONS"), "the license is not shown in full");
+    // The notices take its place: the makers and licenses of the models and voices
+    await about.getByRole("button", { name: "Notices", exact: true }).click();
+    const notices = about.locator(".notices");
+    await notices.locator("td", { hasText: "Eve" }).first().waitFor({ timeout: 5000 });
+    check(!(await about.locator("pre.license").count()), "the license stays beside the notices");
+    const text = await notices.innerText();
+    for (const credit of ["CSTR VCTK Corpus", "Kyutai", "CC BY-NC 4.0", "Whisper", "Kokoro"]) {
+      check(text.includes(credit), `the notices do not name ${credit}`);
+    }
+    check(await notices.locator('a[href^="https://"][target="_blank"]').count(), "the notices' links stay in the window");
     await openSettings("Pipeline");
   });
 
